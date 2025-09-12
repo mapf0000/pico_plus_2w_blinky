@@ -4,8 +4,7 @@ name = "pico_rust"
 version = "0.1.0"
 license = "MIT OR Apache-2.0"
 
-[target.'cfg(all(target_arch = "arm", target_os = "none"))']
-runner = "picotool load -u -v -x -t elf"
+
 
 [dependencies]
 cortex-m = "0.7"
@@ -46,6 +45,10 @@ panic-probe = { version = "1", features = ["print-defmt"] }
 
 static_cell = "2.1.0"
 log = "0.4"
+embassy-sync = "0.7"
+embassy-futures = "0.1"
+heapless = "0.9"
+portable-atomic = { version = "1", features = ["critical-section"] }
 
 cyw43 = { version = "0.5", features = [
     "defmt",
@@ -54,3 +57,8 @@ cyw43 = { version = "0.5", features = [
 cyw43-pio = { version = "0.8", features = [
     "defmt",
 ] }
+
+[[test]]
+name = "on_device"
+path = "tests/on_device.rs"
+harness = false

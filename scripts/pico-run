@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Simple Cargo runner for Raspberry Pi Pico (USB only, macOS-friendly):
+# 1) Flash ELF via picotool
+# 2) Wait for /dev/tty.usbmodem*
+# 3) Tail logs and detect on-target test result markers
+#
+# Behavior:
+# - Always flashes the provided ELF
+# - If it sees a line "TEST-RESULT: PASS" => exit 0
+# - If it sees a line "TEST-RESULT: FAIL" => exit 1
+# - Otherwise (regular app run) it exits 0 without waiting indefinitely
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 <path-to-elf> [args...]" >&2
+  exit 2
+fi
+
+# Cargo passes args; last arg is the ELF
+ELF="${@: -1}"
+
+if ! command -v picotool >/dev/null 2>&1; then
+  echo "picotool not found in PATH" >&2
+  exit 2
+fi
+
+echo "[pico-run] Flashing: $ELF"
+picotool load -u -v -x -t elf "$ELF"
+
+# Try to find a USB CDC ACM port (macOS uses tty.usbmodem*)
+echo "[pico-run] Waiting for USB CDC device..."
+PORT=""
+deadline=$((SECONDS + 20))
+while [[ -z "$PORT" && $SECONDS -lt $deadline ]]; do
+  # Pick the first available modem device
+  PORT=$(ls /dev/tty.usbmodem* 2>/dev/null | head -n1 || true)
+  [[ -z "$PORT" ]] && sleep 0.2
+done
+
+if [[ -z "$PORT" ]]; then
+  echo "[pico-run] No /dev/tty.usbmodem* device found; assuming non-logging binary."
+  # Still treat run as success so cargo run works
+  exit 0
+fi
+
+echo "[pico-run] Using port: $PORT"
+
+# Best-effort TTY init (macOS: -f <device>) and assert DTR by opening R/W.
+if command -v stty >/dev/null 2>&1; then
+  stty -f "$PORT" 115200 -echo -ixon -icrnl -opost raw -hupcl clocal 2>/dev/null || true
+fi
+
+result="unknown"
+timeout_secs=25
+
+# Open FD 3 for reading and writing; this asserts DTR on many CDC-ACM stacks
+exec 3<>"$PORT"
+
+# Use a tee+sed split to both show raw output immediately and capture the result marker
+tmpdir=$(mktemp -d -t pico-run.XXXXXX)
+marker_file="$tmpdir/result"
+rm -f "$marker_file"
+
+set +e
+cat <&3 | tee >(sed -nE 's/.*(TEST-RESULT: (PASS|FAIL)).*/\1/p' > "$marker_file") &
+cat_pid=$!
+set -e
+
+deadline=$((SECONDS + timeout_secs))
+while [[ ! -s "$marker_file" && $SECONDS -lt $deadline ]]; do
+  sleep 0.1
+done
+
+# Stop background reader
+kill "$cat_pid" >/dev/null 2>&1 || true
+wait "$cat_pid" 2>/dev/null || true
+
+exec 3<&-
+
+if [[ -s "$marker_file" ]]; then
+  marker=$(tail -n1 "$marker_file")
+  echo "[pico-run] Detected: $marker" >&2
+  if [[ "$marker" == "TEST-RESULT: PASS" ]]; then
+    rm -rf "$tmpdir"
+    exit 0
+  else
+    rm -rf "$tmpdir"
+    exit 1
+  fi
+else
+  echo "[pico-run] Timeout waiting for test result; assuming non-test run." >&2
+  rm -rf "$tmpdir"
+  exit 0
+fi

@@ -1,0 +1,108 @@
+use core::{fmt::Write as _, str};
+
+use embassy_net::{self as net, tcp::TcpSocket};
+use embassy_time::Duration;
+use heapless::String;
+// No need to import embedded-io traits; use inherent read/write.
+
+use crate::temp::{self, Shared};
+
+const SERVER_PORT: u16 = 80;
+
+#[embassy_executor::task]
+pub async fn server_task(
+    stack: &'static net::Stack<'static>,
+    shared: &'static Shared,
+){
+    loop {
+        let mut rx_buf = [0u8; 1024];
+        let mut tx_buf = [0u8; 1024];
+        let mut socket = TcpSocket::new(*stack, &mut rx_buf, &mut tx_buf);
+        socket.set_timeout(Some(Duration::from_secs(5)));
+
+        if let Err(e) = socket.accept(SERVER_PORT).await {
+            log::warn!("http: accept error: {:?}", e);
+            continue;
+        }
+
+        // Process single request per connection; then close.
+        if let Err(e) = handle_connection(&mut socket, shared).await {
+            log::debug!("http: handle error: {:?}", e);
+        }
+    }
+}
+
+async fn handle_connection(
+    socket: &mut TcpSocket<'_>,
+    shared: &'static Shared,
+) -> Result<(), net::tcp::Error> {
+    let mut buf = [0u8; 512];
+    let n = socket.read(&mut buf).await?;
+    let req = &buf[..n];
+    let path = parse_path(req).unwrap_or("/");
+
+    match path {
+        "/temp" => respond_json(socket, shared).await?,
+        "/metrics" => respond_metrics(socket, shared).await?,
+        _ => respond_not_found(socket).await?,
+    }
+
+    Ok(())
+}
+
+fn parse_path(req: &[u8]) -> Option<&str> {
+    // Very small parser: "GET /path HTTP/1.1\r\n..."
+    let s = str::from_utf8(req).ok()?;
+    let mut lines = s.split('\n');
+    let line = lines.next()?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?;
+    if method != "GET" { return None; }
+    parts.next()
+}
+
+async fn respond_json(socket: &mut TcpSocket<'_>, shared: &Shared) -> Result<(), net::tcp::Error> {
+    let reading = shared.get().await;
+
+    let mut body: String<128> = String::new();
+    temp::write_json(&mut body, reading);
+
+    let mut headers: String<128> = String::new();
+    let _ = write!(
+        &mut headers,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    socket.write(headers.as_bytes()).await?;
+    socket.write(body.as_bytes()).await?;
+    Ok(())
+}
+
+async fn respond_metrics(socket: &mut TcpSocket<'_>, shared: &Shared) -> Result<(), net::tcp::Error> {
+    let r = shared.get().await;
+    let mut body: String<160> = String::new();
+    let _ = write!(&mut body, "pico_temperature_celsius {:.2}\n", r.celsius);
+
+    let mut headers: String<128> = String::new();
+    let _ = write!(
+        &mut headers,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    socket.write(headers.as_bytes()).await?;
+    socket.write(body.as_bytes()).await?;
+    Ok(())
+}
+
+async fn respond_not_found(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::Error> {
+    let body = b"{\"error\":\"not found\"}";
+    let mut headers: String<128> = String::new();
+    let _ = write!(
+        &mut headers,
+        "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    socket.write(headers.as_bytes()).await?;
+    socket.write(body).await?;
+    Ok(())
+}

@@ -19,6 +19,8 @@ bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<USB>;
     // PIO interrupt for CYW43 PIO-SPI
     PIO0_IRQ_0  => embassy_rp::pio::InterruptHandler<PIO0>;
+    // ADC interrupt (used by ADC driver)
+    ADC_IRQ_FIFO => embassy_rp::adc::InterruptHandler;
 });
 
 /// USB logger task (sets global logger and runs forever)
@@ -83,7 +85,9 @@ async fn main(spawner: Spawner) {
     let seed = rng.next_u64();
 
     let cfg = Config::dhcpv4(Default::default());
-    let (stack, net_runner) = net::new(net_device, cfg, NET_RES.init(StackResources::new()), seed);
+    let (stack_val, net_runner) = net::new(net_device, cfg, NET_RES.init(StackResources::new()), seed);
+    static NET_STACK: StaticCell<net::Stack<'static>> = StaticCell::new();
+    let stack = NET_STACK.init(stack_val);
     spawner.spawn(net_task(net_runner)).unwrap();
 
     // --- Join your WLAN ---
@@ -108,5 +112,22 @@ async fn main(spawner: Spawner) {
     stack.wait_config_up().await;
     log::info!("Network is up: {:?}", stack.config_v4());
 
-    // ...use sockets via `stack` (TCP/UDP/DNS). Your app logic goes here...
+    // --- Temperature sampling + HTTP exposure ---
+    // Shared state for latest temperature reading
+    static SHARED_CELL: StaticCell<temp::Shared> = StaticCell::new();
+    let shared = SHARED_CELL.init(temp::Shared::new());
+
+    // Create ADC sampling task
+    spawner
+        .spawn(temp::sampling_task(p.ADC, p.ADC_TEMP_SENSOR, shared))
+        .unwrap();
+
+    // Spawn a tiny HTTP server exposing /temp and /metrics
+    spawner.spawn(http::server_task(stack, shared)).unwrap();
+
+    // Main can park; tasks run forever.
+    core::future::pending::<()>().await;
 }
+
+mod temp;
+mod http;
