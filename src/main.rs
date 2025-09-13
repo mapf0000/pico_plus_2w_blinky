@@ -10,6 +10,11 @@ use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::pio::Pio;
 use embassy_rp::usb::Driver as UsbDriver;
+use embassy_usb::{Builder as UsbBuilder, Config as UsbConfig};
+use embassy_usb::class::cdc_acm::{CdcAcmClass as UsbCdcAcmClass, State as UsbCdcState};
+use embassy_usb::class::hid::{HidWriter as UsbHidWriter, State as UsbHidState};
+use embassy_futures::join::{join3};
+use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 use embassy_time::Timer;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
@@ -23,11 +28,78 @@ bind_interrupts!(struct Irqs {
     ADC_IRQ_FIFO => embassy_rp::adc::InterruptHandler;
 });
 
-/// USB logger task (sets global logger and runs forever)
+/// USB task: composite device with CDC logger + HID keyboard
 #[embassy_executor::task]
-async fn usb_logger_task(driver: UsbDriver<'static, USB>) {
-    // 1024-byte buffer, log level = Info.
-    embassy_usb_logger::run!(1024, log::LevelFilter::Info, driver);
+async fn usb_task(driver: UsbDriver<'static, USB>) {
+    // --- Device configuration ---
+    // Force macOS to show Keyboard Setup Assistant on every boot by presenting
+    // a different Product ID and random serial number. Disable by setting the
+    // constant to false.
+    const FORCE_ASSISTANT_EACH_BOOT: bool = true;
+    let mut rng = RoscRng;
+    let pid = if FORCE_ASSISTANT_EACH_BOOT {
+        if (rng.next_u32() & 1) == 0 { 0x0001 } else { 0x0002 }
+    } else {
+        0x0001
+    };
+    let mut cfg = UsbConfig::new(0x1209, pid); // pid.codes style VID/PID (dummy)
+    cfg.manufacturer = Some("Pico 2W");
+    cfg.product = Some("Logger + Keyboard");
+    if FORCE_ASSISTANT_EACH_BOOT {
+        use core::fmt::Write as _;
+        static SN: StaticCell<heapless::String<16>> = StaticCell::new();
+        let s = SN.init(heapless::String::new());
+        let r = rng.next_u32();
+        let _ = write!(s, "{:08X}", r);
+        cfg.serial_number = Some(s.as_str());
+    } else {
+        cfg.serial_number = None;
+    }
+    cfg.max_power = 100;
+    cfg.max_packet_size_0 = 64;
+
+    // Descriptor and control buffers
+    let mut config_descriptor = [0u8; 256];
+    let mut bos_descriptor = [0u8; 256];
+    let mut msos_descriptor = [0u8; 256];
+    let mut control_buf = [0u8; 64];
+
+    // Class states
+    let mut cdc_state = UsbCdcState::new();
+    let mut hid_state = UsbHidState::new();
+
+    // Build USB device + classes
+    let mut builder = UsbBuilder::new(
+        driver,
+        cfg,
+        &mut config_descriptor,
+        &mut bos_descriptor,
+        &mut msos_descriptor,
+        &mut control_buf,
+    );
+
+    // CDC-ACM class used by embassy-usb-logger
+    let logger_class = UsbCdcAcmClass::new(&mut builder, &mut cdc_state, embassy_usb_logger::MAX_PACKET_SIZE as u16);
+
+    // HID keyboard (IN only)
+    let hid_cfg = embassy_usb::class::hid::Config {
+        report_descriptor: KeyboardReport::desc(),
+        request_handler: None,
+        poll_ms: 10,
+        max_packet_size: 64,
+    };
+    let hid_writer: UsbHidWriter<'_, _, 8> = UsbHidWriter::new(&mut builder, &mut hid_state, hid_cfg);
+
+    // Finalize device
+    let mut usb = builder.build();
+
+    // Futures
+    let usb_fut = usb.run();
+    let log_fut = embassy_usb_logger::with_class!(1024, log::LevelFilter::Info, logger_class);
+    let hid_fut = crate::keyboard::run_mac_assistant(hid_writer);
+
+    // Run device, logger and HID concurrently.
+    join3(usb_fut, log_fut, hid_fut).await;
 }
 
 /// Drives low-level CYW43 events
@@ -48,11 +120,10 @@ async fn net_task(mut runner: net::Runner<'static, cyw43::NetDriver<'static>>) -
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
-    // Start USB logging first so we see everything else.
+    // Start composite USB (logger + HID keyboard) first so we see everything else.
     let usb_driver = UsbDriver::new(p.USB, Irqs);
-    spawner.spawn(usb_logger_task(usb_driver)).unwrap();
-    // From here on, logs should be visible over USB.
-    log::info!("usb: logger task spawned");
+    spawner.spawn(usb_task(usb_driver)).unwrap();
+    log::info!("usb: composite (logger + keyboard) task spawned");
 
     let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
@@ -150,3 +221,4 @@ async fn main(spawner: Spawner) {
 
 mod http;
 mod temp;
+mod keyboard;
