@@ -1,16 +1,18 @@
-# pico_rust – Pico W temp sensor
+# pico_rust – Pico W USB‑on‑demand AP
 
-This firmware connects the Raspberry Pi Pico W to Wi‑Fi (CYW43 via PIO-SPI), periodically samples the RP2040’s internal temperature sensor, and exposes it over HTTP.
+This firmware brings up the Raspberry Pi Pico W as a WPA2 Access Point (CYW43 via PIO‑SPI) with a tiny HTTP server. It only enumerates as a USB device when it receives a specific HTTP POST request.
 
 Endpoints
-- `GET /temp`: JSON with fields `c`, `f`, `uptime_ms`, `valid`.
-- `GET /metrics`: Prometheus text with `pico_temperature_celsius`.
+- `GET /`: Health check, returns `OK`.
+- `POST /usb/register`: Triggers USB composite (CDC logger + HID keyboard) to start.
 
-Notes
-- The RP2040 internal sensor is not factory‑calibrated and is mainly suited for relative temperature changes. You can adjust the constants in `src/temp.rs` if you calibrate per device.
-- Sampling runs at 1 Hz with a small EMA filter to reduce noise.
+Wi‑Fi
+- AP SSID: `PicoEndpoint`
+- AP passphrase: `pico12345`
+- Static IP: `192.168.4.1/24`
 
 Quick test
-1. Build and flash as usual (USB logger is enabled).
-2. After DHCP, note the IP in logs.
-3. `curl http://<device-ip>/temp`
+1. Build and flash as usual.
+2. Connect a phone/laptop to the `PicoEndpoint` Wi‑Fi using password `pico12345`.
+3. `curl -X POST http://192.168.4.1/usb/register`
+4. Plug into a host via USB; the device will now enumerate (composite CDC + HID).

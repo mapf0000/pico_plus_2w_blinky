@@ -4,14 +4,13 @@ use embassy_net::{self as net, tcp::TcpSocket};
 use embassy_time::Duration;
 use heapless::String;
 
-use crate::temp::{self, Shared};
+use crate::{USB_ENABLED, USB_START};
 
 const SERVER_PORT: u16 = 80;
 
 #[embassy_executor::task]
 pub async fn server_task(
     stack: &'static net::Stack<'static>,
-    shared: &'static Shared,
 ){
     log::info!("http: listening on port {}", SERVER_PORT);
     loop {
@@ -27,7 +26,7 @@ pub async fn server_task(
         log::info!("http: accepted connection");
 
         // Process single request per connection; then close.
-        if let Err(e) = handle_connection(&mut socket, shared).await {
+        if let Err(e) = handle_connection(&mut socket).await {
             log::debug!("http: handle error: {:?}", e);
         }
     }
@@ -35,88 +34,57 @@ pub async fn server_task(
 
 async fn handle_connection(
     socket: &mut TcpSocket<'_>,
-    shared: &'static Shared,
 ) -> Result<(), net::tcp::Error> {
     let mut buf = [0u8; 512];
     let n = socket.read(&mut buf).await?;
     let req = &buf[..n];
-    let path = parse_path(req).unwrap_or("/");
-    log::info!("http: request path '{}' ({} bytes)", path, n);
+    let (method, path) = parse_method_path(req).unwrap_or(("GET", "/"));
+    log::info!("http: {} '{}' ({} bytes)", method, path, n);
 
-    match path {
-        "/temp" => {
-            log::info!("http: responding 200 JSON");
-            respond_json(socket, shared).await?
+    match (method, path) {
+        ("POST", "/usb/register") => {
+            if USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst) {
+                respond_text(socket, 409, "USB already enabled\n").await?
+            } else {
+                USB_START.signal(());
+                respond_text(socket, 200, "USB enabling\n").await?
+            }
         }
-        "/metrics" => {
-            log::info!("http: responding 200 metrics");
-            respond_metrics(socket, shared).await?
+        ("GET", "/") => {
+            let body = b"OK\n";
+            respond_bytes(socket, 200, "text/plain", body).await?
         }
         _ => {
-            log::info!("http: responding 404 for '{}'", path);
-            respond_not_found(socket, path).await?
+            respond_text(socket, 404, "not found\n").await?
         }
     }
 
     Ok(())
 }
 
-fn parse_path(req: &[u8]) -> Option<&str> {
-    // Very small parser: "GET /path HTTP/1.1\r\n..."
+fn parse_method_path(req: &[u8]) -> Option<(&str, &str)> {
+    // Very small parser: "METHOD /path HTTP/1.1\r\n..."
     let s = str::from_utf8(req).ok()?;
     let mut lines = s.split('\n');
     let line = lines.next()?;
     let mut parts = line.split_whitespace();
     let method = parts.next()?;
-    if method != "GET" { return None; }
-    parts.next()
+    let path = parts.next()?;
+    Some((method, path))
 }
 
-async fn respond_json(socket: &mut TcpSocket<'_>, shared: &Shared) -> Result<(), net::tcp::Error> {
-    let reading = shared.get().await;
-
-    let mut body: String<128> = String::new();
-    temp::write_json(&mut body, reading);
-
-    let mut headers: String<128> = String::new();
-    let _ = write!(
-        &mut headers,
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    write_all(socket, headers.as_bytes()).await?;
-    write_all(socket, body.as_bytes()).await?;
-    // Gracefully close so clients don't see a TCP RST
-    socket.close();
-    // Optionally wait for peer to ack/close; ignore outcome (bounded by timeout)
-    let _ = socket.read(&mut [0u8; 1]).await;
-    Ok(())
+async fn respond_text(socket: &mut TcpSocket<'_>, code: u16, body: &str) -> Result<(), net::tcp::Error> {
+    respond_bytes(socket, code, "text/plain", body.as_bytes()).await
 }
 
-async fn respond_metrics(socket: &mut TcpSocket<'_>, shared: &Shared) -> Result<(), net::tcp::Error> {
-    let r = shared.get().await;
-    let mut body: String<160> = String::new();
-    let _ = write!(&mut body, "pico_temperature_celsius {:.2}\n", r.celsius);
-
-    let mut headers: String<128> = String::new();
+async fn respond_bytes(socket: &mut TcpSocket<'_>, code: u16, content_type: &str, body: &[u8]) -> Result<(), net::tcp::Error> {
+    let mut headers: String<160> = String::new();
     let _ = write!(
         &mut headers,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    write_all(socket, headers.as_bytes()).await?;
-    write_all(socket, body.as_bytes()).await?;
-    socket.close();
-    let _ = socket.read(&mut [0u8; 1]).await;
-    Ok(())
-}
-
-async fn respond_not_found(socket: &mut TcpSocket<'_>, _path: &str) -> Result<(), net::tcp::Error> {
-    let body = b"{\"error\":\"not found\"}";
-    let mut headers: String<128> = String::new();
-    let _ = write!(
-        &mut headers,
-        "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        code,
+        status_text(code),
+        content_type,
         body.len()
     );
     write_all(socket, headers.as_bytes()).await?;
@@ -124,6 +92,15 @@ async fn respond_not_found(socket: &mut TcpSocket<'_>, _path: &str) -> Result<()
     socket.close();
     let _ = socket.read(&mut [0u8; 1]).await;
     Ok(())
+}
+
+fn status_text(code: u16) -> &'static str {
+    match code {
+        200 => "OK",
+        404 => "Not Found",
+        409 => "Conflict",
+        _ => "OK",
+    }
 }
 
 // Ensure we transmit the full buffer before closing.

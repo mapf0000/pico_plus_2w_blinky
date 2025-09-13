@@ -38,6 +38,7 @@ embassy-time = { version = "0.5", features = [
 ] }
 embassy-usb = "0.5"
 embassy-usb-logger = "0.5"
+usbd-hid = "0.8.1"
 
 defmt = "1"
 defmt-rtt = "1"

@@ -13,7 +13,9 @@ use embassy_rp::usb::Driver as UsbDriver;
 use embassy_usb::{Builder as UsbBuilder, Config as UsbConfig};
 use embassy_usb::class::cdc_acm::{CdcAcmClass as UsbCdcAcmClass, State as UsbCdcState};
 use embassy_usb::class::hid::{HidWriter as UsbHidWriter, State as UsbHidState};
-use embassy_futures::join::{join3};
+use embassy_futures::join::join3;
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
+use core::sync::atomic::{AtomicBool, Ordering};
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 use embassy_time::Timer;
 use static_cell::StaticCell;
@@ -24,9 +26,11 @@ bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<USB>;
     // PIO interrupt for CYW43 PIO-SPI
     PIO0_IRQ_0  => embassy_rp::pio::InterruptHandler<PIO0>;
-    // ADC interrupt (used by ADC driver)
-    ADC_IRQ_FIFO => embassy_rp::adc::InterruptHandler;
 });
+
+// Global signal to trigger on-demand USB bring-up from HTTP handler
+pub static USB_START: Signal<ThreadModeRawMutex, ()> = Signal::new();
+pub static USB_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// USB task: composite device with CDC logger + HID keyboard
 #[embassy_executor::task]
@@ -120,10 +124,7 @@ async fn net_task(mut runner: net::Runner<'static, cyw43::NetDriver<'static>>) -
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
-    // Start composite USB (logger + HID keyboard) first so we see everything else.
-    let usb_driver = UsbDriver::new(p.USB, Irqs);
-    spawner.spawn(usb_task(usb_driver)).unwrap();
-    log::info!("usb: composite (logger + keyboard) task spawned");
+    // Do not start USB at boot. It will be started on POST /usb/register
 
     let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
@@ -157,68 +158,53 @@ async fn main(spawner: Spawner) {
         .await;
     log::info!("cyw43: power management set to PowerSave");
 
-    // --- Embassy net stack (DHCPv4) ---
+    // --- Embassy net stack (Static IPv4 for AP mode) ---
     static NET_RES: StaticCell<StackResources<3>> = StaticCell::new();
     let mut rng = RoscRng;
     let seed = rng.next_u64();
     log::info!("net: rng seeded with 0x{:08x}{:08x}", (seed >> 32) as u32, seed as u32);
 
-    let cfg = Config::dhcpv4(Default::default());
+    // Configure a static IP for the AP interface, e.g. 192.168.4.1/24
+    let cfg = Config::ipv4_static(embassy_net::StaticConfigV4 {
+        address: embassy_net::Ipv4Cidr::new(embassy_net::Ipv4Address::new(192, 168, 4, 1), 24),
+        gateway: None,
+        dns_servers: Default::default(),
+    });
     let (stack_val, net_runner) =
         net::new(net_device, cfg, NET_RES.init(StackResources::new()), seed);
     static NET_STACK: StaticCell<net::Stack<'static>> = StaticCell::new();
     let stack = NET_STACK.init(stack_val);
     spawner.spawn(net_task(net_runner)).unwrap();
-    log::info!("net: stack runner spawned (DHCPv4)");
+    log::info!("net: stack runner spawned (static IPv4)");
 
-    // --- Join your WLAN ---
-    // const SSID: &str = "Fledermausland";
-    // const PASS: &str = "Wir!123Koennen?Hier!Nicht?Halten!456";
-    const SSID: &str = "MagentaWLAN-MCMT";
-    const PASS: &str = "31828370613283878587";
-
-    log::info!("wifi: connecting to SSID '{}'", SSID);
-    let mut attempt: u32 = 1;
-    loop {
-        match control
-            .join(SSID, cyw43::JoinOptions::new(PASS.as_bytes()))
-            .await
-        {
-            Ok(_) => break,
-            Err(e) => {
-                log::warn!("wifi: join attempt {} failed (status={:?}), retrying in 1s", attempt, e.status);
-                attempt = attempt.saturating_add(1);
-                Timer::after_secs(1).await;
-            }
-        }
-    }
-    log::info!("wifi: associated to '{}'", SSID);
+    // --- Bring up a WPA2-protected Access Point ---
+    const AP_SSID: &str = "PicoEndpoint";
+    const AP_PASS: &str = "pico12345"; // 8+ chars per WPA2 requirements
+    const AP_CHANNEL: u8 = 6;
+    log::info!("wifi: starting AP '{}' on channel {}", AP_SSID, AP_CHANNEL);
+    control.start_ap_wpa2(AP_SSID, AP_PASS, AP_CHANNEL).await;
+    log::info!("wifi: AP started; clients can connect to '{}'", AP_SSID);
 
     // Wait for DHCP/stack to be usable
-    log::info!("net: waiting for DHCP/stack config");
+    log::info!("net: waiting for stack config");
     stack.wait_config_up().await;
     log::info!("net: up: {:?}", stack.config_v4());
 
-    // --- Temperature sampling + HTTP exposure ---
-    // Shared state for latest temperature reading
-    static SHARED_CELL: StaticCell<temp::Shared> = StaticCell::new();
-    let shared = SHARED_CELL.init(temp::Shared::new());
-
-    // Create ADC sampling task
-    spawner
-        .spawn(temp::sampling_task(p.ADC, p.ADC_TEMP_SENSOR, shared))
-        .unwrap();
-    log::info!("temp: sampling task spawned");
-
-
-    // Spawn a tiny HTTP server exposing /temp and /metrics
-    spawner.spawn(http::server_task(stack, shared)).unwrap();
+    // Start a tiny HTTP server to receive the USB trigger
+    spawner.spawn(http::server_task(stack)).unwrap();
     log::info!("http: server task spawned (port 80)");
+
+    // Wait for POST /usb/register to arrive, then bring up USB.
+    USB_START.wait().await;
+    if !USB_ENABLED.swap(true, Ordering::SeqCst) {
+        log::info!("usb: starting composite (logger + keyboard) after HTTP trigger");
+        let usb_driver = UsbDriver::new(p.USB, Irqs);
+        spawner.spawn(usb_task(usb_driver)).unwrap();
+    }
 
     // Main can park; tasks run forever.
     core::future::pending::<()>().await;
 }
 
 mod http;
-mod temp;
 mod keyboard;
