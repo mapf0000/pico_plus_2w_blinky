@@ -104,7 +104,7 @@ pub async fn sampling_task(
             lock.uptime_ms = uptime_ms;
             lock.valid = true;
         }
-        log::info!(
+        log::debug!(
             "temp: updated c={:.2}C f={:.2}F uptime={}ms (raw={})",
             filtered_c,
             f,

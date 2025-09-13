@@ -51,6 +51,8 @@ async fn main(spawner: Spawner) {
     // Start USB logging first so we see everything else.
     let usb_driver = UsbDriver::new(p.USB, Irqs);
     spawner.spawn(usb_logger_task(usb_driver)).unwrap();
+    // From here on, logs should be visible over USB.
+    log::info!("usb: logger task spawned");
 
     let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
@@ -58,6 +60,7 @@ async fn main(spawner: Spawner) {
     let pwr = Output::new(p.PIN_23, Level::Low);
     let cs = Output::new(p.PIN_25, Level::High);
     let mut pio = Pio::new(p.PIO0, Irqs);
+    log::info!("pio: initializing CYW43 PIO-SPI interface");
     let spi = PioSpi::new(
         &mut pio.common,
         pio.sm0,
@@ -71,18 +74,23 @@ async fn main(spawner: Spawner) {
 
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
+    log::info!("cyw43: loading firmware and bringing up chip");
     let (net_device, mut control, cyw_runner) = cyw43::new(state, pwr, spi, fw).await;
+    log::info!("cyw43: init complete; spawning runner");
     spawner.spawn(cyw43_task(cyw_runner)).unwrap();
 
+    log::info!("cyw43: applying CLM/regulatory data");
     control.init(clm).await;
     control
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
+    log::info!("cyw43: power management set to PowerSave");
 
     // --- Embassy net stack (DHCPv4) ---
     static NET_RES: StaticCell<StackResources<3>> = StaticCell::new();
     let mut rng = RoscRng;
     let seed = rng.next_u64();
+    log::info!("net: rng seeded with 0x{:08x}{:08x}", (seed >> 32) as u32, seed as u32);
 
     let cfg = Config::dhcpv4(Default::default());
     let (stack_val, net_runner) =
@@ -90,6 +98,7 @@ async fn main(spawner: Spawner) {
     static NET_STACK: StaticCell<net::Stack<'static>> = StaticCell::new();
     let stack = NET_STACK.init(stack_val);
     spawner.spawn(net_task(net_runner)).unwrap();
+    log::info!("net: stack runner spawned (DHCPv4)");
 
     // --- Join your WLAN ---
     // const SSID: &str = "Fledermausland";
@@ -97,6 +106,8 @@ async fn main(spawner: Spawner) {
     const SSID: &str = "MagentaWLAN-MCMT";
     const PASS: &str = "31828370613283878587";
 
+    log::info!("wifi: connecting to SSID '{}'", SSID);
+    let mut attempt: u32 = 1;
     loop {
         match control
             .join(SSID, cyw43::JoinOptions::new(PASS.as_bytes()))
@@ -104,16 +115,18 @@ async fn main(spawner: Spawner) {
         {
             Ok(_) => break,
             Err(e) => {
-                log::warn!("join failed (status={:?}), retrying in 1s", e.status);
+                log::warn!("wifi: join attempt {} failed (status={:?}), retrying in 1s", attempt, e.status);
+                attempt = attempt.saturating_add(1);
                 Timer::after_secs(1).await;
             }
         }
     }
-    log::info!("WiFi associated");
+    log::info!("wifi: associated to '{}'", SSID);
 
     // Wait for DHCP/stack to be usable
+    log::info!("net: waiting for DHCP/stack config");
     stack.wait_config_up().await;
-    log::info!("Network is up: {:?}", stack.config_v4());
+    log::info!("net: up: {:?}", stack.config_v4());
 
     // --- Temperature sampling + HTTP exposure ---
     // Shared state for latest temperature reading
@@ -124,9 +137,12 @@ async fn main(spawner: Spawner) {
     spawner
         .spawn(temp::sampling_task(p.ADC, p.ADC_TEMP_SENSOR, shared))
         .unwrap();
+    log::info!("temp: sampling task spawned");
+
 
     // Spawn a tiny HTTP server exposing /temp and /metrics
     spawner.spawn(http::server_task(stack, shared)).unwrap();
+    log::info!("http: server task spawned (port 80)");
 
     // Main can park; tasks run forever.
     core::future::pending::<()>().await;
