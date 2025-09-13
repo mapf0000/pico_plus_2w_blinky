@@ -90,9 +90,11 @@ async fn main(spawner: Spawner) {
     let stack = NET_STACK.init(stack_val);
     spawner.spawn(net_task(net_runner)).unwrap();
 
-    // --- Join your WLAN ---
-    const SSID: &str = "Fledermausland";
-    const PASS: &str = "Wir!123Koennen?Hier!Nicht?Halten!456";
+    // --- Join your WLAN --- 
+    // const SSID: &str = "Fledermausland";
+    // const PASS: &str = "Wir!123Koennen?Hier!Nicht?Halten!456";
+    const SSID: &str = "MagentaWLAN-MCMT";
+    const PASS: &str = "31828370613283878587";
 
     loop {
         match control

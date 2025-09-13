@@ -58,7 +58,4 @@ cyw43-pio = { version = "0.8", features = [
     "defmt",
 ] }
 
-[[test]]
-name = "on_device"
-path = "tests/on_device.rs"
-harness = false
+ 
