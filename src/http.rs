@@ -3,7 +3,6 @@ use core::{fmt::Write as _, str};
 use embassy_net::{self as net, tcp::TcpSocket};
 use embassy_time::Duration;
 use heapless::String;
-// No need to import embedded-io traits; use inherent read/write.
 
 use crate::temp::{self, Shared};
 

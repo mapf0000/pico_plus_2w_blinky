@@ -85,12 +85,13 @@ async fn main(spawner: Spawner) {
     let seed = rng.next_u64();
 
     let cfg = Config::dhcpv4(Default::default());
-    let (stack_val, net_runner) = net::new(net_device, cfg, NET_RES.init(StackResources::new()), seed);
+    let (stack_val, net_runner) =
+        net::new(net_device, cfg, NET_RES.init(StackResources::new()), seed);
     static NET_STACK: StaticCell<net::Stack<'static>> = StaticCell::new();
     let stack = NET_STACK.init(stack_val);
     spawner.spawn(net_task(net_runner)).unwrap();
 
-    // --- Join your WLAN --- 
+    // --- Join your WLAN ---
     // const SSID: &str = "Fledermausland";
     // const PASS: &str = "Wir!123Koennen?Hier!Nicht?Halten!456";
     const SSID: &str = "MagentaWLAN-MCMT";
@@ -131,5 +132,5 @@ async fn main(spawner: Spawner) {
     core::future::pending::<()>().await;
 }
 
-mod temp;
 mod http;
+mod temp;

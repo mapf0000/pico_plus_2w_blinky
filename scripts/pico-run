@@ -1,23 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Simple Cargo runner for Raspberry Pi Pico (USB only, macOS-friendly):
+# Simple Cargo runner for Raspberry Pi Pico / Pico W / Pico 2W (USB only, macOS-friendly)
 # 1) Flash ELF via picotool
-# 2) Wait for /dev/tty.usbmodem*
-# 3) Tail logs and detect on-target test result markers
-#
-# Behavior:
-# - Always flashes the provided ELF
-# - If it sees a line "TEST-RESULT: PASS" => exit 0
-# - If it sees a line "TEST-RESULT: FAIL" => exit 1
-# - Otherwise (regular app run) it exits 0 without waiting indefinitely
+# 2) Wait for a USB CDC ACM port (prefers /dev/cu.* on macOS)
+# 3) Stream logs until interrupted
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <path-to-elf> [args...]" >&2
   exit 2
 fi
 
-# Cargo passes args; last arg is the ELF
 ELF="${@: -1}"
 
 if ! command -v picotool >/dev/null 2>&1; then
@@ -28,68 +21,55 @@ fi
 echo "[pico-run] Flashing: $ELF"
 picotool load -u -v -x -t elf "$ELF"
 
-# Try to find a USB CDC ACM port (macOS uses tty.usbmodem*)
 echo "[pico-run] Waiting for USB CDC device..."
 PORT=""
-deadline=$((SECONDS + 20))
+deadline=$((SECONDS + 30))
+
+find_port() {
+  # Prefer macOS call-out devices first, then others; include common Linux names.
+  ls /dev/cu.usbmodem* /dev/tty.usbmodem* /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | head -n1 || true
+}
+
 while [[ -z "$PORT" && $SECONDS -lt $deadline ]]; do
-  # Pick the first available modem device
-  PORT=$(ls /dev/tty.usbmodem* 2>/dev/null | head -n1 || true)
+  PORT=$(find_port)
   [[ -z "$PORT" ]] && sleep 0.2
 done
 
 if [[ -z "$PORT" ]]; then
-  echo "[pico-run] No /dev/tty.usbmodem* device found; assuming non-logging binary."
-  # Still treat run as success so cargo run works
-  exit 0
+  echo "[pico-run] No serial device found. Is USB connected and CDC enabled in your firmware?"
+  exit 1
 fi
 
 echo "[pico-run] Using port: $PORT"
 
-# Best-effort TTY init (macOS: -f <device>) and assert DTR by opening R/W.
+# Best-effort TTY init: pick the right flag for stty depending on platform
 if command -v stty >/dev/null 2>&1; then
-  stty -f "$PORT" 115200 -echo -ixon -icrnl -opost raw -hupcl clocal 2>/dev/null || true
+  if stty --help 2>&1 | grep -q -- "usage: stty \[-a"; then
+    # Likely macOS/BSD: uses -f
+    stty -f "$PORT" 115200 -echo -ixon -icrnl -opost raw -hupcl clocal 2>/dev/null || true
+  else
+    # Likely GNU/Linux: uses -F
+    stty -F "$PORT" 115200 -echo -ixon -icrnl -opost raw -hupcl clocal 2>/dev/null || true
+  fi
 fi
 
-result="unknown"
-timeout_secs=25
-
-# Open FD 3 for reading and writing; this asserts DTR on many CDC-ACM stacks
+# Open the port read/write (asserts DTR on many CDC-ACM stacks)
 exec 3<>"$PORT"
 
-# Use a tee+sed split to both show raw output immediately and capture the result marker
-tmpdir=$(mktemp -d -t pico-run.XXXXXX)
-marker_file="$tmpdir/result"
-rm -f "$marker_file"
+# Cleanly close on Ctrl-C
+cleanup() {
+  exec 3<&- || true
+  echo
+  echo "[pico-run] Closed."
+}
+trap cleanup INT TERM
 
+echo "[pico-run] Streaming logs (Ctrl-C to stop)…"
+# Foreground cat so logs stream until you interrupt or the device disconnects
 set +e
-cat <&3 | tee >(sed -nE 's/.*(TEST-RESULT: (PASS|FAIL)).*/\1/p' > "$marker_file") &
-cat_pid=$!
+cat <&3
+code=$?
 set -e
 
-deadline=$((SECONDS + timeout_secs))
-while [[ ! -s "$marker_file" && $SECONDS -lt $deadline ]]; do
-  sleep 0.1
-done
-
-# Stop background reader
-kill "$cat_pid" >/dev/null 2>&1 || true
-wait "$cat_pid" 2>/dev/null || true
-
-exec 3<&-
-
-if [[ -s "$marker_file" ]]; then
-  marker=$(tail -n1 "$marker_file")
-  echo "[pico-run] Detected: $marker" >&2
-  if [[ "$marker" == "TEST-RESULT: PASS" ]]; then
-    rm -rf "$tmpdir"
-    exit 0
-  else
-    rm -rf "$tmpdir"
-    exit 1
-  fi
-else
-  echo "[pico-run] Timeout waiting for test result; assuming non-test run." >&2
-  rm -rf "$tmpdir"
-  exit 0
-fi
+cleanup
+exit $code
