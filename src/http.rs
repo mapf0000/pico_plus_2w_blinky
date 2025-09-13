@@ -13,6 +13,7 @@ pub async fn server_task(
     stack: &'static net::Stack<'static>,
     shared: &'static Shared,
 ){
+    log::info!("http: listening on port {}", SERVER_PORT);
     loop {
         let mut rx_buf = [0u8; 1024];
         let mut tx_buf = [0u8; 1024];
@@ -23,6 +24,7 @@ pub async fn server_task(
             log::warn!("http: accept error: {:?}", e);
             continue;
         }
+        log::info!("http: accepted connection");
 
         // Process single request per connection; then close.
         if let Err(e) = handle_connection(&mut socket, shared).await {
@@ -39,11 +41,21 @@ async fn handle_connection(
     let n = socket.read(&mut buf).await?;
     let req = &buf[..n];
     let path = parse_path(req).unwrap_or("/");
+    log::info!("http: request path '{}' ({} bytes)", path, n);
 
     match path {
-        "/temp" => respond_json(socket, shared).await?,
-        "/metrics" => respond_metrics(socket, shared).await?,
-        _ => respond_not_found(socket).await?,
+        "/temp" => {
+            log::info!("http: responding 200 JSON");
+            respond_json(socket, shared).await?
+        }
+        "/metrics" => {
+            log::info!("http: responding 200 metrics");
+            respond_metrics(socket, shared).await?
+        }
+        _ => {
+            log::info!("http: responding 404 for '{}'", path);
+            respond_not_found(socket, path).await?
+        }
     }
 
     Ok(())
@@ -93,7 +105,7 @@ async fn respond_metrics(socket: &mut TcpSocket<'_>, shared: &Shared) -> Result<
     Ok(())
 }
 
-async fn respond_not_found(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::Error> {
+async fn respond_not_found(socket: &mut TcpSocket<'_>, _path: &str) -> Result<(), net::tcp::Error> {
     let body = b"{\"error\":\"not found\"}";
     let mut headers: String<128> = String::new();
     let _ = write!(

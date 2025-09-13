@@ -73,6 +73,8 @@ pub async fn sampling_task(
     let period = Duration::from_millis(1000);
     let alpha = 0.2; // EMA smoothing factor
 
+    log::info!("temp: sampling started (period={}ms, alpha={:.2})", period.as_millis(), alpha);
+
     let mut filtered_c = 0.0f32;
     let mut uptime_ms: u64 = 0;
 
@@ -84,6 +86,7 @@ pub async fn sampling_task(
                 // Mark invalid and try again next tick
                 let mut lock = shared.inner.lock().await;
                 lock.valid = false;
+                log::warn!("temp: adc read failed; marking invalid");
                 Timer::after(period).await;
                 uptime_ms = uptime_ms.saturating_add(period.as_millis() as u64);
                 continue;
@@ -101,6 +104,13 @@ pub async fn sampling_task(
             lock.uptime_ms = uptime_ms;
             lock.valid = true;
         }
+        log::info!(
+            "temp: updated c={:.2}C f={:.2}F uptime={}ms (raw={})",
+            filtered_c,
+            f,
+            uptime_ms,
+            raw
+        );
 
         Timer::after(period).await;
         uptime_ms = uptime_ms.saturating_add(period.as_millis() as u64);
