@@ -40,7 +40,8 @@ impl Reading {
 
 // Conversion constants from RP2040 datasheet; allow overriding if needed later.
 const VREF: f32 = 3.3;
-const ADC_MAX: f32 = 4095.0; // 12-bit ADC
+// Note: RP235x examples use 4096.0 in the denominator; use that here too.
+const ADC_MAX: f32 = 4096.0; // 12-bit ADC full-scale count
 const V_AT_27C: f32 = 0.706; // Volts at 27°C
 const SLOPE_V_PER_C: f32 = 0.001721; // Volts per °C
 

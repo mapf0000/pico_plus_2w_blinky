@@ -84,8 +84,12 @@ async fn respond_json(socket: &mut TcpSocket<'_>, shared: &Shared) -> Result<(),
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    socket.write(headers.as_bytes()).await?;
-    socket.write(body.as_bytes()).await?;
+    write_all(socket, headers.as_bytes()).await?;
+    write_all(socket, body.as_bytes()).await?;
+    // Gracefully close so clients don't see a TCP RST
+    socket.close();
+    // Optionally wait for peer to ack/close; ignore outcome (bounded by timeout)
+    let _ = socket.read(&mut [0u8; 1]).await;
     Ok(())
 }
 
@@ -100,8 +104,10 @@ async fn respond_metrics(socket: &mut TcpSocket<'_>, shared: &Shared) -> Result<
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    socket.write(headers.as_bytes()).await?;
-    socket.write(body.as_bytes()).await?;
+    write_all(socket, headers.as_bytes()).await?;
+    write_all(socket, body.as_bytes()).await?;
+    socket.close();
+    let _ = socket.read(&mut [0u8; 1]).await;
     Ok(())
 }
 
@@ -113,7 +119,21 @@ async fn respond_not_found(socket: &mut TcpSocket<'_>, _path: &str) -> Result<()
         "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    socket.write(headers.as_bytes()).await?;
-    socket.write(body).await?;
+    write_all(socket, headers.as_bytes()).await?;
+    write_all(socket, body).await?;
+    socket.close();
+    let _ = socket.read(&mut [0u8; 1]).await;
+    Ok(())
+}
+
+// Ensure we transmit the full buffer before closing.
+async fn write_all(socket: &mut TcpSocket<'_>, mut buf: &[u8]) -> Result<(), net::tcp::Error> {
+    while !buf.is_empty() {
+        let n = socket.write(buf).await?;
+        if n == 0 {
+            break;
+        }
+        buf = &buf[n..];
+    }
     Ok(())
 }

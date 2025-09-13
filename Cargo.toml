@@ -27,7 +27,9 @@ embassy-rp = { version = "0.8", features = [
     "unstable-pac",
     "time-driver",
     "critical-section-impl",
-    "rp235xa",
+    # Use the correct RP2350 variant. Pico 2 / 2 W boards ship with 'B' silicon.
+    # If your board is 'A' silicon, switch this feature back to "rp235xa".
+    "rp235xb",
     "binary-info",
 ] }
 embassy-time = { version = "0.5", features = [
