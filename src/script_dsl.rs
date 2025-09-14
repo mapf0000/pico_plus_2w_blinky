@@ -393,3 +393,101 @@ fn upper_ascii<const N: usize>(s: &str) -> heapless::String<N> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keyboard;
+
+    #[test]
+    fn parse_text_args_variants() {
+        assert_eq!(parse_text_args("Hello 25").unwrap(), ("Hello", 25));
+        assert_eq!(parse_text_args("Hello").unwrap(), ("Hello", 10));
+        assert_eq!(parse_text_args("Hello   ").unwrap(), ("Hello", 10));
+        // Delay is taken from the last whitespace-separated token if numeric
+        assert_eq!(parse_text_args("Hello 20 30").unwrap(), ("Hello 20", 30));
+        assert!(matches!(parse_text_args(""), Err(DslError::TextEmpty)));
+    }
+
+    #[test]
+    fn parse_modtap_and_key_aliases() {
+        // LCTRL + LALT + DELETE
+        let (mods, key) = parse_modtap("LCTRL+LALT+DELETE").unwrap();
+        assert_eq!(mods, keyboard::MOD_LCTRL | keyboard::MOD_LALT);
+        assert_eq!(key, keyboard::KEY_DELETE);
+
+        // Synonyms for GUI/CMD and key names
+        let (mods2, key2) = parse_modtap("cmd+space").unwrap();
+        assert_eq!(mods2, keyboard::MOD_LGUI);
+        assert_eq!(key2, keyboard::KEY_SPACE);
+
+        // Single letters and function keys
+        assert_eq!(parse_key("a"), Some(keyboard::KEY_A));
+        assert_eq!(parse_key("A"), Some(keyboard::KEY_A));
+        assert_eq!(parse_key("F12"), Some(keyboard::KEY_F12));
+
+        // Common aliases
+        assert_eq!(parse_key("Return"), Some(keyboard::KEY_ENTER));
+        assert_eq!(parse_key("Escape"), Some(keyboard::KEY_ESC));
+
+        // Numpad and punctuation
+        assert_eq!(parse_key("KP_ENTER"), Some(keyboard::KEY_KP_ENTER));
+        assert_eq!(parse_key("PLUS"), Some(keyboard::KEY_EQUAL));
+    }
+
+    #[test]
+    fn compile_simple_program() {
+        let src = "tap A\nmodtap LCTRL+LALT+DELETE\ntext Hello 25\ndelay 0\ncall hello_world\n";
+        let prog = compile_dsl(src).expect("compile_dsl ok");
+        // Expect: Tap(A), Tap(DELETE with mods), Text("Hello",25), Call("hello_world")
+        let mut it = prog.ops.iter();
+        match it.next() { Some(Op::Tap { key, mods }) => { assert_eq!((*key, *mods), (keyboard::KEY_A, 0)); } _ => panic!("op0") }
+        match it.next() { Some(Op::Tap { key, mods }) => { assert_eq!((*key, *mods), (keyboard::KEY_DELETE, keyboard::MOD_LCTRL | keyboard::MOD_LALT)); } _ => panic!("op1") }
+        match it.next() { Some(Op::Text { s, delay_ms }) => { assert_eq!((*s, *delay_ms), ("Hello", 25)); } _ => panic!("op2") }
+        match it.next() { Some(Op::Call { id }) => { assert_eq!(*id, "hello_world"); } _ => panic!("op3") }
+        // No DelayMs for "delay 0"
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn compile_unknowns_and_limits() {
+        // Unknown command
+        match compile_dsl("noop X\n") {
+            Err(DslError::UnknownCommand) => {}
+            _ => panic!("expected UnknownCommand"),
+        }
+
+        // Unknown script id
+        match compile_dsl("call not_a_script\n") {
+            Err(DslError::UnknownScript) => {}
+            _ => panic!("expected UnknownScript"),
+        }
+
+        // Too many lines (256 allowed, 257th should fail)
+        let mut s = heapless::String::<{ MAX_DSL_LINES * 8 }>::new();
+        for _ in 0..(MAX_DSL_LINES) { let _ = s.push_str("tap A\n"); }
+        // Add one more non-empty command
+        let _ = s.push_str("tap A\n");
+        match compile_dsl(&s) {
+            Err(DslError::TooManyLines) => {}
+            _ => panic!("expected TooManyLines"),
+        }
+    }
+
+    #[test]
+    fn text_delay_is_clamped() {
+        // 60000 should clamp to MAX_DSL_DELAY_MS (5000)
+        let p = compile_dsl("text A 60000\n").unwrap();
+        match &p.ops[0] {
+            Op::Text { s, delay_ms } => { assert_eq!(*s, "A"); assert_eq!(*delay_ms as u64, MAX_DSL_DELAY_MS); }
+            _ => panic!("expected text op"),
+        }
+    }
+
+    #[test]
+    fn split_head_and_upper_ascii() {
+        assert_eq!(split_head("text Hello 10").unwrap(), ("text", "Hello 10"));
+        let u = upper_ascii::<8>("aBc!z");
+        assert_eq!(u.as_str(), "ABC!Z");
+    }
+}

@@ -24,3 +24,9 @@ target = "thumbv8m.main-none-eabihf"
 
 [env]
 DEFMT_LOG = "debug"
+
+[alias]
+# Run host-side unit tests (Apple Silicon)
+test-host = "test --lib --no-default-features --target aarch64-apple-darwin"
+# If you are on Intel Macs, use:
+test-host-intel = "test --lib --no-default-features --target x86_64-apple-darwin"

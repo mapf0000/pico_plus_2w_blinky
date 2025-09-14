@@ -357,8 +357,6 @@ fn query_param<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
     None
 }
 
-// query_u64 removed; no numeric query parameters remain
-
 fn query_os(query: Option<&str>) -> Option<HostOs> {
     let q = query?;
     for pair in q.split('&') {

@@ -1,6 +1,6 @@
 # pico_rust – Pico W USB‑on‑demand AP
 
-This firmware brings up the Raspberry Pi Pico W as a WPA2 Access Point (CYW43 via PIO‑SPI) with a tiny HTTP server and a tiny in‑device web UI. It only enumerates as a USB device when it receives a specific HTTP POST request (or when triggered from the web UI).
+This firmware brings up the Raspberry Pi Pico 2W as a WPA2 Access Point (CYW43 via PIO‑SPI) with a tiny HTTP server and a tiny in‑device web UI. It only enumerates as a USB device when it receives a specific HTTP POST request (or when triggered from the web UI).
 
 HTTP endpoints
 - `GET /`: Serves a minimal web UI for starting USB and sending actions.
@@ -29,3 +29,11 @@ Quick test
 3. Open http://192.168.4.1/ in a browser and use the UI to Start USB (Assistant or No Assistant). Alternatively:
    - `curl -X POST "http://192.168.4.1/usb/register?assistant=1&os=mac"`
 4. Plug into a host via USB; the device will now enumerate (composite CDC + HID).
+
+**Host Tests**
+- Why: most parsing and DSL logic is platform-agnostic; you can run unit tests on macOS without hardware.
+- Alias (Apple Silicon): run `cargo test-host`.
+- Alias (Intel Macs): run `cargo test-host-intel`.
+- Manual command (Apple Silicon): `cargo test --lib --no-default-features --target aarch64-apple-darwin`.
+- Manual command (Intel): `cargo test --lib --no-default-features --target x86_64-apple-darwin`.
+- Note: `.cargo/config.toml` sets an embedded default target; passing `--target` and `--no-default-features` avoids pulling in RP-only crates.
