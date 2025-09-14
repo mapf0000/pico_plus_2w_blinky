@@ -6,4 +6,4 @@ pub mod host;
 pub mod keyboard;
 pub mod script_dsl;
 pub mod scripts;
-// Omit `config` from the host-testable library to avoid pulling in `embassy_rp`.
+// Omit `device_config` from the host-testable library to avoid pulling in `embassy_rp`.

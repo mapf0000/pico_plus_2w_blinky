@@ -1,3 +1,5 @@
+// This module defines a comprehensive set of HID key codes and helpers.
+// Depending on features used, many items may be intentionally unused.
 use embassy_time::Timer;
 use embassy_usb::class::hid::HidWriter as UsbHidWriter;
 use usbd_hid::descriptor::KeyboardReport;
@@ -11,33 +13,9 @@ const DELAY_TAP_HOLD_MS: u64 = 20;
 /// These constants cover common ANSI keys. Values follow the HID
 /// Usage Tables spec and match what `usbd-hid` expects in `KeyboardReport.keycodes`.
 /// Letters/numbers are unshifted usage codes; use the `modifier` field to apply Shift.
-// Letters (A-Z)
+// Letters
+// Use `KEY_A + offset` for other letters (A=0x04).
 pub const KEY_A: u8 = 0x04; // 'A'
-pub const KEY_B: u8 = 0x05; // 'B'
-pub const KEY_C: u8 = 0x06; // 'C'
-pub const KEY_D: u8 = 0x07; // 'D'
-pub const KEY_E: u8 = 0x08; // 'E'
-pub const KEY_F: u8 = 0x09; // 'F'
-pub const KEY_G: u8 = 0x0a; // 'G'
-pub const KEY_H: u8 = 0x0b; // 'H'
-pub const KEY_I: u8 = 0x0c; // 'I'
-pub const KEY_J: u8 = 0x0d; // 'J'
-pub const KEY_K: u8 = 0x0e; // 'K'
-pub const KEY_L: u8 = 0x0f; // 'L'
-pub const KEY_M: u8 = 0x10; // 'M'
-pub const KEY_N: u8 = 0x11; // 'N'
-pub const KEY_O: u8 = 0x12; // 'O'
-pub const KEY_P: u8 = 0x13; // 'P'
-pub const KEY_Q: u8 = 0x14; // 'Q'
-pub const KEY_R: u8 = 0x15; // 'R'
-pub const KEY_S: u8 = 0x16; // 'S'
-pub const KEY_T: u8 = 0x17; // 'T'
-pub const KEY_U: u8 = 0x18; // 'U'
-pub const KEY_V: u8 = 0x19; // 'V'
-pub const KEY_W: u8 = 0x1a; // 'W'
-pub const KEY_X: u8 = 0x1b; // 'X'
-pub const KEY_Y: u8 = 0x1c; // 'Y'
-pub const KEY_Z: u8 = 0x1d; // 'Z'
 
 // Number row (unshifted values)
 pub const KEY_1: u8 = 0x1e; // '1'  (shift: '!')
@@ -311,119 +289,4 @@ where
     if let Err(e) = w.write_serialize(&release).await {
         log::warn!("hid: write error (release): {:?}", e);
     }
-}
-
-/// Event bytecode for scripted keyboard actions (Option B).
-#[derive(Copy, Clone)]
-pub enum KeyScriptEvent {
-    /// Tap a key with optional combined modifier mask.
-    Tap { key: u8, mods: u8 },
-    /// Delay in milliseconds.
-    DelayMs(u32),
-}
-
-/// Const helpers to build scripts in arrays.
-pub const fn ev_tap(key: u8) -> KeyScriptEvent {
-    KeyScriptEvent::Tap { key, mods: 0 }
-}
-pub const fn ev_modtap(mods: u8, key: u8) -> KeyScriptEvent {
-    KeyScriptEvent::Tap { key, mods }
-}
-pub const fn ev_delay(ms: u32) -> KeyScriptEvent {
-    KeyScriptEvent::DelayMs(ms)
-}
-
-/// Run a script consisting of `KeyScriptEvent`s.
-pub async fn run_script<'d, D>(w: &mut UsbHidWriter<'d, D, 8>, script: &[KeyScriptEvent])
-where
-    D: embassy_usb::driver::Driver<'d>,
-{
-    for ev in script {
-        match *ev {
-            KeyScriptEvent::Tap { key, mods } => {
-                tap_with_mod(w, key, mods).await;
-            }
-            KeyScriptEvent::DelayMs(ms) => {
-                if ms != 0 {
-                    Timer::after_millis(ms as u64).await;
-                }
-            }
-        }
-    }
-}
-
-/// Build a `&[KeyScriptEvent]` with a compact, explicit syntax.
-///
-/// Supported items:
-///  - `tap(KEY_X)`
-///  - `modtap(MOD_LCTRL | MOD_LALT, KEY_DELETE)`
-///  - `delay(200)` (milliseconds)
-///  - `text("Hello")` or `text("Hello", 10)` (10 ms between chars)
-///
-/// Example:
-/// ```ignore
-/// const OPEN_TERM: &[keyboard::KeyScriptEvent] = keyboard::script![
-///     modtap(keyboard::MOD_LGUI, keyboard::KEY_SPACE);
-///     delay(400);
-///     text("Terminal", 10);
-///     delay(200);
-///     tap(keyboard::KEY_ENTER);
-///     delay(1500);
-///     modtap(keyboard::MOD_LGUI, keyboard::KEY_N);
-/// ];
-/// ```
-#[macro_export]
-macro_rules! script {
-    () => { &[] };
-    ( $( $tokens:tt )+ ) => {{
-        &[
-            $crate::__script_flatten!{ $($tokens)+ }
-        ]
-    }};
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __script_flatten {
-    () => {};
-    // Handle text specially: expands to multiple events
-    ( text( $($args:tt)* ) ; $($rest:tt)* ) => {
-        kbd_macros::text_items!( $($args)* ),
-        $crate::__script_flatten!{ $($rest)* }
-    };
-    // Generic item with args: tap(...); modtap(...); delay(...)
-    ( $name:ident ( $($args:tt)* ) ; $($rest:tt)* ) => {
-        $crate::__script_items!{ $name ( $($args)* ) },
-        $crate::__script_flatten!{ $($rest)* }
-    };
-    // Trailing single text(...);
-    ( text( $($args:tt)* ) ; ) => {
-        kbd_macros::text_items!( $($args)* ),
-    };
-    // Trailing generic item
-    ( $name:ident ( $($args:tt)* ) ; ) => {
-        $crate::__script_items!{ $name ( $($args)* ) },
-    };
-}
-
-// __script_collect removed; direct repetition is used in `script!`
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __script_items {
-    ( tap($key:expr) ) => {
-        $crate::keyboard::KeyScriptEvent::Tap { key: $key, mods: 0 }
-    };
-    ( modtap($mods:expr, $key:expr) ) => {
-        $crate::keyboard::KeyScriptEvent::Tap { key: $key, mods: $mods }
-    };
-    ( delay($ms:expr) ) => {
-        $crate::keyboard::KeyScriptEvent::DelayMs($ms as u32)
-    };
-    ( text($s:literal) ) => {
-        kbd_macros::text_items!($s)
-    };
-    ( text($s:literal, $delay_ms:expr) ) => {
-        kbd_macros::text_items!($s, $delay_ms)
-    };
 }

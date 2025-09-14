@@ -236,3 +236,4 @@ async fn persist_to_flash() -> Result<(), ()> {
     let _ = with_flash(|f| f.blocking_write((slot_off as u32) + 18, &payload[..plen])).await.map_err(|_| ())?;
     Ok(())
 }
+
