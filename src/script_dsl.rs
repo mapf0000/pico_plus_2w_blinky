@@ -1,7 +1,7 @@
 use embassy_time::Timer;
 use embassy_usb::class::hid::HidWriter as UsbHidWriter;
 
-use crate::keyboard;
+use crate::{keyboard, scripts};
 
 #[derive(Debug)]
 pub enum DslError {
@@ -12,6 +12,8 @@ pub enum DslError {
     ParseMod,
     ParseDelay,
     TextEmpty,
+    UnknownScript,
+    RecursionTooDeep,
 }
 
 /// Intermediate representation for a compiled DSL program.
@@ -19,6 +21,7 @@ pub enum Op<'a> {
     Tap { key: u8, mods: u8 },
     DelayMs(u32),
     Text { s: &'a str, delay_ms: u16 },
+    Call { id: &'a str },
 }
 
 pub struct Program<'a> {
@@ -66,6 +69,14 @@ pub fn compile_dsl<'a>(dsl: &'a str) -> Result<Program<'a>, DslError> {
             if !text.is_empty() {
                 prog.ops.push(Op::Text { s: text, delay_ms }).map_err(|_| DslError::TooManyLines)?;
             }
+        } else if eq_ci(cmd, "call") {
+            let id = rest.trim();
+            if id.is_empty() { return Err(DslError::InvalidLine); }
+            // Validate at compile time that the target exists.
+            if scripts::parse_id(id).is_none() {
+                return Err(DslError::UnknownScript);
+            }
+            prog.ops.push(Op::Call { id }).map_err(|_| DslError::TooManyLines)?;
         } else {
             return Err(DslError::UnknownCommand);
         }
@@ -73,24 +84,106 @@ pub fn compile_dsl<'a>(dsl: &'a str) -> Result<Program<'a>, DslError> {
     Ok(prog)
 }
 
-/// Execute a compiled program.
+/// Execute a compiled program (public wrapper).
 pub async fn exec_program<'d, 'a, D>(w: &mut UsbHidWriter<'d, D, 8>, prog: &Program<'a>)
 where
     D: embassy_usb::driver::Driver<'d>,
 {
-    for op in prog.ops.iter() {
-        match *op {
-            Op::Tap { key, mods } => {
-                keyboard::tap_with_mod(w, key, mods).await;
-            }
-            Op::DelayMs(ms) => {
-                if ms != 0 { Timer::after_millis(ms as u64).await; }
-            }
-            Op::Text { s, delay_ms } => {
-                keyboard::type_str(w, s, delay_ms as u64).await;
+    let _ = exec_program_inner(w, prog, 0u8).await;
+}
+
+/// Internal executor using an explicit call stack to avoid async recursion.
+async fn exec_program_inner<'d, 'a, D>(
+    w: &mut UsbHidWriter<'d, D, 8>,
+    prog: &Program<'a>,
+    _depth: u8,
+) -> Result<(), DslError>
+where
+    D: embassy_usb::driver::Driver<'d>,
+{
+    // We implement an explicit call stack so we can support `call <id>` without
+    // recursive async functions (which are not allowed without boxing).
+    // Stack stores return addresses and which program to resume (Top or an Owned compiled one).
+    #[derive(Copy, Clone)]
+    enum Ctx { Top, Owned(usize) }
+
+    struct Frame { ctx: Ctx, ip: usize }
+
+    // Owned compiled programs for called builtins (their DSL is 'static).
+    let mut owned: heapless::Vec<Program<'static>, 8> = heapless::Vec::new();
+    let mut stack: heapless::Vec<Frame, 8> = heapless::Vec::new();
+
+    let mut ctx = Ctx::Top;
+    let mut ip: usize = 0;
+
+    loop {
+        match ctx {
+            Ctx::Top => {
+                if ip >= prog.ops.len() {
+                    match stack.pop() {
+                        Some(Frame { ctx: prev_ctx, ip: prev_ip }) => { ctx = prev_ctx; ip = prev_ip; continue; }
+                        None => break,
+                    }
+                }
+                let op = &prog.ops[ip];
+                ip += 1;
+                match *op {
+                    Op::Tap { key, mods } => {
+                        keyboard::tap_with_mod(w, key, mods).await;
+                    }
+                    Op::DelayMs(ms) => {
+                        if ms != 0 { Timer::after_millis(ms as u64).await; }
+                    }
+                    Op::Text { s, delay_ms } => {
+                        keyboard::type_str(w, s, delay_ms as u64).await;
+                    }
+                    Op::Call { id } => {
+                        let dsl = match scripts::dsl_for_id_str(id) { Some(s) => s, None => return Err(DslError::UnknownScript) };
+                        let sub = compile_dsl(dsl)?;
+                let ix = owned.len();
+                if owned.push(sub).is_err() || stack.push(Frame { ctx, ip }).is_err() {
+                    return Err(DslError::RecursionTooDeep);
+                }
+                ctx = Ctx::Owned(ix);
+                ip = 0;
             }
         }
     }
+            Ctx::Owned(ix) => {
+                if ip >= owned[ix].ops.len() {
+                    match stack.pop() {
+                        Some(Frame { ctx: prev_ctx, ip: prev_ip }) => { ctx = prev_ctx; ip = prev_ip; continue; }
+                        None => break,
+                    }
+                }
+                let op = &owned[ix].ops[ip];
+                ip += 1;
+                match *op {
+                    Op::Tap { key, mods } => {
+                        keyboard::tap_with_mod(w, key, mods).await;
+                    }
+                    Op::DelayMs(ms) => {
+                        if ms != 0 { Timer::after_millis(ms as u64).await; }
+                    }
+                    Op::Text { s, delay_ms } => {
+                        keyboard::type_str(w, s, delay_ms as u64).await;
+                    }
+                    Op::Call { id } => {
+                        let dsl = match scripts::dsl_for_id_str(id) { Some(s) => s, None => return Err(DslError::UnknownScript) };
+                        let sub = compile_dsl(dsl)?;
+                        let ix2 = owned.len();
+                        if owned.push(sub).is_err() || stack.push(Frame { ctx, ip }).is_err() {
+                            return Err(DslError::RecursionTooDeep);
+                        }
+                        ctx = Ctx::Owned(ix2);
+                        ip = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Execute a small line-based DSL against the HID writer.
@@ -100,13 +193,13 @@ where
 /// - "modtap MOD+MOD+KEY" (MOD: LCTRL, LSHIFT, LALT, LGUI, RCTRL, RSHIFT, RALT, RGUI; aliases: CTRL, SHIFT, ALT, GUI, CMD, WIN, OPTION, CONTROL)
 /// - "delay N" (milliseconds, clamped)
 /// - "text STRING [DELAY]" (optional per-char delay in ms)
+/// - "call ID" (ID from `GET /kb/scripts`)
 pub async fn run_dsl<'d, D>(w: &mut UsbHidWriter<'d, D, 8>, dsl: &str) -> Result<(), DslError>
 where
     D: embassy_usb::driver::Driver<'d>,
 {
     let prog = compile_dsl(dsl)?;
-    exec_program(w, &prog).await;
-    Ok(())
+    exec_program_inner(w, &prog, 0u8).await
 }
 
 fn split_head(s: &str) -> Option<(&str, &str)> {

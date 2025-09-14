@@ -19,6 +19,7 @@ pub struct ScriptInfo {
 ///   modtap(LGUI | LSHIFT, N);
 ///   delay(400);
 ///   text("Terminal", 10);
+///   call(hello_world);
 ///
 /// Keys are bare names (ENTER, Z, SLASH, N, F1, PAGE_UP, etc.).
 /// Modifiers are bare names (LCTRL, LSHIFT, LALT, LGUI, RCTRL, RSHIFT, RALT, RGUI) combined with `|`.
@@ -50,12 +51,16 @@ macro_rules! __dsl_lines {
     ( text( $s:literal ) ; $($rest:tt)* ) => {
         concat!( "text ", $s, "\n", $crate::__dsl_lines!( $($rest)* ) )
     };
+    ( call( $id:ident ) ; $($rest:tt)* ) => {
+        concat!( "call ", stringify!($id), "\n", $crate::__dsl_lines!( $($rest)* ) )
+    };
     // Allow trailing single item forms
     ( tap( $key:ident ) ; ) => { concat!( "tap ", stringify!($key), "\n" ) };
     ( modtap( $mods:tt , $key:ident ) ; ) => { concat!( "modtap ", $crate::scripts::__mods_str!($mods), "+", stringify!($key), "\n" ) };
     ( delay( $ms:expr ) ; ) => { concat!( "delay ", stringify!($ms), "\n" ) };
     ( text( $s:literal , $ms:expr ) ; ) => { concat!( "text ", $s, " ", stringify!($ms), "\n" ) };
     ( text( $s:literal ) ; ) => { concat!( "text ", $s, "\n" ) };
+    ( call( $id:ident ) ; ) => { concat!( "call ", stringify!($id), "\n" ) };
 }
 
 #[macro_export]
@@ -85,6 +90,13 @@ macro_rules! define_scripts {
         pub fn parse_id(s: &str) -> Option<BuiltinScript> {
             match s {
                 $( $id => Some(BuiltinScript::$Variant), )+
+                _ => None,
+            }
+        }
+
+        pub fn dsl_for_id_str(s: &str) -> Option<&'static str> {
+            match s {
+                $( $id => Some($crate::__dsl_lines!{ $( $seq )* }), )+
                 _ => None,
             }
         }
@@ -139,5 +151,15 @@ crate::define_scripts! {
         name: "Hello, world (slow)",
         description: "Type 'Hello, world' with a small delay",
         seq: [ text("Hello, world", 20); ]
+    },
+    DemoCall {
+        id: "demo_call",
+        name: "Demo: Call Hello + Terminal",
+        description: "Demonstrates calling other scripts by id",
+        seq: [
+            call(hello_world);
+            delay(500);
+            call(open_terminal);
+        ]
     },
 }
