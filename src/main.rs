@@ -48,9 +48,9 @@ async fn usb_task(driver: UsbDriver<'static, USB>, run_mac_assistant: bool) {
     };
     let mut cfg = UsbConfig::new(0x1209, pid); // pid.codes style VID/PID (dummy)
     // Read current device identity from runtime config
-    let dev_cfg = crate::config::get().await;
-    static MANUF: StaticCell<heapless::String<{ crate::config::MANUFACTURER_MAX }>> = StaticCell::new();
-    static PROD: StaticCell<heapless::String<{ crate::config::PRODUCT_MAX }>> = StaticCell::new();
+    let dev_cfg = crate::device_config::get().await;
+    static MANUF: StaticCell<heapless::String<{ crate::device_config::MANUFACTURER_MAX }>> = StaticCell::new();
+    static PROD: StaticCell<heapless::String<{ crate::device_config::PRODUCT_MAX }>> = StaticCell::new();
     let mref = MANUF.init(dev_cfg.usb_manufacturer);
     let pref = PROD.init(dev_cfg.usb_product);
     cfg.manufacturer = Some(mref.as_str());
@@ -129,13 +129,13 @@ async fn net_task(mut runner: net::Runner<'static, cyw43::NetDriver<'static>>) -
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     // Initialize runtime configuration defaults, then optional PSRAM, then flash persistence
-    crate::config::init().await;
+    crate::device_config::init().await;
     #[cfg(feature = "psram")]
     {
         psram_pool::init(&p).await;
     }
-    let flash_drv = embassy_rp::flash::Flash::<_, embassy_rp::flash::Blocking, { crate::config::FLASH_CAPACITY }>::new_blocking(p.FLASH);
-    crate::config::set_flash_driver(flash_drv).await;
+    let flash_drv = embassy_rp::flash::Flash::<_, embassy_rp::flash::Blocking, { crate::device_config::FLASH_CAPACITY }>::new_blocking(p.FLASH);
+    crate::device_config::set_flash_driver(flash_drv).await;
 
     // Do not start USB at boot. It will be started on POST /usb/register
 
@@ -246,6 +246,6 @@ mod dhcp;
 mod host;
 mod script_dsl;
 mod scripts;
-mod config;
+mod device_config;
 #[cfg(feature = "psram")]
 mod psram_pool;

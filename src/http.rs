@@ -8,7 +8,7 @@ use crate::hid::{HID_CHAN, HidCommand, USB_READY};
 use crate::{USB_ENABLED, USB_START};
 use crate::host::{self, HostOs};
 use crate::scripts;
-use crate::config;
+use crate::device_config;
 
 const SERVER_PORT: u16 = 80;
 // Centralized HTTP sizes and limits for maintainability
@@ -188,7 +188,7 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
         // Removed: Route::KbScriptRunBuiltin
         
         Route::ConfigGet => {
-            let cfg = config::get().await;
+            let cfg = device_config::get().await;
             let man = escape_json_str(cfg.usb_manufacturer.as_str());
             let prod = escape_json_str(cfg.usb_product.as_str());
             let mut body: String<256> = String::new();
@@ -214,28 +214,28 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
                 let man_raw = query_param(query, "manufacturer");
                 let prod_raw = query_param(query, "product");
 
-                let mut man_dec: Option<heapless::String<{ config::MANUFACTURER_MAX }>> = None;
-                let mut prod_dec: Option<heapless::String<{ config::PRODUCT_MAX }>> = None;
+                let mut man_dec: Option<heapless::String<{ device_config::MANUFACTURER_MAX }>> = None;
+                let mut prod_dec: Option<heapless::String<{ device_config::PRODUCT_MAX }>> = None;
                 if let Some(m) = man_raw {
-                    if let Some(s) = percent_decode_str::<{ config::MANUFACTURER_MAX }>(m) { man_dec = Some(s); }
+                    if let Some(s) = percent_decode_str::<{ device_config::MANUFACTURER_MAX }>(m) { man_dec = Some(s); }
                     else { respond_text(socket, 400, "bad manufacturer\n").await?; return Ok(()); }
                 }
                 if let Some(p) = prod_raw {
-                    if let Some(s) = percent_decode_str::<{ config::PRODUCT_MAX }>(p) { prod_dec = Some(s); }
+                    if let Some(s) = percent_decode_str::<{ device_config::PRODUCT_MAX }>(p) { prod_dec = Some(s); }
                     else { respond_text(socket, 400, "bad product\n").await?; return Ok(()); }
                 }
 
-                if let Err(e) = config::set_partial(man_dec.as_deref(), prod_dec.as_deref()).await {
+                if let Err(e) = device_config::set_partial(man_dec.as_deref(), prod_dec.as_deref()).await {
                     match e {
-                        config::SetError::TooLongManufacturer | config::SetError::TooLongProduct => {
+                        device_config::SetError::TooLongManufacturer | device_config::SetError::TooLongProduct => {
                             respond_text(socket, 413, "value too long\n").await?
                         }
-                        config::SetError::InvalidChars => {
+                        device_config::SetError::InvalidChars => {
                             respond_text(socket, 400, "invalid characters\n").await?
                         }
                     }
                 } else {
-                    let _ = config::save().await; // Best-effort
+                    let _ = device_config::save().await; // Best-effort
                     respond_text(socket, 200, "ok\n").await?
                 }
             }
