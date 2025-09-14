@@ -1,0 +1,298 @@
+use embassy_time::Timer;
+use embassy_usb::class::hid::HidWriter as UsbHidWriter;
+
+use crate::keyboard;
+
+#[derive(Debug)]
+pub enum DslError {
+    TooManyLines,
+    UnknownCommand,
+    InvalidLine,
+    ParseKey,
+    ParseMod,
+    ParseDelay,
+    TextEmpty,
+}
+
+/// Intermediate representation for a compiled DSL program.
+pub enum Op<'a> {
+    Tap { key: u8, mods: u8 },
+    DelayMs(u32),
+    Text { s: &'a str, delay_ms: u16 },
+}
+
+pub struct Program<'a> {
+    pub ops: heapless::Vec<Op<'a>, 256>,
+}
+
+impl<'a> Program<'a> {
+    pub const fn new() -> Self {
+        Self { ops: heapless::Vec::new() }
+    }
+}
+
+/// Compile the full DSL into a `Program` (no side effects).
+pub fn compile_dsl<'a>(dsl: &'a str) -> Result<Program<'a>, DslError> {
+    const MAX_LINES: usize = 256;
+    const MAX_DELAY_MS: u64 = 5000;
+
+    let mut prog = Program::new();
+    let mut count = 0usize;
+    for raw in dsl.lines() {
+        if count >= MAX_LINES { return Err(DslError::TooManyLines); }
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        count += 1;
+
+        let (cmd, rest) = split_head(line).ok_or(DslError::InvalidLine)?;
+        if eq_ci(cmd, "tap") {
+            let key_name = rest.trim();
+            if key_name.is_empty() { return Err(DslError::InvalidLine); }
+            let key = parse_key(key_name).ok_or(DslError::ParseKey)?;
+            prog.ops.push(Op::Tap { key, mods: 0 }).map_err(|_| DslError::TooManyLines)?;
+        } else if eq_ci(cmd, "modtap") {
+            let arg = rest.trim();
+            if arg.is_empty() { return Err(DslError::InvalidLine); }
+            let (mods, key) = parse_modtap(arg)?;
+            prog.ops.push(Op::Tap { key, mods }).map_err(|_| DslError::TooManyLines)?;
+        } else if eq_ci(cmd, "delay") {
+            let ms: u64 = rest.trim().parse::<u64>().map_err(|_| DslError::ParseDelay)?;
+            let ms = core::cmp::min(ms, MAX_DELAY_MS) as u32;
+            if ms != 0 { prog.ops.push(Op::DelayMs(ms)).map_err(|_| DslError::TooManyLines)?; }
+        } else if eq_ci(cmd, "text") {
+            let r = rest;
+            let (text, delay_ms) = parse_text_args(r)?;
+            let delay_ms = core::cmp::min(delay_ms as u64, MAX_DELAY_MS) as u16;
+            if !text.is_empty() {
+                prog.ops.push(Op::Text { s: text, delay_ms }).map_err(|_| DslError::TooManyLines)?;
+            }
+        } else {
+            return Err(DslError::UnknownCommand);
+        }
+    }
+    Ok(prog)
+}
+
+/// Execute a compiled program.
+pub async fn exec_program<'d, 'a, D>(w: &mut UsbHidWriter<'d, D, 8>, prog: &Program<'a>)
+where
+    D: embassy_usb::driver::Driver<'d>,
+{
+    for op in prog.ops.iter() {
+        match *op {
+            Op::Tap { key, mods } => {
+                keyboard::tap_with_mod(w, key, mods).await;
+            }
+            Op::DelayMs(ms) => {
+                if ms != 0 { Timer::after_millis(ms as u64).await; }
+            }
+            Op::Text { s, delay_ms } => {
+                keyboard::type_str(w, s, delay_ms as u64).await;
+            }
+        }
+    }
+}
+
+/// Execute a small line-based DSL against the HID writer.
+///
+/// Supported commands (case-insensitive):
+/// - "tap KEY"
+/// - "modtap MOD+MOD+KEY" (MOD: LCTRL, LSHIFT, LALT, LGUI, RCTRL, RSHIFT, RALT, RGUI; aliases: CTRL, SHIFT, ALT, GUI, CMD, WIN, OPTION, CONTROL)
+/// - "delay N" (milliseconds, clamped)
+/// - "text STRING [DELAY]" (optional per-char delay in ms)
+pub async fn run_dsl<'d, D>(w: &mut UsbHidWriter<'d, D, 8>, dsl: &str) -> Result<(), DslError>
+where
+    D: embassy_usb::driver::Driver<'d>,
+{
+    let prog = compile_dsl(dsl)?;
+    exec_program(w, &prog).await;
+    Ok(())
+}
+
+fn split_head(s: &str) -> Option<(&str, &str)> {
+    let mut it = s.splitn(2, char::is_whitespace);
+    let head = it.next()?;
+    let tail = it.next().unwrap_or("");
+    Some((head, tail))
+}
+
+fn eq_ci(a: &str, b: &str) -> bool { a.eq_ignore_ascii_case(b) }
+
+fn parse_modtap(s: &str) -> Result<(u8, u8), DslError> {
+    let mut mods: u8 = 0;
+    let mut parts = s.split('+').peekable();
+    let mut last_is_key = false;
+    let mut key: u8 = 0;
+    while let Some(p) = parts.next() {
+        let t = p.trim();
+        if t.is_empty() { return Err(DslError::InvalidLine); }
+        // If this is the last segment, treat as key.
+        if parts.peek().is_none() {
+            key = parse_key(t).ok_or(DslError::ParseKey)?;
+            last_is_key = true;
+        } else {
+            let m = parse_mod(t).ok_or(DslError::ParseMod)?;
+            mods |= m;
+        }
+    }
+    if !last_is_key { return Err(DslError::ParseKey); }
+    Ok((mods, key))
+}
+
+fn parse_text_args(rest: &str) -> Result<(&str, u64), DslError> {
+    let r = rest.trim();
+    if r.is_empty() { return Err(DslError::TextEmpty); }
+    // Optional trailing integer for delay.
+    // Find last space; if suffix is integer, use it as delay.
+    let mut delay_ms: u64 = 10;
+    if let Some(idx) = r.rfind(char::is_whitespace) {
+        let (lhs, rhs) = r.split_at(idx);
+        let maybe = rhs.trim();
+        if !maybe.is_empty() {
+            if let Ok(n) = maybe.parse::<u64>() {
+                delay_ms = core::cmp::min(n, 5000);
+                let text = lhs.trim_end();
+                return Ok((text, delay_ms));
+            }
+        }
+    }
+    Ok((r, delay_ms))
+}
+
+fn parse_mod(s: &str) -> Option<u8> {
+    // Normalize to upper ASCII in a small buffer
+    let up = upper_ascii::<16>(s);
+    let u = up.as_str();
+    Some(match u {
+        "LCTRL" | "CONTROL" | "CTRL" => keyboard::MOD_LCTRL,
+        "RCTRL" => keyboard::MOD_RCTRL,
+        "LSHIFT" | "SHIFT" => keyboard::MOD_LSHIFT,
+        "RSHIFT" => keyboard::MOD_RSHIFT,
+        "LALT" | "ALT" | "OPTION" => keyboard::MOD_LALT,
+        "RALT" => keyboard::MOD_RALT,
+        "LGUI" | "GUI" | "CMD" | "WIN" => keyboard::MOD_LGUI,
+        "RGUI" => keyboard::MOD_RGUI,
+        _ => return None,
+    })
+}
+
+fn parse_key(s: &str) -> Option<u8> {
+    // Single letter A..Z
+    if s.len() == 1 {
+        let b = s.as_bytes()[0];
+        if b'A' <= b && b <= b'Z' {
+            return Some(keyboard::KEY_A + (b - b'A'));
+        }
+        if b'a' <= b && b <= b'z' {
+            return Some(keyboard::KEY_A + (b - b'a'));
+        }
+    }
+
+    let up = upper_ascii::<24>(s);
+    let u = up.as_str();
+
+    // Function keys
+    if let Some(num) = u.strip_prefix('F').and_then(|t| t.parse::<u8>().ok()) {
+        return match num {
+            1 => Some(keyboard::KEY_F1),
+            2 => Some(keyboard::KEY_F2),
+            3 => Some(keyboard::KEY_F3),
+            4 => Some(keyboard::KEY_F4),
+            5 => Some(keyboard::KEY_F5),
+            6 => Some(keyboard::KEY_F6),
+            7 => Some(keyboard::KEY_F7),
+            8 => Some(keyboard::KEY_F8),
+            9 => Some(keyboard::KEY_F9),
+            10 => Some(keyboard::KEY_F10),
+            11 => Some(keyboard::KEY_F11),
+            12 => Some(keyboard::KEY_F12),
+            _ => None,
+        };
+    }
+
+    // KP_ keys
+    if let Some(rest) = u.strip_prefix("KP_") {
+        return match rest {
+            "ENTER" => Some(keyboard::KEY_KP_ENTER),
+            "+" | "PLUS" => Some(keyboard::KEY_KP_PLUS),
+            "-" | "MINUS" => Some(keyboard::KEY_KP_MINUS),
+            "*" | "ASTERISK" => Some(keyboard::KEY_KP_ASTERISK),
+            "/" | "SLASH" => Some(keyboard::KEY_KP_SLASH),
+            "." | "DOT" | "DECIMAL" => Some(keyboard::KEY_KP_DOT),
+            "0" => Some(keyboard::KEY_KP_0),
+            "1" => Some(keyboard::KEY_KP_1),
+            "2" => Some(keyboard::KEY_KP_2),
+            "3" => Some(keyboard::KEY_KP_3),
+            "4" => Some(keyboard::KEY_KP_4),
+            "5" => Some(keyboard::KEY_KP_5),
+            "6" => Some(keyboard::KEY_KP_6),
+            "7" => Some(keyboard::KEY_KP_7),
+            "8" => Some(keyboard::KEY_KP_8),
+            "9" => Some(keyboard::KEY_KP_9),
+            _ => None,
+        };
+    }
+
+    // Number row
+    if u.len() == 1 {
+        let b = u.as_bytes()[0];
+        if b'1' <= b && b <= b'9' {
+            return Some(keyboard::KEY_1 + (b - b'1'));
+        }
+        if b == b'0' { return Some(keyboard::KEY_0); }
+    }
+
+    Some(match u {
+        // Common control keys
+        "ENTER" | "RETURN" => keyboard::KEY_ENTER,
+        "ESC" | "ESCAPE" => keyboard::KEY_ESC,
+        "BACKSPACE" | "BKSP" => keyboard::KEY_BACKSPACE,
+        "TAB" => keyboard::KEY_TAB,
+        "SPACE" | "SPACEBAR" => keyboard::KEY_SPACE,
+        "CAPS_LOCK" | "CAPS" => keyboard::KEY_CAPS_LOCK,
+        "PRINT_SCREEN" | "PRTSCR" => keyboard::KEY_PRINT_SCREEN,
+        "SCROLL_LOCK" => keyboard::KEY_SCROLL_LOCK,
+        "PAUSE" | "BREAK" => keyboard::KEY_PAUSE,
+        "INSERT" | "INS" => keyboard::KEY_INSERT,
+        "DELETE" | "DEL" => keyboard::KEY_DELETE,
+        "HOME" => keyboard::KEY_HOME,
+        "END" => keyboard::KEY_END,
+        "PAGE_UP" | "PGUP" => keyboard::KEY_PAGE_UP,
+        "PAGE_DOWN" | "PGDN" => keyboard::KEY_PAGE_DOWN,
+        "LEFT" => keyboard::KEY_LEFT,
+        "RIGHT" => keyboard::KEY_RIGHT,
+        "UP" => keyboard::KEY_UP,
+        "DOWN" => keyboard::KEY_DOWN,
+
+        // Punctuation cluster by name
+        "MINUS" | "HYPHEN" => keyboard::KEY_MINUS,
+        "EQUAL" | "EQUALS" | "PLUS" => keyboard::KEY_EQUAL,
+        "LEFT_BRACKET" | "LBRACKET" | "LBRACE" => keyboard::KEY_LEFT_BRACKET,
+        "RIGHT_BRACKET" | "RBRACKET" | "RBRACE" => keyboard::KEY_RIGHT_BRACKET,
+        "BACKSLASH" | "BSLASH" | "PIPE" => keyboard::KEY_BACKSLASH,
+        "NON_US_HASH" => keyboard::KEY_NON_US_HASH,
+        "SEMICOLON" | "SEMI" | ":" => keyboard::KEY_SEMICOLON,
+        "APOSTROPHE" | "QUOTE" | "'" | "\"" => keyboard::KEY_APOSTROPHE,
+        "GRAVE" | "BACKTICK" | "TILDE" => keyboard::KEY_GRAVE,
+        "COMMA" | "," | "<" => keyboard::KEY_COMMA,
+        "DOT" | "PERIOD" | "." | ">" => keyboard::KEY_DOT,
+        "SLASH" | "/" | "?" => keyboard::KEY_SLASH,
+
+        // Non-US backslash for ISO layouts
+        "NON_US_BACKSLASH" => keyboard::KEY_NON_US_BACKSLASH,
+
+        // Number lock
+        "NUM_LOCK" => keyboard::KEY_NUM_LOCK,
+
+        _ => return None,
+    })
+}
+
+fn upper_ascii<const N: usize>(s: &str) -> heapless::String<N> {
+    let mut out: heapless::String<N> = heapless::String::new();
+    for b in s.bytes() {
+        let up = if b'a' <= b && b <= b'z' { b - 32 } else { b };
+        let _ = out.push(up as char);
+    }
+    out
+}

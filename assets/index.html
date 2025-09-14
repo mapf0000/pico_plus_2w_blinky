@@ -14,7 +14,18 @@
       button, input, select { font: inherit; padding: 6px 10px; }
       button { cursor: pointer; }
       .muted { opacity: 0.8; font-size: 0.9rem; }
-      #status { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      /* Status bar styling */
+      #status.status-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid #8883; background: #8881; font-weight: 500; }
+      .badge.on { color: #166534; border-color: #16a34a66; background: #16a34a1f; }
+      .badge.off { color: #7f1d1d; border-color: #dc262666; background: #dc26261f; }
+      .badge.neutral { color: #334155; border-color: #94a3b866; background: #94a3b81f; }
+      .badge.mac { color: #4c1d95; border-color: #7c3aed66; background: #7c3aed1f; }
+      .badge.windows { color: #1e40af; border-color: #2563eb66; background: #2563eb1f; }
+      /* Spinner */
+      #spinner { display: none; align-items: center; gap: 6px; opacity: .85; }
+      #spinner::before { content: ""; width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; display: inline-block; animation: spin .8s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
       #log { white-space: pre-wrap; background: #0001; padding: 8px; border-radius: 6px; min-height: 1.5em; }
       .inline { display: inline-flex; gap: 8px; align-items: center; }
       .hint { font-size: .85rem; opacity: .75; }
@@ -25,11 +36,18 @@
 
     <div class="card">
       <h2>Status</h2>
-      <div id="status">Loading…</div>
-      <div class="hint">Refreshes every second.</div>
+      <div class="row" style="justify-content: space-between; align-items: center;">
+        <div id="status" class="status-bar">
+          <span id="stUsbEnabled" class="badge neutral" title="USB device registration">🔌 USB: …</span>
+          <span id="stUsbReady" class="badge neutral" title="USB host ready">⌨️ Ready: …</span>
+          <span id="stHostOs" class="badge neutral" title="Host OS">🖥️ OS: …</span>
+        </div>
+        <div id="spinner" class="muted" style="display:none">Working…</div>
+      </div>
+      <div class="hint">Refreshes every 5s.</div>
     </div>
 
-    <div class="card">
+    <div class="card" id="usbCard">
       <h2>USB Bring-up</h2>
       <div class="row" style="margin-bottom:8px">
         <label class="inline"><input type="radio" name="os" value="mac" checked> macOS</label>
@@ -42,22 +60,27 @@
       <div class="hint">Assistant forces macOS Keyboard Setup Assistant sequence when enabled.</div>
     </div>
 
+    
+
     <div class="card">
-      <h2>Automation</h2>
-      <div class="row" style="margin-bottom:8px">
-        <button id="btnOpenTerminal">Open macOS Terminal</button>
-        <button id="btnRunAssistant">Run macOS Keyboard Assistant</button>
+      <h2>Scripting</h2>
+      <div class="row" style="margin-bottom:8px; flex-direction: column; align-items: stretch; gap: 6px;">
+        <textarea id="scriptDsl" rows="6" cols="60" placeholder="tap ENTER
+modtap LGUI+SPACE
+delay 400
+text Terminal 10"></textarea>
+        <div class="row">
+          <button id="btnRunDsl">Run Script</button>
+          <span class="hint">Commands: tap KEY; modtap MOD+KEY; delay MS; text STRING [DELAY].</span>
+        </div>
       </div>
-      <div class="row">
-        <input id="typeText" type="text" placeholder="Text to type" maxlength="200" size="32" />
-        <label class="inline">Delay ms <input id="delayMs" type="number" min="0" max="200" value="10" style="width:6em" /></label>
-        <button id="btnType">Type</button>
-      </div>
-      <div class="hint">Typing is limited to ASCII supported by the firmware.</div>
     </div>
 
     <div class="card">
-      <h2>Log</h2>
+      <div class="row" style="justify-content: space-between; align-items: center;">
+        <h2 style="margin:0">Log</h2>
+        <button id="btnClearLog" class="muted" style="font-size:.9rem">Clear Log</button>
+      </div>
       <div id="log"></div>
     </div>
 
@@ -70,71 +93,241 @@
         return el ? el.value : 'mac';
       }
 
+      let busyCount = 0;
+      function setBusy(on) {
+        busyCount = Math.max(0, on ? busyCount + 1 : busyCount - 1);
+        const sp = document.getElementById('spinner');
+        if (sp) sp.style.display = busyCount > 0 ? 'inline-flex' : 'none';
+      }
+
       async function http(method, path, body) {
-        const res = await fetch(path, {
-          method,
-          headers: body ? { 'Content-Type': 'text/plain', 'Content-Length': String(body.length) } : undefined,
-          body: body || undefined,
-        });
-        const text = await res.text().catch(() => '');
-        log(`${method} ${path} -> ${res.status} ${res.statusText}\n${text}`);
-        return { status: res.status, ok: res.ok, text };
+        setBusy(true);
+        try {
+          const res = await fetch(path, {
+            method,
+            headers: body != null ? { 'Content-Type': 'text/plain; charset=utf-8' } : undefined,
+            body: body != null ? body : undefined,
+          });
+          const text = await res.text().catch(() => '');
+          log(`${method} ${path} -> ${res.status} ${res.statusText}\n${text}`);
+          return { status: res.status, ok: res.ok, text };
+        } catch (e) {
+          log(`${method} ${path} -> network error\n${String(e)}`);
+          return { status: 0, ok: false, text: '' };
+        } finally {
+          setBusy(false);
+        }
       }
 
       function log(msg) {
         const el = $('#log');
         const now = new Date().toLocaleTimeString();
         el.textContent = `[${now}] ${msg}\n` + el.textContent;
+        if (el.textContent.length > 16000) {
+          el.textContent = el.textContent.slice(0, 16000);
+        }
       }
 
+      let refreshing = false;
       async function refreshStatus() {
+        if (refreshing) return;
+        refreshing = true;
         try {
           const res = await fetch('/status');
           const txt = await res.text();
           let s;
           try { s = JSON.parse(txt); } catch { s = {}; }
-          $('#status').textContent = `usb_enabled: ${s.usb_enabled ?? '?'}, usb_ready: ${s.usb_ready ?? '?'}, host_os: ${s.host_os ?? '?'}`;
-          // Enable/disable controls based on state
+          // Render status badges
+          const stEnabled = document.getElementById('stUsbEnabled');
+          const stReady = document.getElementById('stUsbReady');
+          const stOs = document.getElementById('stHostOs');
+
           const usbEnabled = !!s.usb_enabled;
           const usbReady = !!s.usb_ready;
+          const hostOs = s.host_os || '?';
+
+          if (stEnabled) {
+            stEnabled.textContent = `🔌 USB: ${usbEnabled ? 'On' : 'Off'}`;
+            stEnabled.classList.remove('on', 'off', 'neutral');
+            stEnabled.classList.add(usbEnabled ? 'on' : 'off');
+          }
+          if (stReady) {
+            stReady.textContent = `⌨️ Ready: ${usbReady ? 'Yes' : 'No'}`;
+            stReady.classList.remove('on', 'off', 'neutral');
+            stReady.classList.add(usbReady ? 'on' : 'off');
+          }
+          if (stOs) {
+            const osLabel = hostOs === 'mac' ? 'macOS' : hostOs === 'windows' ? 'Windows' : String(hostOs);
+            stOs.textContent = `🖥️ OS: ${osLabel}`;
+            stOs.classList.remove('mac', 'windows', 'neutral');
+            if (hostOs === 'mac') stOs.classList.add('mac');
+            else if (hostOs === 'windows') stOs.classList.add('windows');
+            else stOs.classList.add('neutral');
+          }
+
+          // Enable/disable controls based on state
           $('#btnUsbAssistant').disabled = usbEnabled;
           $('#btnUsbNoAssistant').disabled = usbEnabled;
-          $('#btnOpenTerminal').disabled = !usbReady;
-          $('#btnRunAssistant').disabled = !usbReady;
-          $('#btnType').disabled = !usbReady;
-          $('#typeText').disabled = !usbReady;
-          $('#delayMs').disabled = !usbReady;
+          // No automation controls to toggle
+          const btnRunDsl = document.getElementById('btnRunDsl');
+          const scriptDsl = document.getElementById('scriptDsl');
+          if (btnRunDsl && scriptDsl) {
+            btnRunDsl.disabled = !usbReady;
+            scriptDsl.disabled = !usbReady;
+          }
+
+          // Hide USB bring-up card when USB is enabled
+          const usbCard = document.getElementById('usbCard');
+          if (usbCard) usbCard.style.display = usbEnabled ? 'none' : '';
         } catch (e) {
-          $('#status').textContent = 'Status unavailable';
+          // Status unavailable: set badges to neutral
+          const stEnabled = document.getElementById('stUsbEnabled');
+          const stReady = document.getElementById('stUsbReady');
+          const stOs = document.getElementById('stHostOs');
+          if (stEnabled) { stEnabled.textContent = '🔌 USB: —'; stEnabled.classList.remove('on','off'); stEnabled.classList.add('neutral'); }
+          if (stReady) { stReady.textContent = '⌨️ Ready: —'; stReady.classList.remove('on','off'); stReady.classList.add('neutral'); }
+          if (stOs) { stOs.textContent = '🖥️ OS: —'; stOs.classList.remove('mac','windows'); stOs.classList.add('neutral'); }
+        } finally {
+          refreshing = false;
         }
       }
 
       // Wire actions
-      $('#btnUsbAssistant').addEventListener('click', async () => {
+      $('#btnUsbAssistant').addEventListener('click', async (ev) => {
+        const btn = ev.currentTarget; btn.disabled = true;
         await http('POST', `/usb/register?assistant=1&os=${encodeURIComponent(selectedOs())}`);
+        btn.disabled = false;
         refreshStatus();
       });
-      $('#btnUsbNoAssistant').addEventListener('click', async () => {
+      $('#btnUsbNoAssistant').addEventListener('click', async (ev) => {
+        const btn = ev.currentTarget; btn.disabled = true;
         await http('POST', `/usb/register?assistant=0&os=${encodeURIComponent(selectedOs())}`);
+        btn.disabled = false;
         refreshStatus();
       });
-      $('#btnOpenTerminal').addEventListener('click', async () => {
-        await http('POST', '/automation/open_macos_terminal');
+      // Removed automation endpoints and type handler
+
+      $('#btnRunDsl').addEventListener('click', async (ev) => {
+        const btn = ev.currentTarget; btn.disabled = true;
+        const body = $('#scriptDsl').value || '';
+        if (!body.trim()) { log('Empty script.'); btn.disabled = false; return; }
+        const errs = lintDsl(body);
+        if (errs.length) {
+          log('Script errors:\n' + errs.map(e => `- ${e}`).join('\n'));
+          btn.disabled = false; return;
+        }
+        await http('POST', '/kb/script', body);
+        btn.disabled = false;
       });
-      $('#btnRunAssistant').addEventListener('click', async () => {
-        await http('POST', '/automation/mac_assistant');
+
+      // Clear log
+      document.getElementById('btnClearLog').addEventListener('click', () => { document.getElementById('log').textContent = ''; });
+
+      // Persist OS choice and script
+      function savePref(key, val) { try { localStorage.setItem(key, val); } catch {} }
+      function loadPref(key) { try { return localStorage.getItem(key); } catch { return null; } }
+      // OS radios
+      $$('input[name="os"]').forEach(r => {
+        r.addEventListener('change', () => savePref('pref.os', selectedOs()));
       });
-      $('#btnType').addEventListener('click', async () => {
-        const text = $('#typeText').value || '';
-        const delay = Math.max(0, Math.min(200, parseInt($('#delayMs').value || '10', 10)));
-        if (!text) { log('Nothing to type.'); return; }
-        await http('POST', `/kb/type?delay_ms=${delay}`, text);
-      });
+      const savedOs = loadPref('pref.os');
+      if (savedOs) {
+        const el = $$('input[name="os"]').find(e => e.value === savedOs);
+        if (el) { el.checked = true; }
+      }
+      // Script
+      const savedScript = loadPref('pref.script');
+      if (savedScript) { $('#scriptDsl').value = savedScript; }
+      $('#scriptDsl').addEventListener('input', () => savePref('pref.script', $('#scriptDsl').value));
+
+      // Load built-in scripts from firmware and inject UI
+      async function loadScriptsUi(){
+        const card = Array.from(document.querySelectorAll('.card h2')).find(h => h.textContent.trim() === 'Scripting');
+        if (!card) return;
+        const container = card.parentElement;
+
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.style.marginTop = '6px';
+        row.innerHTML = `
+          <label class=\"inline\">Built-in
+            <select id=\"scriptTpl\">
+              <option value=\"\">Loading…</option>
+            </select>
+          </label>
+          <button id=\"btnInsertTpl\">Insert DSL</button>
+        `;
+        container.appendChild(row);
+
+        const select = document.getElementById('scriptTpl');
+        const map = new Map(); // id -> {name, dsl}
+        try {
+          const res = await fetch('/kb/scripts');
+          const arr = await res.json();
+          // Reset options
+          select.innerHTML = '<option value="">Choose…</option>';
+          for (const s of arr) {
+            const opt = document.createElement('option');
+            opt.value = s.id;
+            opt.textContent = `${s.name}`;
+            opt.title = s.description || '';
+            select.appendChild(opt);
+            map.set(s.id, { name: s.name, dsl: s.dsl || '' });
+          }
+        } catch (e) {
+          select.innerHTML = '<option value="">Failed to load</option>';
+        }
+
+        document.getElementById('btnInsertTpl').addEventListener('click', () => {
+          const id = select.value;
+          const meta = map.get(id);
+          if (!id || !meta || !meta.dsl) return;
+          const ta = document.getElementById('scriptDsl');
+          ta.value = meta.dsl;
+          ta.dispatchEvent(new Event('input'));
+        });
+        // Removed direct Run Built-in. Use Insert DSL + Run Script flow.
+      }
+
+      // Simple DSL linter
+      function lintDsl(text) {
+        const errs = [];
+        const lines = text.split(/\r?\n/);
+        for (let i = 0; i < lines.length; i++) {
+          const ln = i + 1;
+          const raw = lines[i];
+          const s = raw.trim();
+          if (!s || s.startsWith('#')) continue;
+          const parts = s.split(/\s+/);
+          const cmd = (parts.shift() || '').toLowerCase();
+          const tail = parts.join(' ');
+          switch (cmd) {
+            case 'tap':
+              if (!tail) errs.push(`line ${ln}: tap requires KEY`);
+              break;
+            case 'modtap':
+              if (!tail || !tail.includes('+')) errs.push(`line ${ln}: modtap requires MOD+KEY`);
+              break;
+            case 'delay':
+              if (!/^\d+$/.test(tail.trim())) errs.push(`line ${ln}: delay requires milliseconds`);
+              break;
+            case 'text':
+              if (!tail) errs.push(`line ${ln}: text requires STRING`);
+              break;
+            default:
+              errs.push(`line ${ln}: unknown command '${cmd}'`);
+          }
+        }
+        return errs;
+      }
+
+      // Removed: Automation "Type" to script helper
 
       // Initial status + poll
       refreshStatus();
       setInterval(refreshStatus, 5000);
+      // Load scripts UI
+      loadScriptsUi();
     </script>
   </body>
   </html>
-

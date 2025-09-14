@@ -211,7 +211,8 @@ async fn main(spawner: Spawner) {
 
 mod http;
 mod keyboard;
-mod automation;
 mod hid;
 mod dhcp;
 mod host;
+mod script_dsl;
+mod scripts;

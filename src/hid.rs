@@ -4,13 +4,11 @@ use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
 use embassy_usb::class::hid::HidWriter as UsbHidWriter;
 use heapless::String;
 
-use crate::{automation, keyboard};
+use crate::{script_dsl, scripts};
 
 // Command channel and state
 pub enum HidCommand {
-    Type { text: String<256>, delay_ms: u64 },
-    OpenMacTerminal,
-    MacAssistant,
+    RunDsl { dsl: String<512> },
 }
 
 pub static HID_CHAN: Channel<ThreadModeRawMutex, HidCommand, 8> = Channel::new();
@@ -26,20 +24,19 @@ where
     log::info!("usb: HID keyboard ready");
 
     if run_mac_assistant_on_start {
-        automation::mac_assistant_once(&mut writer).await;
+        scripts::run_builtin(scripts::BuiltinScript::MacAssistantOnce, &mut writer).await;
     }
 
     loop {
         let cmd = HID_CHAN.receive().await;
         match cmd {
-            HidCommand::Type { text, delay_ms } => {
-                keyboard::type_str(&mut writer, &text, delay_ms).await;
-            }
-            HidCommand::OpenMacTerminal => {
-                automation::open_macos_terminal(&mut writer).await;
-            }
-            HidCommand::MacAssistant => {
-                automation::mac_assistant_once(&mut writer).await;
+            HidCommand::RunDsl { dsl } => {
+                match script_dsl::run_dsl(&mut writer, &dsl).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        log::warn!("dsl: error executing script: {:?}", e);
+                    }
+                }
             }
         }
     }

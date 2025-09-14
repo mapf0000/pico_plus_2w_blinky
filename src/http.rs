@@ -7,6 +7,7 @@ use heapless::String;
 use crate::hid::{HID_CHAN, HidCommand, USB_READY};
 use crate::{USB_ENABLED, USB_START};
 use crate::host::{self, HostOs};
+use crate::scripts;
 
 const SERVER_PORT: u16 = 80;
 
@@ -80,7 +81,7 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
                 }
             }
         }
-        Route::KbType { delay_ms } => {
+        Route::KbScript => {
             // Verify USB ready
             if !USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst)
                 || !USB_READY.load(core::sync::atomic::Ordering::SeqCst)
@@ -99,7 +100,7 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
                 let content_length = parse_content_length(headers).unwrap_or(0);
                 if content_length == 0 {
                     respond_text(socket, 400, "empty body\n").await?
-                } else if content_length > 256 {
+                } else if content_length > 512 {
                     respond_text(socket, 413, "payload too large\n").await?
                 } else {
                     let body_start = header_end + 4;
@@ -117,58 +118,49 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
                         respond_text(socket, 400, "incomplete body\n").await?
                     } else {
                         let body = &buf[body_start..body_start + content_length];
-                        let text = match core::str::from_utf8(body) {
-                            Ok(s) => s,
-                            Err(_) => {
-                                respond_text(socket, 400, "invalid utf-8\n").await?;
-                                return Ok(());
-                            }
-                        };
-                        // Validate characters
-                        if !text
-                            .chars()
-                            .all(|c| crate::keyboard::char_to_key(c).is_some())
-                        {
-                            respond_text(socket, 400, "unsupported character\n").await?;
+                        // Validate ASCII-ish payload (tabs/newlines allowed)
+                        if !body.iter().all(|b| matches!(b, 9 | 10 | 13 | 32..=126)) {
+                            respond_text(socket, 400, "invalid characters\n").await?
                         } else {
-                            let mut s: heapless::String<256> = heapless::String::new();
-                            if s.push_str(text).is_err() {
-                                respond_text(socket, 413, "payload too large\n").await?
-                            } else {
-                                match HID_CHAN.try_send(HidCommand::Type { text: s, delay_ms }) {
-                                    Ok(()) => respond_text(socket, 202, "queued\n").await?,
-                                    Err(_) => respond_text(socket, 409, "busy\n").await?,
+                            let mut s: heapless::String<512> = heapless::String::new();
+                            for &ch in body {
+                                if s.push(ch as char).is_err() {
+                                    respond_text(socket, 413, "payload too large\n").await?;
+                                    return Ok(());
                                 }
+                            }
+                            match HID_CHAN.try_send(HidCommand::RunDsl { dsl: s }) {
+                                Ok(()) => respond_text(socket, 202, "queued\n").await?,
+                                Err(_) => respond_text(socket, 409, "busy\n").await?,
                             }
                         }
                     }
                 }
             }
         }
-        Route::AutomationOpenMacTerminal => {
-            if !USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst)
-                || !USB_READY.load(core::sync::atomic::Ordering::SeqCst)
-            {
-                respond_text(socket, 409, "USB not ready\n").await?
-            } else {
-                match HID_CHAN.try_send(HidCommand::OpenMacTerminal) {
-                    Ok(()) => respond_text(socket, 202, "queued\n").await?,
-                    Err(_) => respond_text(socket, 409, "busy\n").await?,
+        Route::KbScriptsList => {
+            // Build a small JSON array of script metadata.
+            let mut body: String<768> = String::new();
+            let _ = write!(&mut body, "[");
+            for (i, s) in scripts::SCRIPTS.iter().enumerate() {
+                if i != 0 { let _ = write!(&mut body, ","); }
+                let _ = write!(
+                    &mut body,
+                    "{{\"id\":\"{}\",\"name\":\"{}\",\"description\":\"{}\"",
+                    s.id, s.name, s.description
+                );
+                if let Some(pre) = s.dsl_preview {
+                    // Escape basic characters for JSON
+                    let esc = escape_json_str(pre);
+                    let _ = write!(&mut body, ",\"dsl\":\"{}\"", esc.as_str());
                 }
+                let _ = write!(&mut body, "}}");
             }
+            let _ = write!(&mut body, "]\n");
+            respond_bytes(socket, 200, "application/json", body.as_bytes()).await?
         }
-        Route::AutomationMacAssistant => {
-            if !USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst)
-                || !USB_READY.load(core::sync::atomic::Ordering::SeqCst)
-            {
-                respond_text(socket, 409, "USB not ready\n").await?
-            } else {
-                match HID_CHAN.try_send(HidCommand::MacAssistant) {
-                    Ok(()) => respond_text(socket, 202, "queued\n").await?,
-                    Err(_) => respond_text(socket, 409, "busy\n").await?,
-                }
-            }
-        }
+        // Removed: Route::KbScriptRunBuiltin
+        
         Route::Status => {
             let enabled = USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
             let ready = USB_READY.load(core::sync::atomic::Ordering::SeqCst);
@@ -214,9 +206,8 @@ fn split_target(target: &str) -> (&str, Option<&str>) {
 #[derive(Debug)]
 enum Route {
     UsbRegister { run_assistant: bool, host_os: Option<HostOs> },
-    KbType { delay_ms: u64 },
-    AutomationOpenMacTerminal,
-    AutomationMacAssistant,
+    KbScript,
+    KbScriptsList,
     Status,
     Root,
     NotFound,
@@ -230,12 +221,8 @@ fn parse_route(method: &str, target: &str) -> Route {
             let host_os = query_os(query);
             Route::UsbRegister { run_assistant, host_os }
         }
-        ("POST", "/kb/type") => {
-            let delay_ms = query_u64(query, "delay_ms").unwrap_or(10);
-            Route::KbType { delay_ms }
-        }
-        ("POST", "/automation/open_macos_terminal") => Route::AutomationOpenMacTerminal,
-        ("POST", "/automation/mac_assistant") => Route::AutomationMacAssistant,
+        ("POST", "/kb/script") => Route::KbScript,
+        ("GET", "/kb/scripts") => Route::KbScriptsList,
         ("GET", "/status") => Route::Status,
         ("GET", "/") => Route::Root,
         _ => Route::NotFound,
@@ -245,9 +232,8 @@ fn parse_route(method: &str, target: &str) -> Route {
 fn route_name(r: &Route) -> &'static str {
     match r {
         Route::UsbRegister { .. } => "/usb/register",
-        Route::KbType { .. } => "/kb/type",
-        Route::AutomationOpenMacTerminal => "/automation/open_macos_terminal",
-        Route::AutomationMacAssistant => "/automation/mac_assistant",
+        Route::KbScript => "/kb/script",
+        Route::KbScriptsList => "/kb/scripts",
         Route::Status => "/status",
         Route::Root => "/",
         Route::NotFound => "notfound",
@@ -274,20 +260,7 @@ fn query_flag(query: Option<&str>, key: &str) -> Option<bool> {
     None
 }
 
-fn query_u64(query: Option<&str>, key: &str) -> Option<u64> {
-    let q = query?;
-    for pair in q.split('&') {
-        if let Some(eq) = pair.find('=') {
-            let (k, v) = (&pair[..eq], &pair[eq + 1..]);
-            if k == key {
-                if let Ok(val) = v.parse::<u64>() {
-                    return Some(val);
-                }
-            }
-        }
-    }
-    None
-}
+// query_u64 removed; no numeric query parameters remain
 
 fn query_os(query: Option<&str>) -> Option<HostOs> {
     let q = query?;
@@ -305,6 +278,8 @@ fn query_os(query: Option<&str>) -> Option<HostOs> {
     }
     None
 }
+
+// query_str removed (no longer needed)
 
 fn find_dbl_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
@@ -388,4 +363,19 @@ async fn write_all(socket: &mut TcpSocket<'_>, mut buf: &[u8]) -> Result<(), net
         buf = &buf[n..];
     }
     Ok(())
+}
+
+fn escape_json_str(s: &str) -> heapless::String<512> {
+    let mut out: heapless::String<512> = heapless::String::new();
+    for b in s.bytes() {
+        match b {
+            b'"' => { let _ = out.push_str("\\\""); }
+            b'\\' => { let _ = out.push_str("\\\\"); }
+            b'\n' => { let _ = out.push_str("\\n"); }
+            b'\r' => { let _ = out.push_str("\\r"); }
+            b'\t' => { let _ = out.push_str("\\t"); }
+            _ => { let _ = out.push(b as char); }
+        }
+    }
+    out
 }

@@ -6,9 +6,17 @@ HTTP endpoints
 - `GET /`: Serves a minimal web UI for starting USB and sending actions.
 - `GET /status`: Returns `{ usb_enabled, usb_ready, host_os }`.
 - `POST /usb/register[?assistant=1&os=mac|windows]`: Start USB; optionally force macOS Assistant and set host OS.
-- `POST /kb/type[?delay_ms=10]` with body: Types the provided text via HID.
-- `POST /automation/open_macos_terminal`: Opens Terminal (macOS Spotlight flow).
-- `POST /automation/mac_assistant`: Runs the macOS Keyboard Setup Assistant sequence.
+- `POST /kb/script` with body: Executes a simple line-based keyboard DSL.
+  
+
+Scripting DSL
+- Commands (case-insensitive):
+  - `tap KEY`
+  - `modtap MOD+MOD+KEY` (MOD: LCTRL, LSHIFT, LALT, LGUI, RCTRL, RSHIFT, RALT, RGUI; aliases: CTRL, SHIFT, ALT, GUI/CMD/WIN, OPTION/CONTROL)
+  - `delay MS` (0..5000)
+  - `text STRING [DELAY]` (optional per-char delay)
+- Lines starting with `#` or empty lines are ignored.
+- Payload limited to 512 bytes; max 256 non-empty lines.
 
 Wi‑Fi
 - AP SSID: `PicoEndpoint`

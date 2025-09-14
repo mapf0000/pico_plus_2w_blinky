@@ -292,3 +292,118 @@ where
     Timer::after_millis(20).await;
     let _ = w.write_serialize(&release).await;
 }
+
+/// Event bytecode for scripted keyboard actions (Option B).
+#[derive(Copy, Clone)]
+pub enum KeyScriptEvent {
+    /// Tap a key with optional combined modifier mask.
+    Tap { key: u8, mods: u8 },
+    /// Delay in milliseconds.
+    DelayMs(u32),
+}
+
+/// Const helpers to build scripts in arrays.
+pub const fn ev_tap(key: u8) -> KeyScriptEvent {
+    KeyScriptEvent::Tap { key, mods: 0 }
+}
+pub const fn ev_modtap(mods: u8, key: u8) -> KeyScriptEvent {
+    KeyScriptEvent::Tap { key, mods }
+}
+pub const fn ev_delay(ms: u32) -> KeyScriptEvent {
+    KeyScriptEvent::DelayMs(ms)
+}
+
+/// Run a script consisting of `KeyScriptEvent`s.
+pub async fn run_script<'d, D>(w: &mut UsbHidWriter<'d, D, 8>, script: &[KeyScriptEvent])
+where
+    D: embassy_usb::driver::Driver<'d>,
+{
+    for ev in script {
+        match *ev {
+            KeyScriptEvent::Tap { key, mods } => {
+                tap_with_mod(w, key, mods).await;
+            }
+            KeyScriptEvent::DelayMs(ms) => {
+                if ms != 0 {
+                    Timer::after_millis(ms as u64).await;
+                }
+            }
+        }
+    }
+}
+
+/// Build a `&[KeyScriptEvent]` with a compact, explicit syntax.
+///
+/// Supported items:
+///  - `tap(KEY_X)`
+///  - `modtap(MOD_LCTRL | MOD_LALT, KEY_DELETE)`
+///  - `delay(200)` (milliseconds)
+///  - `text("Hello")` or `text("Hello", 10)` (10 ms between chars)
+///
+/// Example:
+/// ```ignore
+/// const OPEN_TERM: &[keyboard::KeyScriptEvent] = keyboard::script![
+///     modtap(keyboard::MOD_LGUI, keyboard::KEY_SPACE);
+///     delay(400);
+///     text("Terminal", 10);
+///     delay(200);
+///     tap(keyboard::KEY_ENTER);
+///     delay(1500);
+///     modtap(keyboard::MOD_LGUI, keyboard::KEY_N);
+/// ];
+/// ```
+#[macro_export]
+macro_rules! script {
+    () => { &[] };
+    ( $( $tokens:tt )+ ) => {{
+        &[
+            $crate::__script_flatten!{ $($tokens)+ }
+        ]
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __script_flatten {
+    () => {};
+    // Handle text specially: expands to multiple events
+    ( text( $($args:tt)* ) ; $($rest:tt)* ) => {
+        kbd_macros::text_items!( $($args)* ),
+        $crate::__script_flatten!{ $($rest)* }
+    };
+    // Generic item with args: tap(...); modtap(...); delay(...)
+    ( $name:ident ( $($args:tt)* ) ; $($rest:tt)* ) => {
+        $crate::__script_items!{ $name ( $($args)* ) },
+        $crate::__script_flatten!{ $($rest)* }
+    };
+    // Trailing single text(...);
+    ( text( $($args:tt)* ) ; ) => {
+        kbd_macros::text_items!( $($args)* ),
+    };
+    // Trailing generic item
+    ( $name:ident ( $($args:tt)* ) ; ) => {
+        $crate::__script_items!{ $name ( $($args)* ) },
+    };
+}
+
+// __script_collect removed; direct repetition is used in `script!`
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __script_items {
+    ( tap($key:expr) ) => {
+        $crate::keyboard::KeyScriptEvent::Tap { key: $key, mods: 0 }
+    };
+    ( modtap($mods:expr, $key:expr) ) => {
+        $crate::keyboard::KeyScriptEvent::Tap { key: $key, mods: $mods }
+    };
+    ( delay($ms:expr) ) => {
+        $crate::keyboard::KeyScriptEvent::DelayMs($ms as u32)
+    };
+    ( text($s:literal) ) => {
+        kbd_macros::text_items!($s)
+    };
+    ( text($s:literal, $delay_ms:expr) ) => {
+        kbd_macros::text_items!($s, $delay_ms)
+    };
+}
