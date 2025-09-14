@@ -3,6 +3,12 @@ use embassy_usb::class::hid::HidWriter as UsbHidWriter;
 
 use crate::{keyboard, scripts};
 
+// Maintainability: centralized DSL limits
+const MAX_DSL_LINES: usize = 256;
+const MAX_DSL_DELAY_MS: u64 = 5000;
+const MAX_OWNED_PROGRAMS: usize = 8;
+const MAX_CALL_STACK_FRAMES: usize = 8;
+
 #[derive(Debug)]
 pub enum DslError {
     TooManyLines,
@@ -36,13 +42,11 @@ impl<'a> Program<'a> {
 
 /// Compile the full DSL into a `Program` (no side effects).
 pub fn compile_dsl<'a>(dsl: &'a str) -> Result<Program<'a>, DslError> {
-    const MAX_LINES: usize = 256;
-    const MAX_DELAY_MS: u64 = 5000;
 
     let mut prog = Program::new();
     let mut count = 0usize;
     for raw in dsl.lines() {
-        if count >= MAX_LINES { return Err(DslError::TooManyLines); }
+        if count >= MAX_DSL_LINES { return Err(DslError::TooManyLines); }
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') { continue; }
         count += 1;
@@ -60,12 +64,12 @@ pub fn compile_dsl<'a>(dsl: &'a str) -> Result<Program<'a>, DslError> {
             prog.ops.push(Op::Tap { key, mods }).map_err(|_| DslError::TooManyLines)?;
         } else if eq_ci(cmd, "delay") {
             let ms: u64 = rest.trim().parse::<u64>().map_err(|_| DslError::ParseDelay)?;
-            let ms = core::cmp::min(ms, MAX_DELAY_MS) as u32;
+            let ms = core::cmp::min(ms, MAX_DSL_DELAY_MS) as u32;
             if ms != 0 { prog.ops.push(Op::DelayMs(ms)).map_err(|_| DslError::TooManyLines)?; }
         } else if eq_ci(cmd, "text") {
             let r = rest;
             let (text, delay_ms) = parse_text_args(r)?;
-            let delay_ms = core::cmp::min(delay_ms as u64, MAX_DELAY_MS) as u16;
+            let delay_ms = core::cmp::min(delay_ms as u64, MAX_DSL_DELAY_MS) as u16;
             if !text.is_empty() {
                 prog.ops.push(Op::Text { s: text, delay_ms }).map_err(|_| DslError::TooManyLines)?;
             }
@@ -85,11 +89,11 @@ pub fn compile_dsl<'a>(dsl: &'a str) -> Result<Program<'a>, DslError> {
 }
 
 /// Execute a compiled program (public wrapper).
-pub async fn exec_program<'d, 'a, D>(w: &mut UsbHidWriter<'d, D, 8>, prog: &Program<'a>)
+pub async fn exec_program<'d, 'a, D>(w: &mut UsbHidWriter<'d, D, 8>, prog: &Program<'a>) -> Result<(), DslError>
 where
     D: embassy_usb::driver::Driver<'d>,
 {
-    let _ = exec_program_inner(w, prog, 0u8).await;
+    exec_program_inner(w, prog, 0u8).await
 }
 
 /// Internal executor using an explicit call stack to avoid async recursion.
@@ -110,8 +114,8 @@ where
     struct Frame { ctx: Ctx, ip: usize }
 
     // Owned compiled programs for called builtins (their DSL is 'static).
-    let mut owned: heapless::Vec<Program<'static>, 8> = heapless::Vec::new();
-    let mut stack: heapless::Vec<Frame, 8> = heapless::Vec::new();
+    let mut owned: heapless::Vec<Program<'static>, MAX_OWNED_PROGRAMS> = heapless::Vec::new();
+    let mut stack: heapless::Vec<Frame, MAX_CALL_STACK_FRAMES> = heapless::Vec::new();
 
     let mut ctx = Ctx::Top;
     let mut ip: usize = 0;
@@ -140,15 +144,15 @@ where
                     Op::Call { id } => {
                         let dsl = match scripts::dsl_for_id_str(id) { Some(s) => s, None => return Err(DslError::UnknownScript) };
                         let sub = compile_dsl(dsl)?;
-                let ix = owned.len();
-                if owned.push(sub).is_err() || stack.push(Frame { ctx, ip }).is_err() {
-                    return Err(DslError::RecursionTooDeep);
+                        let ix = owned.len();
+                        if owned.push(sub).is_err() || stack.push(Frame { ctx, ip }).is_err() {
+                            return Err(DslError::RecursionTooDeep);
+                        }
+                        ctx = Ctx::Owned(ix);
+                        ip = 0;
+                    }
                 }
-                ctx = Ctx::Owned(ix);
-                ip = 0;
             }
-        }
-    }
             Ctx::Owned(ix) => {
                 if ip >= owned[ix].ops.len() {
                     match stack.pop() {

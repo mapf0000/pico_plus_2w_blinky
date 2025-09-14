@@ -29,4 +29,3 @@ pub fn host_os_str() -> &'static str {
         HostOs::Windows => "windows",
     }
 }
-

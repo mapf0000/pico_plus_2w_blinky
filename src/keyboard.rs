@@ -2,6 +2,10 @@ use embassy_time::Timer;
 use embassy_usb::class::hid::HidWriter as UsbHidWriter;
 use usbd_hid::descriptor::KeyboardReport;
 
+// Maintainability: centralize default HID delays
+const DELAY_MOD_DOWN_MS: u64 = 8;
+const DELAY_TAP_HOLD_MS: u64 = 20;
+
 /// USB HID Keyboard/Keypad usage codes (page 0x07)
 ///
 /// These constants cover common ANSI keys. Values follow the HID
@@ -144,8 +148,10 @@ where
             modifier,
             reserved: 0,
         };
-        let _ = w.write_serialize(&mod_down).await;
-        Timer::after_millis(8).await;
+        if let Err(e) = w.write_serialize(&mod_down).await {
+            log::warn!("hid: write error (mod down): {:?}", e);
+        }
+        Timer::after_millis(DELAY_MOD_DOWN_MS).await;
 
         // 2) Modifier + key down
         let both_down = KeyboardReport {
@@ -154,8 +160,10 @@ where
             modifier,
             reserved: 0,
         };
-        let _ = w.write_serialize(&both_down).await;
-        Timer::after_millis(20).await;
+        if let Err(e) = w.write_serialize(&both_down).await {
+            log::warn!("hid: write error (mod+key down): {:?}", e);
+        }
+        Timer::after_millis(DELAY_TAP_HOLD_MS).await;
 
         // 3) Release key (keep modifier)
         let key_up = KeyboardReport {
@@ -164,8 +172,10 @@ where
             modifier,
             reserved: 0,
         };
-        let _ = w.write_serialize(&key_up).await;
-        Timer::after_millis(8).await;
+        if let Err(e) = w.write_serialize(&key_up).await {
+            log::warn!("hid: write error (key up): {:?}", e);
+        }
+        Timer::after_millis(DELAY_MOD_DOWN_MS).await;
 
         // 4) Release modifier
         let mod_up = KeyboardReport {
@@ -174,7 +184,9 @@ where
             modifier: 0,
             reserved: 0,
         };
-        let _ = w.write_serialize(&mod_up).await;
+        if let Err(e) = w.write_serialize(&mod_up).await {
+            log::warn!("hid: write error (mod up): {:?}", e);
+        }
     } else {
         // Simple tap with no modifier
         let press = KeyboardReport {
@@ -189,9 +201,13 @@ where
             modifier: 0,
             reserved: 0,
         };
-        let _ = w.write_serialize(&press).await;
-        Timer::after_millis(20).await;
-        let _ = w.write_serialize(&release).await;
+        if let Err(e) = w.write_serialize(&press).await {
+            log::warn!("hid: write error (press): {:?}", e);
+        }
+        Timer::after_millis(DELAY_TAP_HOLD_MS).await;
+        if let Err(e) = w.write_serialize(&release).await {
+            log::warn!("hid: write error (release): {:?}", e);
+        }
     }
 }
 
@@ -288,9 +304,13 @@ where
 {
     let press = KeyboardReport { keycodes: [usage, 0, 0, 0, 0, 0], leds: 0, modifier: 0, reserved: 0 };
     let release = KeyboardReport { keycodes: [0, 0, 0, 0, 0, 0], leds: 0, modifier: 0, reserved: 0 };
-    let _ = w.write_serialize(&press).await;
-    Timer::after_millis(20).await;
-    let _ = w.write_serialize(&release).await;
+    if let Err(e) = w.write_serialize(&press).await {
+        log::warn!("hid: write error (press): {:?}", e);
+    }
+    Timer::after_millis(DELAY_TAP_HOLD_MS).await;
+    if let Err(e) = w.write_serialize(&release).await {
+        log::warn!("hid: write error (release): {:?}", e);
+    }
 }
 
 /// Event bytecode for scripted keyboard actions (Option B).

@@ -60,3 +60,6 @@ cyw43-pio = { version = "0.8", features = [
 ] }
 leasehund = "0.2"
 kbd_macros = { path = "kbd_macros" }
+
+[features]
+psram = []

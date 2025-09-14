@@ -1,10 +1,11 @@
 MEMORY {
     /*
      * The RP2350 has either external or internal flash.
-     *
-     * 2 MiB is a safe default here, although a Pico 2 has 4 MiB.
+     * Pimoroni Pico Plus 2 W ships with 16 MiB external flash.
      */
-    FLASH : ORIGIN = 0x10000000, LENGTH = 2048K
+    /* Reserve 8 KiB at the end of flash for persistent config */
+    FLASH : ORIGIN = 0x10000000, LENGTH = 16376K
+    PERSIST : ORIGIN = 0x10000000 + 16376K, LENGTH = 8K
     /*
      * RAM consists of 8 banks, SRAM0-SRAM7, with a striped mapping.
      * This is usually good for performance, as it distributes load on
@@ -73,3 +74,5 @@ SECTIONS {
 
 PROVIDE(start_to_end = __end_block_addr - __start_block_addr);
 PROVIDE(end_to_start = __start_block_addr - __end_block_addr);
+PROVIDE(__persist_start = ORIGIN(PERSIST));
+PROVIDE(__persist_end = ORIGIN(PERSIST) + LENGTH(PERSIST));

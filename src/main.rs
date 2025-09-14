@@ -47,8 +47,14 @@ async fn usb_task(driver: UsbDriver<'static, USB>, run_mac_assistant: bool) {
         0x0001
     };
     let mut cfg = UsbConfig::new(0x1209, pid); // pid.codes style VID/PID (dummy)
-    cfg.manufacturer = Some("Pico 2W");
-    cfg.product = Some("Logger + Keyboard");
+    // Read current device identity from runtime config
+    let dev_cfg = crate::config::get().await;
+    static MANUF: StaticCell<heapless::String<{ crate::config::MANUFACTURER_MAX }>> = StaticCell::new();
+    static PROD: StaticCell<heapless::String<{ crate::config::PRODUCT_MAX }>> = StaticCell::new();
+    let mref = MANUF.init(dev_cfg.usb_manufacturer);
+    let pref = PROD.init(dev_cfg.usb_product);
+    cfg.manufacturer = Some(mref.as_str());
+    cfg.product = Some(pref.as_str());
     if FORCE_ASSISTANT_EACH_BOOT {
         use core::fmt::Write as _;
         static SN: StaticCell<heapless::String<16>> = StaticCell::new();
@@ -122,6 +128,14 @@ async fn net_task(mut runner: net::Runner<'static, cyw43::NetDriver<'static>>) -
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+    // Initialize runtime configuration defaults, then optional PSRAM, then flash persistence
+    crate::config::init().await;
+    #[cfg(feature = "psram")]
+    {
+        psram_pool::init(&p).await;
+    }
+    let flash_drv = embassy_rp::flash::Flash::<_, embassy_rp::flash::Blocking, { crate::config::FLASH_CAPACITY }>::new_blocking(p.FLASH);
+    crate::config::set_flash_driver(flash_drv).await;
 
     // Do not start USB at boot. It will be started on POST /usb/register
 
@@ -148,7 +162,10 @@ async fn main(spawner: Spawner) {
     log::info!("cyw43: loading firmware and bringing up chip");
     let (net_device, mut control, cyw_runner) = cyw43::new(state, pwr, spi, fw).await;
     log::info!("cyw43: init complete; spawning runner");
-    spawner.spawn(cyw43_task(cyw_runner)).unwrap();
+    if let Err(e) = spawner.spawn(cyw43_task(cyw_runner)) {
+        log::error!("spawn cyw43_task failed: {:?}", e);
+        return;
+    }
 
     log::info!("cyw43: applying CLM/regulatory data");
     control.init(clm).await;
@@ -173,7 +190,10 @@ async fn main(spawner: Spawner) {
         net::new(net_device, cfg, NET_RES.init(StackResources::new()), seed);
     static NET_STACK: StaticCell<net::Stack<'static>> = StaticCell::new();
     let stack = NET_STACK.init(stack_val);
-    spawner.spawn(net_task(net_runner)).unwrap();
+    if let Err(e) = spawner.spawn(net_task(net_runner)) {
+        log::error!("spawn net_task failed: {:?}", e);
+        return;
+    }
     log::info!("net: stack runner spawned (static IPv4)");
 
     // --- Bring up a WPA2-protected Access Point ---
@@ -190,19 +210,29 @@ async fn main(spawner: Spawner) {
     log::info!("net: up: {:?}", stack.config_v4());
 
     // Start DHCP server for AP clients
-    spawner.spawn(dhcp::server_task(stack)).unwrap();
+    if let Err(e) = spawner.spawn(dhcp::server_task(stack)) {
+        log::error!("spawn dhcp::server_task failed: {:?}", e);
+        return;
+    }
     log::info!("dhcp: server task spawned (port 67)");
 
     // Start a tiny HTTP server to receive the USB trigger (don’t block on config)
-    spawner.spawn(http::server_task(stack)).unwrap();
+    if let Err(e) = spawner.spawn(http::server_task(stack)) {
+        log::error!("spawn http::server_task failed: {:?}", e);
+        return;
+    }
     log::info!("http: server task spawned (port 80)");
 
     // Wait for POST /usb/register to arrive, then bring up USB.
     let run_mac_assistant = USB_START.wait().await;
-    if !USB_ENABLED.swap(true, Ordering::SeqCst) {
+    if !USB_ENABLED.load(Ordering::SeqCst) {
         log::info!("usb: starting composite (logger + keyboard) after HTTP trigger");
         let usb_driver = UsbDriver::new(p.USB, Irqs);
-        spawner.spawn(usb_task(usb_driver, run_mac_assistant)).unwrap();
+        if let Err(e) = spawner.spawn(usb_task(usb_driver, run_mac_assistant)) {
+            log::error!("spawn usb_task failed: {:?}", e);
+        } else {
+            USB_ENABLED.store(true, Ordering::SeqCst);
+        }
     }
 
     // Main can park; tasks run forever.
@@ -216,3 +246,6 @@ mod dhcp;
 mod host;
 mod script_dsl;
 mod scripts;
+mod config;
+#[cfg(feature = "psram")]
+mod psram_pool;

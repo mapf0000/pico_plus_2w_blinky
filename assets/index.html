@@ -47,6 +47,26 @@
       <div class="hint">Refreshes every 5s.</div>
     </div>
 
+    <div class="card" id="identityCard">
+      <h2>Device Identity</h2>
+      <div class="row" style="gap:12px; align-items: flex-end; flex-wrap: wrap;">
+        <label class="inline" style="flex:1 1 260px; min-width:240px;">
+          <div style="display:flex; flex-direction:column; gap:4px; width:100%">
+            <span>USB manufacturer</span>
+            <input id="usbManufacturer" type="text" placeholder="Pico 2W" maxlength="32" style="width:100%" />
+          </div>
+        </label>
+        <label class="inline" style="flex:2 1 320px; min-width:280px;">
+          <div style="display:flex; flex-direction:column; gap:4px; width:100%">
+            <span>USB product string</span>
+            <input id="usbProduct" type="text" placeholder="Logger + Keyboard" maxlength="48" style="width:100%" />
+          </div>
+        </label>
+        <button id="btnSaveIdentity">Save</button>
+      </div>
+      <div class="hint">Applies when you start USB. Changes are blocked after USB is enabled.</div>
+    </div>
+
     <div class="card" id="usbCard">
       <h2>USB Bring-up</h2>
       <div class="row" style="margin-bottom:8px">
@@ -119,6 +139,21 @@ text Terminal 10"></textarea>
         }
       }
 
+      async function loadConfig() {
+        try {
+          const res = await fetch('/config');
+          const txt = await res.text();
+          let cfg = {};
+          try { cfg = JSON.parse(txt); } catch {}
+          if (cfg && typeof cfg === 'object') {
+            if ($('#usbManufacturer')) $('#usbManufacturer').value = cfg.usb_manufacturer || '';
+            if ($('#usbProduct')) $('#usbProduct').value = cfg.usb_product || '';
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
       function log(msg) {
         const el = $('#log');
         const now = new Date().toLocaleTimeString();
@@ -179,6 +214,14 @@ text Terminal 10"></textarea>
           // Hide USB bring-up card when USB is enabled
           const usbCard = document.getElementById('usbCard');
           if (usbCard) usbCard.style.display = usbEnabled ? 'none' : '';
+
+          // Disable identity editing when USB is enabled
+          const m = document.getElementById('usbManufacturer');
+          const p = document.getElementById('usbProduct');
+          const b = document.getElementById('btnSaveIdentity');
+          if (m) m.disabled = usbEnabled;
+          if (p) p.disabled = usbEnabled;
+          if (b) b.disabled = usbEnabled;
         } catch (e) {
           // Status unavailable: set badges to neutral
           const stEnabled = document.getElementById('stUsbEnabled');
@@ -206,6 +249,19 @@ text Terminal 10"></textarea>
         refreshStatus();
       });
       // Removed automation endpoints and type handler
+
+      // Save identity
+      document.getElementById('btnSaveIdentity').addEventListener('click', async () => {
+        const man = (document.getElementById('usbManufacturer').value || '').trim();
+        const prod = (document.getElementById('usbProduct').value || '').trim();
+        const qs = new URLSearchParams();
+        if (man) qs.set('manufacturer', man);
+        if (prod) qs.set('product', prod);
+        await http('POST', `/config?${qs.toString()}`);
+        // Reload config to ensure UI reflects what firmware accepted
+        await loadConfig();
+        await refreshStatus();
+      });
 
       $('#btnRunDsl').addEventListener('click', async (ev) => {
         const btn = ev.currentTarget; btn.disabled = true;
@@ -324,6 +380,7 @@ text Terminal 10"></textarea>
       // Removed: Automation "Type" to script helper
 
       // Initial status + poll
+      loadConfig();
       refreshStatus();
       setInterval(refreshStatus, 5000);
       // Load scripts UI
