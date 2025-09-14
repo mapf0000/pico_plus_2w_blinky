@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pico Endpoint UI</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; line-height: 1.35; }
+      h1 { font-size: 1.25rem; margin: 0 0 12px; }
+      h2 { font-size: 1.05rem; margin: 16px 0 8px; }
+      .card { border: 1px solid #8883; border-radius: 8px; padding: 12px; margin: 12px 0; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+      button, input, select { font: inherit; padding: 6px 10px; }
+      button { cursor: pointer; }
+      .muted { opacity: 0.8; font-size: 0.9rem; }
+      #status { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      #log { white-space: pre-wrap; background: #0001; padding: 8px; border-radius: 6px; min-height: 1.5em; }
+      .inline { display: inline-flex; gap: 8px; align-items: center; }
+      .hint { font-size: .85rem; opacity: .75; }
+    </style>
+  </head>
+  <body>
+    <h1>Pico Endpoint</h1>
+
+    <div class="card">
+      <h2>Status</h2>
+      <div id="status">Loading…</div>
+      <div class="hint">Refreshes every second.</div>
+    </div>
+
+    <div class="card">
+      <h2>USB Bring-up</h2>
+      <div class="row" style="margin-bottom:8px">
+        <label class="inline"><input type="radio" name="os" value="mac" checked> macOS</label>
+        <label class="inline"><input type="radio" name="os" value="windows"> Windows</label>
+      </div>
+      <div class="row">
+        <button id="btnUsbAssistant">Start USB (Assistant)</button>
+        <button id="btnUsbNoAssistant">Start USB (No Assistant)</button>
+      </div>
+      <div class="hint">Assistant forces macOS Keyboard Setup Assistant sequence when enabled.</div>
+    </div>
+
+    <div class="card">
+      <h2>Automation</h2>
+      <div class="row" style="margin-bottom:8px">
+        <button id="btnOpenTerminal">Open macOS Terminal</button>
+        <button id="btnRunAssistant">Run macOS Keyboard Assistant</button>
+      </div>
+      <div class="row">
+        <input id="typeText" type="text" placeholder="Text to type" maxlength="200" size="32" />
+        <label class="inline">Delay ms <input id="delayMs" type="number" min="0" max="200" value="10" style="width:6em" /></label>
+        <button id="btnType">Type</button>
+      </div>
+      <div class="hint">Typing is limited to ASCII supported by the firmware.</div>
+    </div>
+
+    <div class="card">
+      <h2>Log</h2>
+      <div id="log"></div>
+    </div>
+
+    <script>
+      const $ = sel => document.querySelector(sel);
+      const $$ = sel => Array.from(document.querySelectorAll(sel));
+
+      function selectedOs() {
+        const el = $$('input[name="os"]').find(e => e.checked);
+        return el ? el.value : 'mac';
+      }
+
+      async function http(method, path, body) {
+        const res = await fetch(path, {
+          method,
+          headers: body ? { 'Content-Type': 'text/plain', 'Content-Length': String(body.length) } : undefined,
+          body: body || undefined,
+        });
+        const text = await res.text().catch(() => '');
+        log(`${method} ${path} -> ${res.status} ${res.statusText}\n${text}`);
+        return { status: res.status, ok: res.ok, text };
+      }
+
+      function log(msg) {
+        const el = $('#log');
+        const now = new Date().toLocaleTimeString();
+        el.textContent = `[${now}] ${msg}\n` + el.textContent;
+      }
+
+      async function refreshStatus() {
+        try {
+          const res = await fetch('/status');
+          const txt = await res.text();
+          let s;
+          try { s = JSON.parse(txt); } catch { s = {}; }
+          $('#status').textContent = `usb_enabled: ${s.usb_enabled ?? '?'}, usb_ready: ${s.usb_ready ?? '?'}, host_os: ${s.host_os ?? '?'}`;
+          // Enable/disable controls based on state
+          const usbEnabled = !!s.usb_enabled;
+          const usbReady = !!s.usb_ready;
+          $('#btnUsbAssistant').disabled = usbEnabled;
+          $('#btnUsbNoAssistant').disabled = usbEnabled;
+          $('#btnOpenTerminal').disabled = !usbReady;
+          $('#btnRunAssistant').disabled = !usbReady;
+          $('#btnType').disabled = !usbReady;
+          $('#typeText').disabled = !usbReady;
+          $('#delayMs').disabled = !usbReady;
+        } catch (e) {
+          $('#status').textContent = 'Status unavailable';
+        }
+      }
+
+      // Wire actions
+      $('#btnUsbAssistant').addEventListener('click', async () => {
+        await http('POST', `/usb/register?assistant=1&os=${encodeURIComponent(selectedOs())}`);
+        refreshStatus();
+      });
+      $('#btnUsbNoAssistant').addEventListener('click', async () => {
+        await http('POST', `/usb/register?assistant=0&os=${encodeURIComponent(selectedOs())}`);
+        refreshStatus();
+      });
+      $('#btnOpenTerminal').addEventListener('click', async () => {
+        await http('POST', '/automation/open_macos_terminal');
+      });
+      $('#btnRunAssistant').addEventListener('click', async () => {
+        await http('POST', '/automation/mac_assistant');
+      });
+      $('#btnType').addEventListener('click', async () => {
+        const text = $('#typeText').value || '';
+        const delay = Math.max(0, Math.min(200, parseInt($('#delayMs').value || '10', 10)));
+        if (!text) { log('Nothing to type.'); return; }
+        await http('POST', `/kb/type?delay_ms=${delay}`, text);
+      });
+
+      // Initial status + poll
+      refreshStatus();
+      setInterval(refreshStatus, 5000);
+    </script>
+  </body>
+  </html>
+

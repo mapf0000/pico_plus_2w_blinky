@@ -214,3 +214,4 @@ mod keyboard;
 mod automation;
 mod hid;
 mod dhcp;
+mod host;

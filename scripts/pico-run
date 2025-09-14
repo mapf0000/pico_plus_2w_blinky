@@ -23,7 +23,7 @@ picotool load -u -v -x -t elf "$ELF"
 
 echo "[pico-run] Waiting for USB CDC device..."
 PORT=""
-deadline=$((SECONDS + 30))
+deadline=$((SECONDS + 60))
 
 find_port() {
   # Prefer macOS call-out devices first, then others; include common Linux names.

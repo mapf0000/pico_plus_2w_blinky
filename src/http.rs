@@ -6,6 +6,7 @@ use heapless::String;
 
 use crate::hid::{HID_CHAN, HidCommand, USB_READY};
 use crate::{USB_ENABLED, USB_START};
+use crate::host::{self, HostOs};
 
 const SERVER_PORT: u16 = 80;
 
@@ -62,10 +63,15 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
     log::info!("http: route {:?} ({} bytes)", route_name(&route), n);
 
     match route {
-        Route::UsbRegister { run_assistant } => {
+        Route::UsbRegister { run_assistant, host_os } => {
             if USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst) {
                 respond_text(socket, 409, "USB already enabled\n").await?
             } else {
+                // Apply host OS from query param only.
+                if let Some(os) = host_os {
+                    host::set_host_os(os);
+                }
+
                 USB_START.signal(run_assistant);
                 if run_assistant {
                     respond_text(socket, 200, "USB enabling (assistant)\n").await?
@@ -169,14 +175,16 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
             let mut body: String<96> = String::new();
             let _ = write!(
                 &mut body,
-                "{{\"usb_enabled\":{},\"usb_ready\":{}}}\n",
-                enabled, ready
+                "{{\"usb_enabled\":{},\"usb_ready\":{},\"host_os\":\"{}\"}}\n",
+                enabled, ready, host::host_os_str()
             );
             respond_bytes(socket, 200, "application/json", body.as_bytes()).await?
         }
         Route::Root => {
-            let body = b"OK\n";
-            respond_bytes(socket, 200, "text/plain", body).await?
+            // Serve a tiny UI so users can interact from a browser.
+            // Kept inline via include_str! to avoid heap usage at runtime.
+            static INDEX_HTML: &str = include_str!("../assets/index.html");
+            respond_bytes(socket, 200, "text/html; charset=utf-8", INDEX_HTML.as_bytes()).await?
         }
         Route::NotFound => respond_text(socket, 404, "not found\n").await?,
     }
@@ -205,7 +213,7 @@ fn split_target(target: &str) -> (&str, Option<&str>) {
 
 #[derive(Debug)]
 enum Route {
-    UsbRegister { run_assistant: bool },
+    UsbRegister { run_assistant: bool, host_os: Option<HostOs> },
     KbType { delay_ms: u64 },
     AutomationOpenMacTerminal,
     AutomationMacAssistant,
@@ -219,7 +227,8 @@ fn parse_route(method: &str, target: &str) -> Route {
     match (method, path) {
         ("POST", "/usb/register") => {
             let run_assistant = query_flag(query, "assistant").unwrap_or(true);
-            Route::UsbRegister { run_assistant }
+            let host_os = query_os(query);
+            Route::UsbRegister { run_assistant, host_os }
         }
         ("POST", "/kb/type") => {
             let delay_ms = query_u64(query, "delay_ms").unwrap_or(10);
@@ -273,6 +282,23 @@ fn query_u64(query: Option<&str>, key: &str) -> Option<u64> {
             if k == key {
                 if let Ok(val) = v.parse::<u64>() {
                     return Some(val);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn query_os(query: Option<&str>) -> Option<HostOs> {
+    let q = query?;
+    for pair in q.split('&') {
+        if let Some(eq) = pair.find('=') {
+            let (k, v) = (&pair[..eq], &pair[eq + 1..]);
+            if k == "os" {
+                if v.eq_ignore_ascii_case("mac") {
+                    return Some(HostOs::Mac);
+                } else if v.eq_ignore_ascii_case("windows") {
+                    return Some(HostOs::Windows);
                 }
             }
         }

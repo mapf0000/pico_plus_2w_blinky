@@ -127,25 +127,72 @@ pub const MOD_RALT: u8 = 0x40;
 pub const MOD_RGUI: u8 = 0x80;
 
 /// Press and release a single usage with an optional modifier.
+/// To maximize compatibility across hosts, when a modifier is present we:
+/// - press the modifier first,
+/// - press the key while holding the modifier,
+/// - release the key while still holding the modifier,
+/// - then release the modifier.
 pub async fn tap_with_mod<'d, D>(w: &mut UsbHidWriter<'d, D, 8>, usage: u8, modifier: u8)
 where
     D: embassy_usb::driver::Driver<'d>,
 {
-    let press = KeyboardReport {
-        keycodes: [usage, 0, 0, 0, 0, 0],
-        leds: 0,
-        modifier,
-        reserved: 0,
-    };
-    let release = KeyboardReport {
-        keycodes: [0, 0, 0, 0, 0, 0],
-        leds: 0,
-        modifier: 0,
-        reserved: 0,
-    };
-    let _ = w.write_serialize(&press).await;
-    Timer::after_millis(20).await;
-    let _ = w.write_serialize(&release).await;
+    if modifier != 0 {
+        // 1) Modifier down
+        let mod_down = KeyboardReport {
+            keycodes: [0, 0, 0, 0, 0, 0],
+            leds: 0,
+            modifier,
+            reserved: 0,
+        };
+        let _ = w.write_serialize(&mod_down).await;
+        Timer::after_millis(8).await;
+
+        // 2) Modifier + key down
+        let both_down = KeyboardReport {
+            keycodes: [usage, 0, 0, 0, 0, 0],
+            leds: 0,
+            modifier,
+            reserved: 0,
+        };
+        let _ = w.write_serialize(&both_down).await;
+        Timer::after_millis(20).await;
+
+        // 3) Release key (keep modifier)
+        let key_up = KeyboardReport {
+            keycodes: [0, 0, 0, 0, 0, 0],
+            leds: 0,
+            modifier,
+            reserved: 0,
+        };
+        let _ = w.write_serialize(&key_up).await;
+        Timer::after_millis(8).await;
+
+        // 4) Release modifier
+        let mod_up = KeyboardReport {
+            keycodes: [0, 0, 0, 0, 0, 0],
+            leds: 0,
+            modifier: 0,
+            reserved: 0,
+        };
+        let _ = w.write_serialize(&mod_up).await;
+    } else {
+        // Simple tap with no modifier
+        let press = KeyboardReport {
+            keycodes: [usage, 0, 0, 0, 0, 0],
+            leds: 0,
+            modifier: 0,
+            reserved: 0,
+        };
+        let release = KeyboardReport {
+            keycodes: [0, 0, 0, 0, 0, 0],
+            leds: 0,
+            modifier: 0,
+            reserved: 0,
+        };
+        let _ = w.write_serialize(&press).await;
+        Timer::after_millis(20).await;
+        let _ = w.write_serialize(&release).await;
+    }
 }
 
 /// Convert a char (US-ANSI) to `(usage, modifier)`.
