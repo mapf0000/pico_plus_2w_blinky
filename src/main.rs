@@ -29,12 +29,12 @@ bind_interrupts!(struct Irqs {
 });
 
 // Global signal to trigger on-demand USB bring-up from HTTP handler
-pub static USB_START: Signal<ThreadModeRawMutex, ()> = Signal::new();
+pub static USB_START: Signal<ThreadModeRawMutex, bool> = Signal::new();
 pub static USB_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// USB task: composite device with CDC logger + HID keyboard
 #[embassy_executor::task]
-async fn usb_task(driver: UsbDriver<'static, USB>) {
+async fn usb_task(driver: UsbDriver<'static, USB>, run_mac_assistant: bool) {
     // --- Device configuration ---
     // Force macOS to show Keyboard Setup Assistant on every boot by presenting
     // a different Product ID and random serial number. Disable by setting the
@@ -100,9 +100,8 @@ async fn usb_task(driver: UsbDriver<'static, USB>) {
     // Futures
     let usb_fut = usb.run();
     let log_fut = embassy_usb_logger::with_class!(1024, log::LevelFilter::Info, logger_class);
-    let hid_fut = crate::keyboard::run_mac_assistant(hid_writer);
-
     // Run device, logger and HID concurrently.
+    let hid_fut = crate::hid::run_hid(hid_writer, run_mac_assistant);
     join3(usb_fut, log_fut, hid_fut).await;
 }
 
@@ -199,11 +198,11 @@ async fn main(spawner: Spawner) {
     log::info!("http: server task spawned (port 80)");
 
     // Wait for POST /usb/register to arrive, then bring up USB.
-    USB_START.wait().await;
+    let run_mac_assistant = USB_START.wait().await;
     if !USB_ENABLED.swap(true, Ordering::SeqCst) {
         log::info!("usb: starting composite (logger + keyboard) after HTTP trigger");
         let usb_driver = UsbDriver::new(p.USB, Irqs);
-        spawner.spawn(usb_task(usb_driver)).unwrap();
+        spawner.spawn(usb_task(usb_driver, run_mac_assistant)).unwrap();
     }
 
     // Main can park; tasks run forever.
@@ -212,4 +211,6 @@ async fn main(spawner: Spawner) {
 
 mod http;
 mod keyboard;
+mod automation;
+mod hid;
 mod dhcp;

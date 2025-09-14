@@ -4,15 +4,13 @@ use embassy_net::{self as net, tcp::TcpSocket};
 use embassy_time::Duration;
 use heapless::String;
 
-use crate::{USB_ENABLED, USB_START};
 use crate::hid::{HID_CHAN, HidCommand, USB_READY};
+use crate::{USB_ENABLED, USB_START};
 
 const SERVER_PORT: u16 = 80;
 
 #[embassy_executor::task]
-pub async fn server_task(
-    stack: &'static net::Stack<'static>,
-){
+pub async fn server_task(stack: &'static net::Stack<'static>) {
     log::info!("http: listening on port {}", SERVER_PORT);
     loop {
         let mut rx_buf = [0u8; 1024];
@@ -40,7 +38,9 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
     let mut header_end: Option<usize> = None;
     loop {
         let m = socket.read(&mut buf[n..]).await?;
-        if m == 0 { break; }
+        if m == 0 {
+            break;
+        }
         n += m;
         if let Some(idx) = find_dbl_crlf(&buf[..n]) {
             header_end = Some(idx);
@@ -76,13 +76,18 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
         }
         Route::KbType { delay_ms } => {
             // Verify USB ready
-            if !USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst) || !USB_READY.load(core::sync::atomic::Ordering::SeqCst) {
+            if !USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst)
+                || !USB_READY.load(core::sync::atomic::Ordering::SeqCst)
+            {
                 respond_text(socket, 409, "USB not ready\n").await?
             } else {
                 // Content-Length and body
                 let header_end = match header_end {
                     Some(v) => v,
-                    None => { respond_text(socket, 400, "bad request\n").await?; return Ok(()); }
+                    None => {
+                        respond_text(socket, 400, "bad request\n").await?;
+                        return Ok(());
+                    }
                 };
                 let headers = &buf[..header_end];
                 let content_length = parse_content_length(headers).unwrap_or(0);
@@ -96,7 +101,9 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
                     // Read remaining body if needed
                     while have < content_length && n < buf.len() {
                         let m = socket.read(&mut buf[n..]).await?;
-                        if m == 0 { break; }
+                        if m == 0 {
+                            break;
+                        }
                         n += m;
                         have = n - body_start;
                     }
@@ -112,7 +119,10 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
                             }
                         };
                         // Validate characters
-                        if !text.chars().all(|c| crate::keyboard::char_to_key(c).is_some()) {
+                        if !text
+                            .chars()
+                            .all(|c| crate::keyboard::char_to_key(c).is_some())
+                        {
                             respond_text(socket, 400, "unsupported character\n").await?;
                         } else {
                             let mut s: heapless::String<256> = heapless::String::new();
@@ -130,7 +140,9 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
             }
         }
         Route::AutomationOpenMacTerminal => {
-            if !USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst) || !USB_READY.load(core::sync::atomic::Ordering::SeqCst) {
+            if !USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst)
+                || !USB_READY.load(core::sync::atomic::Ordering::SeqCst)
+            {
                 respond_text(socket, 409, "USB not ready\n").await?
             } else {
                 match HID_CHAN.try_send(HidCommand::OpenMacTerminal) {
@@ -140,7 +152,9 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
             }
         }
         Route::AutomationMacAssistant => {
-            if !USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst) || !USB_READY.load(core::sync::atomic::Ordering::SeqCst) {
+            if !USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst)
+                || !USB_READY.load(core::sync::atomic::Ordering::SeqCst)
+            {
                 respond_text(socket, 409, "USB not ready\n").await?
             } else {
                 match HID_CHAN.try_send(HidCommand::MacAssistant) {
@@ -153,16 +167,18 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
             let enabled = USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
             let ready = USB_READY.load(core::sync::atomic::Ordering::SeqCst);
             let mut body: String<96> = String::new();
-            let _ = write!(&mut body, "{{\"usb_enabled\":{},\"usb_ready\":{}}}\n", enabled, ready);
+            let _ = write!(
+                &mut body,
+                "{{\"usb_enabled\":{},\"usb_ready\":{}}}\n",
+                enabled, ready
+            );
             respond_bytes(socket, 200, "application/json", body.as_bytes()).await?
         }
         Route::Root => {
             let body = b"OK\n";
             respond_bytes(socket, 200, "text/plain", body).await?
         }
-        Route::NotFound => {
-            respond_text(socket, 404, "not found\n").await?
-        }
+        Route::NotFound => respond_text(socket, 404, "not found\n").await?,
     }
 
     Ok(())
@@ -235,10 +251,16 @@ fn query_flag(query: Option<&str>, key: &str) -> Option<bool> {
         if let Some(eq) = pair.find('=') {
             let (k, v) = (&pair[..eq], &pair[eq + 1..]);
             if k == key {
-                if v.eq_ignore_ascii_case("true") || v == "1" { return Some(true); }
-                if v.eq_ignore_ascii_case("false") || v == "0" { return Some(false); }
+                if v.eq_ignore_ascii_case("true") || v == "1" {
+                    return Some(true);
+                }
+                if v.eq_ignore_ascii_case("false") || v == "0" {
+                    return Some(false);
+                }
             }
-        } else if pair == key { return Some(true); }
+        } else if pair == key {
+            return Some(true);
+        }
     }
     None
 }
@@ -249,7 +271,9 @@ fn query_u64(query: Option<&str>, key: &str) -> Option<u64> {
         if let Some(eq) = pair.find('=') {
             let (k, v) = (&pair[..eq], &pair[eq + 1..]);
             if k == key {
-                if let Ok(val) = v.parse::<u64>() { return Some(val); }
+                if let Ok(val) = v.parse::<u64>() {
+                    return Some(val);
+                }
             }
         }
     }
@@ -263,19 +287,34 @@ fn find_dbl_crlf(buf: &[u8]) -> Option<usize> {
 fn parse_content_length(headers: &[u8]) -> Option<usize> {
     let s = core::str::from_utf8(headers).ok()?;
     for line in s.lines() {
-        if let Some(rest) = line.strip_prefix("Content-Length:") {
-            let v = rest.trim();
-            if let Ok(n) = v.parse::<usize>() { return Some(n); }
+        // Case-insensitive match for content-length
+        let (name, val) = match line.split_once(':') {
+            Some(v) => v,
+            None => continue,
+        };
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            if let Ok(n) = val.trim().parse::<usize>() {
+                return Some(n);
+            }
         }
     }
     None
 }
 
-async fn respond_text(socket: &mut TcpSocket<'_>, code: u16, body: &str) -> Result<(), net::tcp::Error> {
+async fn respond_text(
+    socket: &mut TcpSocket<'_>,
+    code: u16,
+    body: &str,
+) -> Result<(), net::tcp::Error> {
     respond_bytes(socket, code, "text/plain", body.as_bytes()).await
 }
 
-async fn respond_bytes(socket: &mut TcpSocket<'_>, code: u16, content_type: &str, body: &[u8]) -> Result<(), net::tcp::Error> {
+async fn respond_bytes(
+    socket: &mut TcpSocket<'_>,
+    code: u16,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), net::tcp::Error> {
     let mut headers: String<160> = String::new();
     let _ = write!(
         &mut headers,
@@ -287,9 +326,17 @@ async fn respond_bytes(socket: &mut TcpSocket<'_>, code: u16, content_type: &str
     );
     write_all(socket, headers.as_bytes()).await?;
     write_all(socket, body).await?;
-    // Gracefully close the sending side; do not perform further I/O on the socket
-    // to avoid triggering a TCP RST on some stacks.
+    // Gracefully close the sending side, then drain until peer closes.
+    // Draining avoids lwIP/embassy-net sending RST if unread data remains.
     socket.close();
+    let mut drain = [0u8; 128];
+    loop {
+        match socket.read(&mut drain).await {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
     Ok(())
 }
 
