@@ -103,15 +103,8 @@ pub async fn save() -> Result<(), ()> { persist_to_flash().await }
 
 // ------- Persistence implementation -------
 
-#[derive(Clone, Debug)]
-struct Header {
-    magic: u32,
-    version: u8,
-    _pad: [u8; 3],
-    seq: u32,
-    len: u16, // payload length
-    crc32: u32,
-}
+// Note: previously used a "Header" struct for persistence; the implementation
+// now encodes/decodes raw bytes directly for lower overhead.
 
 fn crc32_ieee(mut crc: u32, data: &[u8]) -> u32 {
     crc ^= 0xFFFF_FFFF;
@@ -206,7 +199,7 @@ async fn load_from_flash() -> Result<Option<DeviceConfig>, ()> {
 
 async fn persist_to_flash() -> Result<(), ()> {
     // Determine next seq and next slot
-    let mut cur = get().await;
+    let cur = get().await;
     let mut seq_a = 0u32; let mut seq_b = 0u32;
     if let Some((s, _)) = read_slot(0).await? { seq_a = s; }
     if let Some((s, _)) = read_slot(1).await? { seq_b = s; }
@@ -236,4 +229,3 @@ async fn persist_to_flash() -> Result<(), ()> {
     let _ = with_flash(|f| f.blocking_write((slot_off as u32) + 18, &payload[..plen])).await.map_err(|_| ())?;
     Ok(())
 }
-

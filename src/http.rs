@@ -205,7 +205,7 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
                 respond_text(socket, 409, "USB already enabled\n").await?
             } else {
                 // Re-parse request line to get target with query
-                let (method, target) = match parse_method_target(&buf[..n]) {
+                let (_, target) = match parse_method_target(&buf[..n]) {
                     Some(v) => v,
                     None => { respond_text(socket, 400, "bad request\n").await?; return Ok(()); }
                 };
@@ -432,18 +432,6 @@ async fn respond_bytes(
         }
     }
     Ok(())
-}
-
-// Compute length of a JSON-escaped string without allocating.
-fn json_escaped_len(s: &str) -> usize {
-    let mut n = 0usize;
-    for b in s.bytes() {
-        n += match b {
-            b'"' | b'\\' | b'\n' | b'\r' | b'\t' => 2,
-            _ => 1,
-        };
-    }
-    n
 }
 
 // Write a JSON-escaped string to socket (no surrounding quotes).

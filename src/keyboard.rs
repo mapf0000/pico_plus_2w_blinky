@@ -15,6 +15,10 @@ const DELAY_TAP_HOLD_MS: u64 = 20;
 /// Letters/numbers are unshifted usage codes; use the `modifier` field to apply Shift.
 // Letters
 // Use `KEY_A + offset` for other letters (A=0x04).
+// Derived letters not listed as constants:
+// B(+1), C(+2), D(+3), E(+4), F(+5), G(+6), H(+7), I(+8), J(+9),
+// K(+10), L(+11), M(+12), N(+13), O(+14), P(+15), Q(+16), R(+17),
+// S(+18), T(+19), U(+20), V(+21), W(+22), X(+23), Y(+24), Z(+25)
 pub const KEY_A: u8 = 0x04; // 'A'
 
 // Number row (unshifted values)
@@ -273,20 +277,5 @@ where
         } else {
             log::debug!("hid: skipping unsupported char: {:?}", ch);
         }
-    }
-}
-
-pub async fn tap<'d, D>(w: &mut UsbHidWriter<'d, D, 8>, usage: u8)
-where
-    D: embassy_usb::driver::Driver<'d>,
-{
-    let press = KeyboardReport { keycodes: [usage, 0, 0, 0, 0, 0], leds: 0, modifier: 0, reserved: 0 };
-    let release = KeyboardReport { keycodes: [0, 0, 0, 0, 0, 0], leds: 0, modifier: 0, reserved: 0 };
-    if let Err(e) = w.write_serialize(&press).await {
-        log::warn!("hid: write error (press): {:?}", e);
-    }
-    Timer::after_millis(DELAY_TAP_HOLD_MS).await;
-    if let Err(e) = w.write_serialize(&release).await {
-        log::warn!("hid: write error (release): {:?}", e);
     }
 }
