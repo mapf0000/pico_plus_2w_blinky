@@ -58,3 +58,4 @@ cyw43 = { version = "0.5", features = [
 cyw43-pio = { version = "0.8", features = [
     "defmt",
 ] }
+leasehund = "0.2"

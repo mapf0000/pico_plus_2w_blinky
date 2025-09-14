@@ -17,7 +17,7 @@ use embassy_futures::join::join3;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 use core::sync::atomic::{AtomicBool, Ordering};
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
-use embassy_time::Timer;
+// Timer is used in keyboard.rs; not needed here in main
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -190,7 +190,11 @@ async fn main(spawner: Spawner) {
     stack.wait_config_up().await;
     log::info!("net: up: {:?}", stack.config_v4());
 
-    // Start a tiny HTTP server to receive the USB trigger
+    // Start DHCP server for AP clients
+    spawner.spawn(dhcp::server_task(stack)).unwrap();
+    log::info!("dhcp: server task spawned (port 67)");
+
+    // Start a tiny HTTP server to receive the USB trigger (don’t block on config)
     spawner.spawn(http::server_task(stack)).unwrap();
     log::info!("http: server task spawned (port 80)");
 
@@ -208,3 +212,4 @@ async fn main(spawner: Spawner) {
 
 mod http;
 mod keyboard;
+mod dhcp;
