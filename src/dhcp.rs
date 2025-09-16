@@ -16,6 +16,11 @@ pub async fn server_task(stack: &'static net::Stack<'static>) {
     let mut dhcp: leasehund::DhcpServer<16, 2> =
         leasehund::DhcpServer::new_with_dns(server_ip, mask, router, dns, pool_start, pool_end);
 
-    log::info!("dhcp: server started on {} with pool {}-{}", server_ip, pool_start, pool_end);
+    log::info!(
+        "dhcp: server started on {} with pool {}-{}",
+        server_ip,
+        pool_start,
+        pool_end
+    );
     dhcp.run(*stack).await;
 }

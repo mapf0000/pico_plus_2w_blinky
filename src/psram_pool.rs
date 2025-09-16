@@ -1,9 +1,9 @@
 #![cfg(feature = "psram")]
 
 use core::slice;
+use embassy_rp::Peripherals;
 use embassy_rp::psram::{Config as PsramConfig, Psram};
 use embassy_rp::qmi_cs1::QmiCs1;
-use embassy_rp::Peripherals;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::mutex::Mutex;
 
@@ -17,7 +17,9 @@ static mut HTTP_TX: Option<&'static mut [u8]> = None;
 
 pub async fn init(p: &Peripherals) {
     // Avoid re-init if already done
-    if *PSRAM_INIT.lock().await { return; }
+    if *PSRAM_INIT.lock().await {
+        return;
+    }
 
     // On Pimoroni Pico Plus 2 W, PSRAM (APS6404) is on QMI CS1.
     // CS pin is board-specific; GP0 is a common choice. Adjust if needed.
@@ -34,7 +36,11 @@ pub async fn init(p: &Peripherals) {
         // Create a slice covering the entire PSRAM; then split for our buffers
         let all: &'static mut [u8] = slice::from_raw_parts_mut(base, total);
         if total < HTTP_RX_SIZE + HTTP_TX_SIZE {
-            log::warn!("psram: not enough size for http buffers ({} < {})", total, HTTP_RX_SIZE + HTTP_TX_SIZE);
+            log::warn!(
+                "psram: not enough size for http buffers ({} < {})",
+                total,
+                HTTP_RX_SIZE + HTTP_TX_SIZE
+            );
             *PSRAM_INIT.lock().await = false;
             return;
         }
@@ -45,13 +51,19 @@ pub async fn init(p: &Peripherals) {
     }
 
     *PSRAM_INIT.lock().await = true;
-    log::info!("psram: initialized ({} bytes); http rx={}, tx={}", total, HTTP_RX_SIZE, HTTP_TX_SIZE);
+    log::info!(
+        "psram: initialized ({} bytes); http rx={}, tx={}",
+        total,
+        HTTP_RX_SIZE,
+        HTTP_TX_SIZE
+    );
 }
 
 pub fn http_buffers() -> Option<(&'static mut [u8], &'static mut [u8])> {
-    unsafe { match (HTTP_RX.as_deref_mut(), HTTP_TX.as_deref_mut()) {
-        (Some(rx), Some(tx)) => Some((rx, tx)),
-        _ => None,
-    }}
+    unsafe {
+        match (HTTP_RX.as_deref_mut(), HTTP_TX.as_deref_mut()) {
+            (Some(rx), Some(tx)) => Some((rx, tx)),
+            _ => None,
+        }
+    }
 }
-

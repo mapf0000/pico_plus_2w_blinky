@@ -1,8 +1,10 @@
 #![no_std]
 #![no_main]
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use cyw43_pio::{PioSpi, RM2_CLOCK_DIVIDER}; // RM2 divider recommended on Pico Plus 2 W
 use embassy_executor::Spawner;
+use embassy_futures::join::{join, join3};
 use embassy_net::{self as net, Config, StackResources};
 use embassy_rp::bind_interrupts;
 use embassy_rp::clocks::RoscRng;
@@ -10,12 +12,10 @@ use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::pio::Pio;
 use embassy_rp::usb::Driver as UsbDriver;
-use embassy_usb::{Builder as UsbBuilder, Config as UsbConfig};
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 use embassy_usb::class::cdc_acm::{CdcAcmClass as UsbCdcAcmClass, State as UsbCdcState};
 use embassy_usb::class::hid::{HidWriter as UsbHidWriter, State as UsbHidState};
-use embassy_futures::join::join3;
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
-use core::sync::atomic::{AtomicBool, Ordering};
+use embassy_usb::{Builder as UsbBuilder, Config as UsbConfig};
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 // Timer is used in keyboard.rs; not needed here in main
 use static_cell::StaticCell;
@@ -42,15 +42,21 @@ async fn usb_task(driver: UsbDriver<'static, USB>, run_mac_assistant: bool) {
     const FORCE_ASSISTANT_EACH_BOOT: bool = true;
     let mut rng = RoscRng;
     let pid = if FORCE_ASSISTANT_EACH_BOOT {
-        if (rng.next_u32() & 1) == 0 { 0x0001 } else { 0x0002 }
+        if (rng.next_u32() & 1) == 0 {
+            0x0001
+        } else {
+            0x0002
+        }
     } else {
         0x0001
     };
     let mut cfg = UsbConfig::new(0x1209, pid); // pid.codes style VID/PID (dummy)
     // Read current device identity from runtime config
     let dev_cfg = crate::device_config::get().await;
-    static MANUF: StaticCell<heapless::String<{ crate::device_config::MANUFACTURER_MAX }>> = StaticCell::new();
-    static PROD: StaticCell<heapless::String<{ crate::device_config::PRODUCT_MAX }>> = StaticCell::new();
+    static MANUF: StaticCell<heapless::String<{ crate::device_config::MANUFACTURER_MAX }>> =
+        StaticCell::new();
+    static PROD: StaticCell<heapless::String<{ crate::device_config::PRODUCT_MAX }>> =
+        StaticCell::new();
     let mref = MANUF.init(dev_cfg.usb_manufacturer);
     let pref = PROD.init(dev_cfg.usb_product);
     cfg.manufacturer = Some(mref.as_str());
@@ -75,7 +81,8 @@ async fn usb_task(driver: UsbDriver<'static, USB>, run_mac_assistant: bool) {
     let mut control_buf = [0u8; 64];
 
     // Class states
-    let mut cdc_state = UsbCdcState::new();
+    let mut log_cdc_state = UsbCdcState::new();
+    let mut ctrl_cdc_state = UsbCdcState::new();
     let mut hid_state = UsbHidState::new();
 
     // Build USB device + classes
@@ -89,7 +96,14 @@ async fn usb_task(driver: UsbDriver<'static, USB>, run_mac_assistant: bool) {
     );
 
     // CDC-ACM class used by embassy-usb-logger
-    let logger_class = UsbCdcAcmClass::new(&mut builder, &mut cdc_state, embassy_usb_logger::MAX_PACKET_SIZE as u16);
+    let logger_class = UsbCdcAcmClass::new(
+        &mut builder,
+        &mut log_cdc_state,
+        embassy_usb_logger::MAX_PACKET_SIZE as u16,
+    );
+
+    // CDC-ACM class dedicated to host command/control traffic
+    let ctrl_class = UsbCdcAcmClass::new(&mut builder, &mut ctrl_cdc_state, 64);
 
     // HID keyboard (IN only)
     let hid_cfg = embassy_usb::class::hid::Config {
@@ -98,7 +112,8 @@ async fn usb_task(driver: UsbDriver<'static, USB>, run_mac_assistant: bool) {
         poll_ms: 10,
         max_packet_size: 64,
     };
-    let hid_writer: UsbHidWriter<'_, _, 8> = UsbHidWriter::new(&mut builder, &mut hid_state, hid_cfg);
+    let hid_writer: UsbHidWriter<'_, _, 8> =
+        UsbHidWriter::new(&mut builder, &mut hid_state, hid_cfg);
 
     // Finalize device
     let mut usb = builder.build();
@@ -108,7 +123,9 @@ async fn usb_task(driver: UsbDriver<'static, USB>, run_mac_assistant: bool) {
     let log_fut = embassy_usb_logger::with_class!(1024, log::LevelFilter::Info, logger_class);
     // Run device, logger and HID concurrently.
     let hid_fut = crate::hid::run_hid(hid_writer, run_mac_assistant);
-    join3(usb_fut, log_fut, hid_fut).await;
+    let ctrl_fut = crate::usb_ctrl::run(ctrl_class);
+    let io_fut = join(hid_fut, ctrl_fut);
+    join3(usb_fut, log_fut, io_fut).await;
 }
 
 /// Drives low-level CYW43 events
@@ -134,7 +151,11 @@ async fn main(spawner: Spawner) {
     {
         psram_pool::init(&p).await;
     }
-    let flash_drv = embassy_rp::flash::Flash::<_, embassy_rp::flash::Blocking, { crate::device_config::FLASH_CAPACITY }>::new_blocking(p.FLASH);
+    let flash_drv = embassy_rp::flash::Flash::<
+        _,
+        embassy_rp::flash::Blocking,
+        { crate::device_config::FLASH_CAPACITY },
+    >::new_blocking(p.FLASH);
     crate::device_config::set_flash_driver(flash_drv).await;
 
     // Do not start USB at boot. It will be started on POST /usb/register
@@ -178,7 +199,11 @@ async fn main(spawner: Spawner) {
     static NET_RES: StaticCell<StackResources<3>> = StaticCell::new();
     let mut rng = RoscRng;
     let seed = rng.next_u64();
-    log::info!("net: rng seeded with 0x{:08x}{:08x}", (seed >> 32) as u32, seed as u32);
+    log::info!(
+        "net: rng seeded with 0x{:08x}{:08x}",
+        (seed >> 32) as u32,
+        seed as u32
+    );
 
     // Configure a static IP for the AP interface, e.g. 192.168.4.1/24
     let cfg = Config::ipv4_static(embassy_net::StaticConfigV4 {
@@ -239,13 +264,14 @@ async fn main(spawner: Spawner) {
     core::future::pending::<()>().await;
 }
 
+mod device_config;
+mod dhcp;
+mod hid;
+mod host;
 mod http;
 mod keyboard;
-mod hid;
-mod dhcp;
-mod host;
-mod script_dsl;
-mod scripts;
-mod device_config;
 #[cfg(feature = "psram")]
 mod psram_pool;
+mod script_dsl;
+mod scripts;
+mod usb_ctrl;

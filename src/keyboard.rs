@@ -70,37 +70,37 @@ pub const KEY_F12: u8 = 0x45;
 
 // Navigation cluster
 pub const KEY_PRINT_SCREEN: u8 = 0x46; // Print Screen
-pub const KEY_SCROLL_LOCK: u8 = 0x47;  // Scroll Lock
-pub const KEY_PAUSE: u8 = 0x48;        // Pause / Break
-pub const KEY_INSERT: u8 = 0x49;       // Insert
-pub const KEY_HOME: u8 = 0x4a;         // Home
-pub const KEY_PAGE_UP: u8 = 0x4b;      // Page Up
-pub const KEY_DELETE: u8 = 0x4c;       // Delete Forward
-pub const KEY_END: u8 = 0x4d;          // End
-pub const KEY_PAGE_DOWN: u8 = 0x4e;    // Page Down
-pub const KEY_RIGHT: u8 = 0x4f;        // Right Arrow
-pub const KEY_LEFT: u8 = 0x50;         // Left Arrow
-pub const KEY_DOWN: u8 = 0x51;         // Down Arrow
-pub const KEY_UP: u8 = 0x52;           // Up Arrow
+pub const KEY_SCROLL_LOCK: u8 = 0x47; // Scroll Lock
+pub const KEY_PAUSE: u8 = 0x48; // Pause / Break
+pub const KEY_INSERT: u8 = 0x49; // Insert
+pub const KEY_HOME: u8 = 0x4a; // Home
+pub const KEY_PAGE_UP: u8 = 0x4b; // Page Up
+pub const KEY_DELETE: u8 = 0x4c; // Delete Forward
+pub const KEY_END: u8 = 0x4d; // End
+pub const KEY_PAGE_DOWN: u8 = 0x4e; // Page Down
+pub const KEY_RIGHT: u8 = 0x4f; // Right Arrow
+pub const KEY_LEFT: u8 = 0x50; // Left Arrow
+pub const KEY_DOWN: u8 = 0x51; // Down Arrow
+pub const KEY_UP: u8 = 0x52; // Up Arrow
 
 // Keypad
-pub const KEY_NUM_LOCK: u8 = 0x53;     // Num Lock / Clear
-pub const KEY_KP_SLASH: u8 = 0x54;     // Keypad '/'
-pub const KEY_KP_ASTERISK: u8 = 0x55;  // Keypad '*'
-pub const KEY_KP_MINUS: u8 = 0x56;     // Keypad '-'
-pub const KEY_KP_PLUS: u8 = 0x57;      // Keypad '+'
-pub const KEY_KP_ENTER: u8 = 0x58;     // Keypad Enter
-pub const KEY_KP_1: u8 = 0x59;         // Keypad '1' / End
-pub const KEY_KP_2: u8 = 0x5a;         // Keypad '2' / Down
-pub const KEY_KP_3: u8 = 0x5b;         // Keypad '3' / Page Down
-pub const KEY_KP_4: u8 = 0x5c;         // Keypad '4' / Left
-pub const KEY_KP_5: u8 = 0x5d;         // Keypad '5'
-pub const KEY_KP_6: u8 = 0x5e;         // Keypad '6' / Right
-pub const KEY_KP_7: u8 = 0x5f;         // Keypad '7' / Home
-pub const KEY_KP_8: u8 = 0x60;         // Keypad '8' / Up
-pub const KEY_KP_9: u8 = 0x61;         // Keypad '9' / Page Up
-pub const KEY_KP_0: u8 = 0x62;         // Keypad '0' / Insert
-pub const KEY_KP_DOT: u8 = 0x63;       // Keypad '.' / Delete
+pub const KEY_NUM_LOCK: u8 = 0x53; // Num Lock / Clear
+pub const KEY_KP_SLASH: u8 = 0x54; // Keypad '/'
+pub const KEY_KP_ASTERISK: u8 = 0x55; // Keypad '*'
+pub const KEY_KP_MINUS: u8 = 0x56; // Keypad '-'
+pub const KEY_KP_PLUS: u8 = 0x57; // Keypad '+'
+pub const KEY_KP_ENTER: u8 = 0x58; // Keypad Enter
+pub const KEY_KP_1: u8 = 0x59; // Keypad '1' / End
+pub const KEY_KP_2: u8 = 0x5a; // Keypad '2' / Down
+pub const KEY_KP_3: u8 = 0x5b; // Keypad '3' / Page Down
+pub const KEY_KP_4: u8 = 0x5c; // Keypad '4' / Left
+pub const KEY_KP_5: u8 = 0x5d; // Keypad '5'
+pub const KEY_KP_6: u8 = 0x5e; // Keypad '6' / Right
+pub const KEY_KP_7: u8 = 0x5f; // Keypad '7' / Home
+pub const KEY_KP_8: u8 = 0x60; // Keypad '8' / Up
+pub const KEY_KP_9: u8 = 0x61; // Keypad '9' / Page Up
+pub const KEY_KP_0: u8 = 0x62; // Keypad '0' / Insert
+pub const KEY_KP_DOT: u8 = 0x63; // Keypad '.' / Delete
 
 /// Modifier bit masks for `KeyboardReport.modifier`
 pub const MOD_LCTRL: u8 = 0x01;

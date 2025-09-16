@@ -36,51 +36,77 @@ pub struct Program<'a> {
 
 impl<'a> Program<'a> {
     pub const fn new() -> Self {
-        Self { ops: heapless::Vec::new() }
+        Self {
+            ops: heapless::Vec::new(),
+        }
     }
 }
 
 /// Compile the full DSL into a `Program` (no side effects).
 pub fn compile_dsl<'a>(dsl: &'a str) -> Result<Program<'a>, DslError> {
-
     let mut prog = Program::new();
     let mut count = 0usize;
     for raw in dsl.lines() {
-        if count >= MAX_DSL_LINES { return Err(DslError::TooManyLines); }
+        if count >= MAX_DSL_LINES {
+            return Err(DslError::TooManyLines);
+        }
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         count += 1;
 
         let (cmd, rest) = split_head(line).ok_or(DslError::InvalidLine)?;
         if eq_ci(cmd, "tap") {
             let key_name = rest.trim();
-            if key_name.is_empty() { return Err(DslError::InvalidLine); }
+            if key_name.is_empty() {
+                return Err(DslError::InvalidLine);
+            }
             let key = parse_key(key_name).ok_or(DslError::ParseKey)?;
-            prog.ops.push(Op::Tap { key, mods: 0 }).map_err(|_| DslError::TooManyLines)?;
+            prog.ops
+                .push(Op::Tap { key, mods: 0 })
+                .map_err(|_| DslError::TooManyLines)?;
         } else if eq_ci(cmd, "modtap") {
             let arg = rest.trim();
-            if arg.is_empty() { return Err(DslError::InvalidLine); }
+            if arg.is_empty() {
+                return Err(DslError::InvalidLine);
+            }
             let (mods, key) = parse_modtap(arg)?;
-            prog.ops.push(Op::Tap { key, mods }).map_err(|_| DslError::TooManyLines)?;
+            prog.ops
+                .push(Op::Tap { key, mods })
+                .map_err(|_| DslError::TooManyLines)?;
         } else if eq_ci(cmd, "delay") {
-            let ms: u64 = rest.trim().parse::<u64>().map_err(|_| DslError::ParseDelay)?;
+            let ms: u64 = rest
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| DslError::ParseDelay)?;
             let ms = core::cmp::min(ms, MAX_DSL_DELAY_MS) as u32;
-            if ms != 0 { prog.ops.push(Op::DelayMs(ms)).map_err(|_| DslError::TooManyLines)?; }
+            if ms != 0 {
+                prog.ops
+                    .push(Op::DelayMs(ms))
+                    .map_err(|_| DslError::TooManyLines)?;
+            }
         } else if eq_ci(cmd, "text") {
             let r = rest;
             let (text, delay_ms) = parse_text_args(r)?;
             let delay_ms = core::cmp::min(delay_ms as u64, MAX_DSL_DELAY_MS) as u16;
             if !text.is_empty() {
-                prog.ops.push(Op::Text { s: text, delay_ms }).map_err(|_| DslError::TooManyLines)?;
+                prog.ops
+                    .push(Op::Text { s: text, delay_ms })
+                    .map_err(|_| DslError::TooManyLines)?;
             }
         } else if eq_ci(cmd, "call") {
             let id = rest.trim();
-            if id.is_empty() { return Err(DslError::InvalidLine); }
+            if id.is_empty() {
+                return Err(DslError::InvalidLine);
+            }
             // Validate at compile time that the target exists.
             if scripts::parse_id(id).is_none() {
                 return Err(DslError::UnknownScript);
             }
-            prog.ops.push(Op::Call { id }).map_err(|_| DslError::TooManyLines)?;
+            prog.ops
+                .push(Op::Call { id })
+                .map_err(|_| DslError::TooManyLines)?;
         } else {
             return Err(DslError::UnknownCommand);
         }
@@ -89,7 +115,10 @@ pub fn compile_dsl<'a>(dsl: &'a str) -> Result<Program<'a>, DslError> {
 }
 
 /// Execute a compiled program (public wrapper).
-pub async fn exec_program<'d, 'a, D>(w: &mut UsbHidWriter<'d, D, 8>, prog: &Program<'a>) -> Result<(), DslError>
+pub async fn exec_program<'d, 'a, D>(
+    w: &mut UsbHidWriter<'d, D, 8>,
+    prog: &Program<'a>,
+) -> Result<(), DslError>
 where
     D: embassy_usb::driver::Driver<'d>,
 {
@@ -109,9 +138,15 @@ where
     // recursive async functions (which are not allowed without boxing).
     // Stack stores return addresses and which program to resume (Top or an Owned compiled one).
     #[derive(Copy, Clone)]
-    enum Ctx { Top, Owned(usize) }
+    enum Ctx {
+        Top,
+        Owned(usize),
+    }
 
-    struct Frame { ctx: Ctx, ip: usize }
+    struct Frame {
+        ctx: Ctx,
+        ip: usize,
+    }
 
     // Owned compiled programs for called builtins (their DSL is 'static).
     let mut owned: heapless::Vec<Program<'static>, MAX_OWNED_PROGRAMS> = heapless::Vec::new();
@@ -125,7 +160,14 @@ where
             Ctx::Top => {
                 if ip >= prog.ops.len() {
                     match stack.pop() {
-                        Some(Frame { ctx: prev_ctx, ip: prev_ip }) => { ctx = prev_ctx; ip = prev_ip; continue; }
+                        Some(Frame {
+                            ctx: prev_ctx,
+                            ip: prev_ip,
+                        }) => {
+                            ctx = prev_ctx;
+                            ip = prev_ip;
+                            continue;
+                        }
                         None => break,
                     }
                 }
@@ -136,13 +178,18 @@ where
                         keyboard::tap_with_mod(w, key, mods).await;
                     }
                     Op::DelayMs(ms) => {
-                        if ms != 0 { Timer::after_millis(ms as u64).await; }
+                        if ms != 0 {
+                            Timer::after_millis(ms as u64).await;
+                        }
                     }
                     Op::Text { s, delay_ms } => {
                         keyboard::type_str(w, s, delay_ms as u64).await;
                     }
                     Op::Call { id } => {
-                        let dsl = match scripts::dsl_for_id_str(id) { Some(s) => s, None => return Err(DslError::UnknownScript) };
+                        let dsl = match scripts::dsl_for_id_str(id) {
+                            Some(s) => s,
+                            None => return Err(DslError::UnknownScript),
+                        };
                         let sub = compile_dsl(dsl)?;
                         let ix = owned.len();
                         if owned.push(sub).is_err() || stack.push(Frame { ctx, ip }).is_err() {
@@ -156,7 +203,14 @@ where
             Ctx::Owned(ix) => {
                 if ip >= owned[ix].ops.len() {
                     match stack.pop() {
-                        Some(Frame { ctx: prev_ctx, ip: prev_ip }) => { ctx = prev_ctx; ip = prev_ip; continue; }
+                        Some(Frame {
+                            ctx: prev_ctx,
+                            ip: prev_ip,
+                        }) => {
+                            ctx = prev_ctx;
+                            ip = prev_ip;
+                            continue;
+                        }
                         None => break,
                     }
                 }
@@ -167,13 +221,18 @@ where
                         keyboard::tap_with_mod(w, key, mods).await;
                     }
                     Op::DelayMs(ms) => {
-                        if ms != 0 { Timer::after_millis(ms as u64).await; }
+                        if ms != 0 {
+                            Timer::after_millis(ms as u64).await;
+                        }
                     }
                     Op::Text { s, delay_ms } => {
                         keyboard::type_str(w, s, delay_ms as u64).await;
                     }
                     Op::Call { id } => {
-                        let dsl = match scripts::dsl_for_id_str(id) { Some(s) => s, None => return Err(DslError::UnknownScript) };
+                        let dsl = match scripts::dsl_for_id_str(id) {
+                            Some(s) => s,
+                            None => return Err(DslError::UnknownScript),
+                        };
                         let sub = compile_dsl(dsl)?;
                         let ix2 = owned.len();
                         if owned.push(sub).is_err() || stack.push(Frame { ctx, ip }).is_err() {
@@ -213,7 +272,9 @@ fn split_head(s: &str) -> Option<(&str, &str)> {
     Some((head, tail))
 }
 
-fn eq_ci(a: &str, b: &str) -> bool { a.eq_ignore_ascii_case(b) }
+fn eq_ci(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
 
 fn parse_modtap(s: &str) -> Result<(u8, u8), DslError> {
     let mut mods: u8 = 0;
@@ -222,7 +283,9 @@ fn parse_modtap(s: &str) -> Result<(u8, u8), DslError> {
     let mut key: u8 = 0;
     while let Some(p) = parts.next() {
         let t = p.trim();
-        if t.is_empty() { return Err(DslError::InvalidLine); }
+        if t.is_empty() {
+            return Err(DslError::InvalidLine);
+        }
         // If this is the last segment, treat as key.
         if parts.peek().is_none() {
             key = parse_key(t).ok_or(DslError::ParseKey)?;
@@ -232,13 +295,17 @@ fn parse_modtap(s: &str) -> Result<(u8, u8), DslError> {
             mods |= m;
         }
     }
-    if !last_is_key { return Err(DslError::ParseKey); }
+    if !last_is_key {
+        return Err(DslError::ParseKey);
+    }
     Ok((mods, key))
 }
 
 fn parse_text_args(rest: &str) -> Result<(&str, u64), DslError> {
     let r = rest.trim();
-    if r.is_empty() { return Err(DslError::TextEmpty); }
+    if r.is_empty() {
+        return Err(DslError::TextEmpty);
+    }
     // Optional trailing integer for delay.
     // Find last space; if suffix is integer, use it as delay.
     let mut delay_ms: u64 = 10;
@@ -336,7 +403,9 @@ fn parse_key(s: &str) -> Option<u8> {
         if b'1' <= b && b <= b'9' {
             return Some(keyboard::KEY_1 + (b - b'1'));
         }
-        if b == b'0' { return Some(keyboard::KEY_0); }
+        if b == b'0' {
+            return Some(keyboard::KEY_0);
+        }
     }
 
     Some(match u {
@@ -441,10 +510,36 @@ mod tests {
         let prog = compile_dsl(src).expect("compile_dsl ok");
         // Expect: Tap(A), Tap(DELETE with mods), Text("Hello",25), Call("hello_world")
         let mut it = prog.ops.iter();
-        match it.next() { Some(Op::Tap { key, mods }) => { assert_eq!((*key, *mods), (keyboard::KEY_A, 0)); } _ => panic!("op0") }
-        match it.next() { Some(Op::Tap { key, mods }) => { assert_eq!((*key, *mods), (keyboard::KEY_DELETE, keyboard::MOD_LCTRL | keyboard::MOD_LALT)); } _ => panic!("op1") }
-        match it.next() { Some(Op::Text { s, delay_ms }) => { assert_eq!((*s, *delay_ms), ("Hello", 25)); } _ => panic!("op2") }
-        match it.next() { Some(Op::Call { id }) => { assert_eq!(*id, "hello_world"); } _ => panic!("op3") }
+        match it.next() {
+            Some(Op::Tap { key, mods }) => {
+                assert_eq!((*key, *mods), (keyboard::KEY_A, 0));
+            }
+            _ => panic!("op0"),
+        }
+        match it.next() {
+            Some(Op::Tap { key, mods }) => {
+                assert_eq!(
+                    (*key, *mods),
+                    (
+                        keyboard::KEY_DELETE,
+                        keyboard::MOD_LCTRL | keyboard::MOD_LALT
+                    )
+                );
+            }
+            _ => panic!("op1"),
+        }
+        match it.next() {
+            Some(Op::Text { s, delay_ms }) => {
+                assert_eq!((*s, *delay_ms), ("Hello", 25));
+            }
+            _ => panic!("op2"),
+        }
+        match it.next() {
+            Some(Op::Call { id }) => {
+                assert_eq!(*id, "hello_world");
+            }
+            _ => panic!("op3"),
+        }
         // No DelayMs for "delay 0"
         assert!(it.next().is_none());
     }
@@ -465,7 +560,9 @@ mod tests {
 
         // Too many lines (256 allowed, 257th should fail)
         let mut s = heapless::String::<{ MAX_DSL_LINES * 8 }>::new();
-        for _ in 0..(MAX_DSL_LINES) { let _ = s.push_str("tap A\n"); }
+        for _ in 0..(MAX_DSL_LINES) {
+            let _ = s.push_str("tap A\n");
+        }
         // Add one more non-empty command
         let _ = s.push_str("tap A\n");
         match compile_dsl(&s) {
@@ -479,7 +576,10 @@ mod tests {
         // 60000 should clamp to MAX_DSL_DELAY_MS (5000)
         let p = compile_dsl("text A 60000\n").unwrap();
         match &p.ops[0] {
-            Op::Text { s, delay_ms } => { assert_eq!(*s, "A"); assert_eq!(*delay_ms as u64, MAX_DSL_DELAY_MS); }
+            Op::Text { s, delay_ms } => {
+                assert_eq!(*s, "A");
+                assert_eq!(*delay_ms as u64, MAX_DSL_DELAY_MS);
+            }
             _ => panic!("expected text op"),
         }
     }

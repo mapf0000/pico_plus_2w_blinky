@@ -59,6 +59,7 @@ cyw43-pio = { version = "0.8", optional = true, features = [
     "defmt",
 ] }
 leasehund = { version = "0.2", optional = true }
+picoserve = "0.16.0"
 
 
 [features]

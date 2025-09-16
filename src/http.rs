@@ -4,11 +4,11 @@ use embassy_net::{self as net, tcp::TcpSocket};
 use embassy_time::Duration;
 use heapless::String;
 
+use crate::device_config;
 use crate::hid::{HID_CHAN, HidCommand, USB_READY};
-use crate::{USB_ENABLED, USB_START};
 use crate::host::{self, HostOs};
 use crate::scripts;
-use crate::device_config;
+use crate::{USB_ENABLED, USB_START};
 
 const SERVER_PORT: u16 = 80;
 // Centralized HTTP sizes and limits for maintainability
@@ -32,7 +32,10 @@ pub async fn server_task(stack: &'static net::Stack<'static>) {
     let mut use_psram = false;
     #[cfg(feature = "psram")]
     let (mut rx_ps, mut tx_ps) = match crate::psram_pool::http_buffers() {
-        Some((a, b)) => { use_psram = true; (a, b) }
+        Some((a, b)) => {
+            use_psram = true;
+            (a, b)
+        }
         None => {
             log::warn!("http: PSRAM buffers unavailable; falling back to SRAM");
             // Dummy slices; will not be used when use_psram=false
@@ -107,7 +110,10 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
     log::info!("http: route {:?} ({} bytes)", route_name(&route), n);
 
     match route {
-        Route::UsbRegister { run_assistant, host_os } => {
+        Route::UsbRegister {
+            run_assistant,
+            host_os,
+        } => {
             if USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst) {
                 respond_text(socket, 409, "USB already enabled\n").await?
             } else {
@@ -186,7 +192,6 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
             respond_scripts_list(socket).await?
         }
         // Removed: Route::KbScriptRunBuiltin
-        
         Route::ConfigGet => {
             let cfg = device_config::get().await;
             let man = escape_json_str(cfg.usb_manufacturer.as_str());
@@ -195,7 +200,8 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
             let _ = write!(
                 &mut body,
                 "{{\"usb_manufacturer\":\"{}\",\"usb_product\":\"{}\"}}\n",
-                man.as_str(), prod.as_str()
+                man.as_str(),
+                prod.as_str()
             );
             respond_bytes(socket, 200, "application/json", body.as_bytes()).await?
         }
@@ -207,27 +213,42 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
                 // Re-parse request line to get target with query
                 let (_, target) = match parse_method_target(&buf[..n]) {
                     Some(v) => v,
-                    None => { respond_text(socket, 400, "bad request\n").await?; return Ok(()); }
+                    None => {
+                        respond_text(socket, 400, "bad request\n").await?;
+                        return Ok(());
+                    }
                 };
                 let (_, query) = split_target(target);
 
                 let man_raw = query_param(query, "manufacturer");
                 let prod_raw = query_param(query, "product");
 
-                let mut man_dec: Option<heapless::String<{ device_config::MANUFACTURER_MAX }>> = None;
+                let mut man_dec: Option<heapless::String<{ device_config::MANUFACTURER_MAX }>> =
+                    None;
                 let mut prod_dec: Option<heapless::String<{ device_config::PRODUCT_MAX }>> = None;
                 if let Some(m) = man_raw {
-                    if let Some(s) = percent_decode_str::<{ device_config::MANUFACTURER_MAX }>(m) { man_dec = Some(s); }
-                    else { respond_text(socket, 400, "bad manufacturer\n").await?; return Ok(()); }
+                    if let Some(s) = percent_decode_str::<{ device_config::MANUFACTURER_MAX }>(m) {
+                        man_dec = Some(s);
+                    } else {
+                        respond_text(socket, 400, "bad manufacturer\n").await?;
+                        return Ok(());
+                    }
                 }
                 if let Some(p) = prod_raw {
-                    if let Some(s) = percent_decode_str::<{ device_config::PRODUCT_MAX }>(p) { prod_dec = Some(s); }
-                    else { respond_text(socket, 400, "bad product\n").await?; return Ok(()); }
+                    if let Some(s) = percent_decode_str::<{ device_config::PRODUCT_MAX }>(p) {
+                        prod_dec = Some(s);
+                    } else {
+                        respond_text(socket, 400, "bad product\n").await?;
+                        return Ok(());
+                    }
                 }
 
-                if let Err(e) = device_config::set_partial(man_dec.as_deref(), prod_dec.as_deref()).await {
+                if let Err(e) =
+                    device_config::set_partial(man_dec.as_deref(), prod_dec.as_deref()).await
+                {
                     match e {
-                        device_config::SetError::TooLongManufacturer | device_config::SetError::TooLongProduct => {
+                        device_config::SetError::TooLongManufacturer
+                        | device_config::SetError::TooLongProduct => {
                             respond_text(socket, 413, "value too long\n").await?
                         }
                         device_config::SetError::InvalidChars => {
@@ -248,7 +269,9 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
             let _ = write!(
                 &mut body,
                 "{{\"usb_enabled\":{},\"usb_ready\":{},\"host_os\":\"{}\"}}\n",
-                enabled, ready, host::host_os_str()
+                enabled,
+                ready,
+                host::host_os_str()
             );
             respond_bytes(socket, 200, "application/json", body.as_bytes()).await?
         }
@@ -256,7 +279,13 @@ async fn handle_connection(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp::E
             // Serve a tiny UI so users can interact from a browser.
             // Kept inline via include_str! to avoid heap usage at runtime.
             static INDEX_HTML: &str = include_str!("../assets/index.html");
-            respond_bytes(socket, 200, "text/html; charset=utf-8", INDEX_HTML.as_bytes()).await?
+            respond_bytes(
+                socket,
+                200,
+                "text/html; charset=utf-8",
+                INDEX_HTML.as_bytes(),
+            )
+            .await?
         }
         Route::NotFound => respond_text(socket, 404, "not found\n").await?,
     }
@@ -285,7 +314,10 @@ fn split_target(target: &str) -> (&str, Option<&str>) {
 
 #[derive(Debug)]
 enum Route {
-    UsbRegister { run_assistant: bool, host_os: Option<HostOs> },
+    UsbRegister {
+        run_assistant: bool,
+        host_os: Option<HostOs>,
+    },
     KbScript,
     KbScriptsList,
     ConfigGet,
@@ -301,7 +333,10 @@ fn parse_route(method: &str, target: &str) -> Route {
         ("POST", "/usb/register") => {
             let run_assistant = query_flag(query, "assistant").unwrap_or(true);
             let host_os = query_os(query);
-            Route::UsbRegister { run_assistant, host_os }
+            Route::UsbRegister {
+                run_assistant,
+                host_os,
+            }
         }
         ("POST", "/kb/script") => Route::KbScript,
         ("GET", "/kb/scripts") => Route::KbScriptsList,
@@ -351,7 +386,9 @@ fn query_param<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
     for pair in q.split('&') {
         if let Some(eq) = pair.find('=') {
             let (k, v) = (&pair[..eq], &pair[eq + 1..]);
-            if k == key { return Some(v); }
+            if k == key {
+                return Some(v);
+            }
         }
     }
     None
@@ -468,7 +505,9 @@ async fn respond_scripts_list(socket: &mut TcpSocket<'_>) -> Result<(), net::tcp
     // Write body streaming
     write_all(socket, b"[").await?;
     for (i, s) in scripts::SCRIPTS.iter().enumerate() {
-        if i != 0 { write_all(socket, b",").await?; }
+        if i != 0 {
+            write_all(socket, b",").await?;
+        }
         // {"id":"
         write_all(socket, b"{\"id\":\"").await?;
         write_json_escaped(socket, s.id).await?;
@@ -529,12 +568,24 @@ fn escape_json_str(s: &str) -> heapless::String<512> {
     let mut out: heapless::String<512> = heapless::String::new();
     for b in s.bytes() {
         match b {
-            b'"' => { let _ = out.push_str("\\\""); }
-            b'\\' => { let _ = out.push_str("\\\\"); }
-            b'\n' => { let _ = out.push_str("\\n"); }
-            b'\r' => { let _ = out.push_str("\\r"); }
-            b'\t' => { let _ = out.push_str("\\t"); }
-            _ => { let _ = out.push(b as char); }
+            b'"' => {
+                let _ = out.push_str("\\\"");
+            }
+            b'\\' => {
+                let _ = out.push_str("\\\\");
+            }
+            b'\n' => {
+                let _ = out.push_str("\\n");
+            }
+            b'\r' => {
+                let _ = out.push_str("\\r");
+            }
+            b'\t' => {
+                let _ = out.push_str("\\t");
+            }
+            _ => {
+                let _ = out.push(b as char);
+            }
         }
     }
     out
@@ -559,15 +610,21 @@ fn percent_decode_str<const N: usize>(s: &str) -> Option<heapless::String<N>> {
                 let hi = hex_val(bytes[i + 1])?;
                 let lo = hex_val(bytes[i + 2])?;
                 let ch = (hi << 4) | lo;
-                if out.push(ch as char).is_err() { return None; }
+                if out.push(ch as char).is_err() {
+                    return None;
+                }
                 i += 3;
             }
             b'+' => {
-                if out.push(' ').is_err() { return None; }
+                if out.push(' ').is_err() {
+                    return None;
+                }
                 i += 1;
             }
             c => {
-                if out.push(c as char).is_err() { return None; }
+                if out.push(c as char).is_err() {
+                    return None;
+                }
                 i += 1;
             }
         }
