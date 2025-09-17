@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- served by Trunk during dev and embedded by firmware under /ui -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#22d3ee" stop-opacity="0.15"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" fill="none"/>
+  <g stroke="url(#g)" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 24l24 32-24 24-24-24z"/>
+    <path d="M128 80v32"/>
+    <path d="M88 120l40 24 40-24"/>
+    <path d="M68 140l60 32 60-32"/>
+    <path d="M52 158l76 38 76-38"/>
+    <path d="M40 176l88 40 88-40"/>
+  </g>
+</svg>
+

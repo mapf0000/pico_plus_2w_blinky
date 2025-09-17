@@ -4,6 +4,11 @@ name = "pico_rust"
 version = "0.1.0"
 license = "MIT OR Apache-2.0"
 
+[[bin]]
+name = "pico_rust"
+path = "src/main.rs"
+required-features = ["firmware"]
+
 [dependencies]
 cortex-m = { version = "0.7", optional = true }
 cortex-m-rt = { version = "0.7", optional = true }
@@ -59,7 +64,7 @@ cyw43-pio = { version = "0.8", optional = true, features = [
     "defmt",
 ] }
 leasehund = { version = "0.2", optional = true }
-picoserve = "0.16.0"
+picoserve = { version = "0.16.0", features = ["embassy"] }
 
 
 [features]
@@ -79,3 +84,14 @@ firmware = [
   "cyw43-pio",
   "leasehund",
 ]
+## Enable USB to start automatically at boot (useful for debug runs)
+usb_autostart = []
+
+[workspace]
+members = [
+  "frontend",
+]
+
+[profile.release.package.frontend]
+opt-level = "z"
+codegen-units = 1

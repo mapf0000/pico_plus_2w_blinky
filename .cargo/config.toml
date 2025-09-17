@@ -30,3 +30,10 @@ DEFMT_LOG = "debug"
 test-host = "test --lib --no-default-features --target aarch64-apple-darwin"
 # If you are on Intel Macs, use:
 test-host-intel = "test --lib --no-default-features --target x86_64-apple-darwin"
+# Host-only checks (skip embedded target + frontend build)
+check-host = "check --no-default-features --target aarch64-apple-darwin"
+check-host-intel = "check --no-default-features --target x86_64-apple-darwin"
+check-host-linux = "check --no-default-features --target x86_64-unknown-linux-gnu"
+clippy-host = "clippy --no-default-features -- -D warnings"
+fmt-check = "fmt --all -- --check"
+run-flash = "run --release"

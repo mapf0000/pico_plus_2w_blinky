@@ -128,9 +128,7 @@ fn checksum(opcode: u8, len: u16, payload: &[u8]) -> u8 {
     sum
 }
 
-fn verify_checksum(opcode: u8, len: u16, payload: &[u8], expected: u8) -> bool {
-    checksum(opcode, len, payload) == expected
-}
+// Removed unused helper `verify_checksum` (checksum is validated inline).
 
 struct FrameDecoder {
     state: DecoderState,

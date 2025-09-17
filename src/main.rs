@@ -196,7 +196,10 @@ async fn main(spawner: Spawner) {
     log::info!("cyw43: power management set to PowerSave");
 
     // --- Embassy net stack (Static IPv4 for AP mode) ---
-    static NET_RES: StaticCell<StackResources<3>> = StaticCell::new();
+    // Increase socket pool: DHCP server (UDP) + HTTP listener (TCP) + at least
+    // one accepted connection, plus room for ARP/ICMP/etc. "3" can starve the
+    // HTTP server and lead to connection refused. 8 keeps memory modest.
+    static NET_RES: StaticCell<StackResources<8>> = StaticCell::new();
     let mut rng = RoscRng;
     let seed = rng.next_u64();
     log::info!(
@@ -220,6 +223,8 @@ async fn main(spawner: Spawner) {
         return;
     }
     log::info!("net: stack runner spawned (static IPv4)");
+
+    // (USB autostart decision happens after HTTP is up; see below.)
 
     // --- Bring up a WPA2-protected Access Point ---
     const AP_SSID: &str = "PicoEndpoint";
@@ -248,11 +253,21 @@ async fn main(spawner: Spawner) {
     }
     log::info!("http: server task spawned (port 80)");
 
-    // Wait for POST /usb/register to arrive, then bring up USB.
-    let run_mac_assistant = USB_START.wait().await;
-    if !USB_ENABLED.load(Ordering::SeqCst) {
+    // Decide USB bring-up: autostart in debug/feature, otherwise wait for HTTP trigger.
+    let usb_periph = p.USB;
+    if cfg!(debug_assertions) || cfg!(feature = "usb_autostart") {
+        log::info!("usb: autostarting (debug/usb_autostart)");
+        let usb_driver = UsbDriver::new(usb_periph, Irqs);
+        if let Err(e) = spawner.spawn(usb_task(usb_driver, true)) {
+            log::error!("spawn usb_task failed: {:?}", e);
+        } else {
+            USB_ENABLED.store(true, Ordering::SeqCst);
+        }
+    } else {
+        // Wait for POST/GET /usb/register to arrive, then bring up USB.
+        let run_mac_assistant = USB_START.wait().await;
         log::info!("usb: starting composite (logger + keyboard) after HTTP trigger");
-        let usb_driver = UsbDriver::new(p.USB, Irqs);
+        let usb_driver = UsbDriver::new(usb_periph, Irqs);
         if let Err(e) = spawner.spawn(usb_task(usb_driver, run_mac_assistant)) {
             log::error!("spawn usb_task failed: {:?}", e);
         } else {

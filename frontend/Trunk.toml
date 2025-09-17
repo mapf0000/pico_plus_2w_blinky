@@ -1,0 +1,18 @@
+[[proxy]]
+rewrite = "/status"
+backend = "http://192.168.4.1/status"
+
+[[proxy]]
+rewrite = "/config"
+backend = "http://192.168.4.1/config"
+
+[[proxy]]
+rewrite = "/usb"
+backend = "http://192.168.4.1/usb"
+
+[[proxy]]
+rewrite = "/kb"
+backend = "http://192.168.4.1/kb"
+
+
+# No need to proxy UI assets; Trunk serves them locally during dev.

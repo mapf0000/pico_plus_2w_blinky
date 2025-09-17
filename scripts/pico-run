@@ -6,12 +6,25 @@ set -euo pipefail
 # 2) Wait for a USB CDC ACM port (prefers /dev/cu.* on macOS)
 # 3) Stream logs until interrupted
 
+# Basic flags (passed after the ELF):
+#   --no-wait           Flash and exit (do not wait for CDC)
+#   --timeout=<secs>    Wait up to <secs> for CDC (overrides env)
+
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <path-to-elf> [args...]" >&2
+  echo "Usage: $0 <path-to-elf> [--no-wait] [--timeout=<secs>] [args...]" >&2
   exit 2
 fi
 
-ELF="${@: -1}"
+ELF="$1"
+shift || true
+NO_WAIT=0
+CLI_TIMEOUT=""
+for arg in "$@"; do
+  case "$arg" in
+    --no-wait) NO_WAIT=1 ;;
+    --timeout=*) CLI_TIMEOUT="${arg#--timeout=}" ;;
+  esac
+done
 
 if ! command -v picotool >/dev/null 2>&1; then
   echo "picotool not found in PATH" >&2
@@ -21,22 +34,36 @@ fi
 echo "[pico-run] Flashing: $ELF"
 picotool load -u -v -x -t elf "$ELF"
 
+if [[ $NO_WAIT -eq 1 ]]; then
+  echo "[pico-run] Skipping serial wait (--no-wait)."
+  exit 0
+fi
+
 echo "[pico-run] Waiting for USB CDC device..."
 PORT=""
-deadline=$((SECONDS + 60))
+# Timeout in seconds. Default 120; override with CLI --timeout or env PICO_WAIT_USB_TIMEOUT.
+WAIT_SECS="${CLI_TIMEOUT:-${PICO_WAIT_USB_TIMEOUT:-120}}"
+if [[ "${WAIT_SECS}" =~ ^[0-9]+$ ]] && [[ "$WAIT_SECS" -gt 0 ]]; then
+  deadline=$((SECONDS + WAIT_SECS))
+else
+  deadline=0
+fi
 
 find_port() {
   # Prefer macOS call-out devices first, then others; include common Linux names.
   ls /dev/cu.usbmodem* /dev/tty.usbmodem* /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | head -n1 || true
 }
 
-while [[ -z "$PORT" && $SECONDS -lt $deadline ]]; do
+while [[ -z "$PORT" && ( $deadline -eq 0 || $SECONDS -lt $deadline ) ]]; do
   PORT=$(find_port)
   [[ -z "$PORT" ]] && sleep 0.2
 done
 
 if [[ -z "$PORT" ]]; then
-  echo "[pico-run] No serial device found. Is USB connected and CDC enabled in your firmware?"
+  echo "[pico-run] No serial device found within timeout."
+  echo "             Hint: The firmware enables USB only after an HTTP trigger."
+  echo "             Open http://192.168.4.1/ and click Start USB,"
+  echo "             or curl -X POST 'http://192.168.4.1/usb/register?assistant=1&os=mac'"
   exit 1
 fi
 
@@ -65,6 +92,8 @@ cleanup() {
 trap cleanup INT TERM
 
 echo "[pico-run] Streaming logs (Ctrl-C to stop)…"
+# Reminder for first-time users
+echo "[pico-run] Tip: If nothing prints, trigger USB over Wi‑Fi (http://192.168.4.1)."
 # Foreground cat so logs stream until you interrupt or the device disconnects
 set +e
 cat <&3

@@ -114,16 +114,8 @@ pub fn compile_dsl<'a>(dsl: &'a str) -> Result<Program<'a>, DslError> {
     Ok(prog)
 }
 
-/// Execute a compiled program (public wrapper).
-pub async fn exec_program<'d, 'a, D>(
-    w: &mut UsbHidWriter<'d, D, 8>,
-    prog: &Program<'a>,
-) -> Result<(), DslError>
-where
-    D: embassy_usb::driver::Driver<'d>,
-{
-    exec_program_inner(w, prog, 0u8).await
-}
+// Public wrapper removed (unused); call `run_dsl` or `exec_program_inner` via
+// module-local helpers instead.
 
 /// Internal executor using an explicit call stack to avoid async recursion.
 async fn exec_program_inner<'d, 'a, D>(
