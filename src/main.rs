@@ -4,7 +4,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 use cyw43_pio::{PioSpi, RM2_CLOCK_DIVIDER}; // RM2 divider recommended on Pico Plus 2 W
 use embassy_executor::Spawner;
-use embassy_futures::join::{join, join3};
+use embassy_futures::join::join3;
 use embassy_net::{self as net, Config, StackResources};
 use embassy_rp::bind_interrupts;
 use embassy_rp::clocks::RoscRng;
@@ -19,6 +19,8 @@ use embassy_usb::{Builder as UsbBuilder, Config as UsbConfig};
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 // Timer is used in keyboard.rs; not needed here in main
 use static_cell::StaticCell;
+use crate::http::spawn_http_server_pool;
+
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
@@ -80,9 +82,8 @@ async fn usb_task(driver: UsbDriver<'static, USB>, run_mac_assistant: bool) {
     let mut msos_descriptor = [0u8; 256];
     let mut control_buf = [0u8; 64];
 
-    // Class states
+    // Class states (only logger CDC + HID)
     let mut log_cdc_state = UsbCdcState::new();
-    let mut ctrl_cdc_state = UsbCdcState::new();
     let mut hid_state = UsbHidState::new();
 
     // Build USB device + classes
@@ -102,9 +103,6 @@ async fn usb_task(driver: UsbDriver<'static, USB>, run_mac_assistant: bool) {
         embassy_usb_logger::MAX_PACKET_SIZE as u16,
     );
 
-    // CDC-ACM class dedicated to host command/control traffic
-    let ctrl_class = UsbCdcAcmClass::new(&mut builder, &mut ctrl_cdc_state, 64);
-
     // HID keyboard (IN only)
     let hid_cfg = embassy_usb::class::hid::Config {
         report_descriptor: KeyboardReport::desc(),
@@ -121,11 +119,9 @@ async fn usb_task(driver: UsbDriver<'static, USB>, run_mac_assistant: bool) {
     // Futures
     let usb_fut = usb.run();
     let log_fut = embassy_usb_logger::with_class!(1024, log::LevelFilter::Info, logger_class);
-    // Run device, logger and HID concurrently.
+    // Run device, logger and HID concurrently (control CDC removed).
     let hid_fut = crate::hid::run_hid(hid_writer, run_mac_assistant);
-    let ctrl_fut = crate::usb_ctrl::run(ctrl_class);
-    let io_fut = join(hid_fut, ctrl_fut);
-    join3(usb_fut, log_fut, io_fut).await;
+    join3(usb_fut, log_fut, hid_fut).await;
 }
 
 /// Drives low-level CYW43 events
@@ -145,6 +141,17 @@ async fn net_task(mut runner: net::Runner<'static, cyw43::NetDriver<'static>>) -
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+    // Bring up USB immediately so logs are available as early as possible.
+    // Use defaults for manufacturer/product until persisted config is loaded.
+    {
+        log::info!("usb: early start at boot");
+        let usb_driver = UsbDriver::new(p.USB, Irqs);
+        if let Err(e) = spawner.spawn(usb_task(usb_driver, false)) {
+            log::error!("spawn usb_task failed: {:?}", e);
+        } else {
+            USB_ENABLED.store(true, Ordering::SeqCst);
+        }
+    }
     // Initialize runtime configuration defaults, then optional PSRAM, then flash persistence
     crate::device_config::init().await;
     #[cfg(feature = "psram")]
@@ -158,7 +165,7 @@ async fn main(spawner: Spawner) {
     >::new_blocking(p.FLASH);
     crate::device_config::set_flash_driver(flash_drv).await;
 
-    // Do not start USB at boot. It will be started on POST /usb/register
+    // USB is already started above for fastest logging.
 
     let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
@@ -191,15 +198,16 @@ async fn main(spawner: Spawner) {
     log::info!("cyw43: applying CLM/regulatory data");
     control.init(clm).await;
     control
-        .set_power_management(cyw43::PowerManagementMode::PowerSave)
+        .set_power_management(cyw43::PowerManagementMode::None)
         .await;
-    log::info!("cyw43: power management set to PowerSave");
+    log::info!("cyw43: power management set to None (AP mode)");
 
     // --- Embassy net stack (Static IPv4 for AP mode) ---
     // Increase socket pool: DHCP server (UDP) + HTTP listener (TCP) + at least
     // one accepted connection, plus room for ARP/ICMP/etc. "3" can starve the
-    // HTTP server and lead to connection refused. 8 keeps memory modest.
-    static NET_RES: StaticCell<StackResources<8>> = StaticCell::new();
+    // HTTP server and lead to connection refused. Bump to 12 to handle
+    // concurrent browser asset requests while keeping memory modest.
+    static NET_RES: StaticCell<StackResources<16>> = StaticCell::new();
     let mut rng = RoscRng;
     let seed = rng.next_u64();
     log::info!(
@@ -247,33 +255,10 @@ async fn main(spawner: Spawner) {
     log::info!("dhcp: server task spawned (port 67)");
 
     // Start a tiny HTTP server to receive the USB trigger (don’t block on config)
-    if let Err(e) = spawner.spawn(http::server_task(stack)) {
-        log::error!("spawn http::server_task failed: {:?}", e);
-        return;
-    }
+    spawn_http_server_pool(&spawner, *stack);
     log::info!("http: server task spawned (port 80)");
 
-    // Decide USB bring-up: autostart in debug/feature, otherwise wait for HTTP trigger.
-    let usb_periph = p.USB;
-    if cfg!(debug_assertions) || cfg!(feature = "usb_autostart") {
-        log::info!("usb: autostarting (debug/usb_autostart)");
-        let usb_driver = UsbDriver::new(usb_periph, Irqs);
-        if let Err(e) = spawner.spawn(usb_task(usb_driver, true)) {
-            log::error!("spawn usb_task failed: {:?}", e);
-        } else {
-            USB_ENABLED.store(true, Ordering::SeqCst);
-        }
-    } else {
-        // Wait for POST/GET /usb/register to arrive, then bring up USB.
-        let run_mac_assistant = USB_START.wait().await;
-        log::info!("usb: starting composite (logger + keyboard) after HTTP trigger");
-        let usb_driver = UsbDriver::new(usb_periph, Irqs);
-        if let Err(e) = spawner.spawn(usb_task(usb_driver, run_mac_assistant)) {
-            log::error!("spawn usb_task failed: {:?}", e);
-        } else {
-            USB_ENABLED.store(true, Ordering::SeqCst);
-        }
-    }
+    // USB is already running; HTTP endpoint will report it as enabled.
 
     // Main can park; tasks run forever.
     core::future::pending::<()>().await;
@@ -289,4 +274,4 @@ mod keyboard;
 mod psram_pool;
 mod script_dsl;
 mod scripts;
-mod usb_ctrl;
+// mod usb_ctrl; // disabled: control CDC removed to keep only keyboard + logging
