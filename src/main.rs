@@ -39,7 +39,7 @@ async fn usb_task(driver: UsbDriver<'static, USB>, run_mac_assistant: bool) {
     // Force macOS to show Keyboard Setup Assistant on every boot by presenting
     // a different Product ID and random serial number. Disable by setting the
     // constant to false.
-    const FORCE_ASSISTANT_EACH_BOOT: bool = true;
+    const FORCE_ASSISTANT_EACH_BOOT: bool = false;
     let mut rng = RoscRng;
     let pid = if FORCE_ASSISTANT_EACH_BOOT {
         if (rng.next_u32() & 1) == 0 {
