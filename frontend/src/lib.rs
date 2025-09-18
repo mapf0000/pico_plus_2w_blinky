@@ -1,4 +1,7 @@
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
+use web_sys::{CloseEvent, MessageEvent, WebSocket, Event};
 use yew::prelude::*;
 
 mod api;
@@ -26,6 +29,7 @@ fn app() -> Html {
     let busy_count = use_state(|| 0u32);
     let log_lines = use_state(|| Vec::<String>::new());
     let toast = use_state(|| None::<(String, bool)>); // (message, ok?)
+    let ws_ref = use_mut_ref(|| None::<WebSocket>);
 
     let set_busy = {
         let busy_count = busy_count.clone();
@@ -99,6 +103,66 @@ fn app() -> Html {
                 });
             });
             move || drop(handle)
+        });
+    }
+
+    // Open a WebSocket to the device on /ws (port 80) and log messages
+    {
+        let push_log = push_log.clone();
+        let ws_ref = ws_ref.clone();
+        use_effect_with((), move |_| {
+            let window = web_sys::window().expect("window");
+            let hostname = window.location().hostname().unwrap_or_else(|_| "192.168.4.1".into());
+            let url = format!("ws://{}/ws", hostname);
+            match WebSocket::new(&url) {
+                Ok(ws) => {
+                    let onopen = {
+                        let push_log = push_log.clone();
+                        Closure::wrap(Box::new(move |_e: Event| {
+                            push_log.emit("WS open".to_string());
+                        }) as Box<dyn FnMut(_)> )
+                    };
+                    ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+                    onopen.forget();
+
+                    let onmessage = {
+                        let push_log = push_log.clone();
+                        Closure::wrap(Box::new(move |e: MessageEvent| {
+                            if let Some(s) = e.data().as_string() {
+                                push_log.emit(format!("WS msg: {}", s));
+                            } else {
+                                push_log.emit("WS msg: (non-text)".into());
+                            }
+                        }) as Box<dyn FnMut(_)> )
+                    };
+                    ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+                    onmessage.forget();
+
+                    let onerror = {
+                        let push_log = push_log.clone();
+                        Closure::wrap(Box::new(move |_e: Event| {
+                            push_log.emit("WS error".to_string());
+                        }) as Box<dyn FnMut(_)> )
+                    };
+                    ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+                    onerror.forget();
+
+                    let onclose = {
+                        let push_log = push_log.clone();
+                        Closure::wrap(Box::new(move |_e: CloseEvent| {
+                            push_log.emit("WS closed".to_string());
+                        }) as Box<dyn FnMut(_)> )
+                    };
+                    ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+                    onclose.forget();
+
+                    *ws_ref.borrow_mut() = Some(ws);
+                }
+                Err(_) => {
+                    push_log.emit("WS connect failed".to_string());
+                }
+            }
+            || ()
         });
     }
 

@@ -134,9 +134,9 @@ fn spawn_dhcp(spawner: &Spawner, stack: &'static net::Stack<'static>) -> bool {
 
 /// Spawn tiny HTTP server for the USB trigger endpoint.
 fn spawn_http(spawner: &Spawner, stack: &'static net::Stack<'static>) -> bool {
-    // Original function takes &Spawner and Stack by value (Copy), preserve call style.
+    // Spawn HTTP server (WebSocket served on /ws via picoserve)
     spawn_http_server_pool(spawner, *stack);
-    log::info!("http: server task spawned (port 80)");
+    log::info!("http: server task spawned (port 80, ws=/ws)");
     true
 }
 

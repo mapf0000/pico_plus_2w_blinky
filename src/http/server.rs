@@ -1,0 +1,113 @@
+use embassy_net as net;
+use embassy_time::Duration;
+
+// Router is built via a macro in routes::router
+use super::routes;
+
+const SERVER_PORT: u16 = 80;
+
+/// Tune this to match your StackResources<SOCK> budget.
+pub const WEB_TASK_POOL_SIZE: usize = 4;
+
+// Centralized HTTP sizes and limits for maintainability
+#[cfg(feature = "psram")]
+const RX_BUF_SIZE: usize = crate::psram_pool::HTTP_RX_SIZE;
+#[cfg(feature = "psram")]
+const TX_BUF_SIZE: usize = crate::psram_pool::HTTP_TX_SIZE;
+#[cfg(not(feature = "psram"))]
+const RX_BUF_SIZE: usize = 4096;
+#[cfg(not(feature = "psram"))]
+const TX_BUF_SIZE: usize = 4096;
+// Request parse buffer (headers + small body staging).
+const REQ_BUF_SIZE: usize = 4096;
+
+// For non-PSRAM builds, keep HTTP buffers out of the task stack to avoid overflows.
+#[cfg(not(feature = "psram"))]
+static mut RX_BUFS: [[u8; RX_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
+    [[0; RX_BUF_SIZE]; WEB_TASK_POOL_SIZE];
+#[cfg(not(feature = "psram"))]
+static mut TX_BUFS: [[u8; TX_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
+    [[0; TX_BUF_SIZE]; WEB_TASK_POOL_SIZE];
+#[cfg(not(feature = "psram"))]
+static mut HTTP_REQ_BUFS: [[u8; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
+    [[0; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE];
+
+// If PSRAM is unavailable at runtime for a worker, fall back to SRAM per-worker.
+#[cfg(feature = "psram")]
+static mut FALLBACK_RX_BUFS: [[u8; RX_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
+    [[0; RX_BUF_SIZE]; WEB_TASK_POOL_SIZE];
+#[cfg(feature = "psram")]
+static mut FALLBACK_TX_BUFS: [[u8; TX_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
+    [[0; TX_BUF_SIZE]; WEB_TASK_POOL_SIZE];
+#[cfg(feature = "psram")]
+static mut FALLBACK_HTTP_REQ_BUFS: [[u8; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
+    [[0; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE];
+
+/// Spawn the HTTP worker pool (call this from your init).
+pub fn spawn_http_server_pool(spawner: &embassy_executor::Spawner, stack: net::Stack<'static>) {
+    for id in 0..WEB_TASK_POOL_SIZE {
+        match spawner.spawn(server_task(id, stack)) {
+            Ok(()) => log::info!("http: spawned worker {id} (port {SERVER_PORT})"),
+            Err(e) => log::error!("http: spawn worker {id} failed: {:?}", e),
+        }
+    }
+}
+
+/// Pooled HTTP server task (embassy-net Stack is Copy — pass by value).
+#[embassy_executor::task(pool_size = WEB_TASK_POOL_SIZE)]
+pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
+    log::info!("http[{id}]: listening on port {}", SERVER_PORT);
+
+    // Build the router via macro (avoids opaque inner type hassles).
+    let app = crate::http::routes::app_router!();
+
+    // Keep connections alive so WS upgrade stays open.
+    let cfg = picoserve::Config::new(picoserve::Timeouts {
+        start_read_request: Some(Duration::from_secs(5)),
+        persistent_start_read_request: Some(Duration::from_secs(3)),
+        read_request: Some(Duration::from_secs(2)),
+        write: Some(Duration::from_secs(3)),
+    })
+    .keep_connection_alive();
+
+    // --- Buffer selection per worker ---
+    #[cfg(feature = "psram")]
+    let (rx_buf, tx_buf, http_buf): (&mut [u8], &mut [u8], &mut [u8]) =
+        match crate::psram_pool::http_buffers() {
+            Some((rx, tx)) => {
+                let http: &mut [u8] = unsafe { &mut FALLBACK_HTTP_REQ_BUFS[id] };
+                (rx, tx, http)
+            }
+            None => {
+                log::warn!("http[{id}]: PSRAM buffers unavailable; falling back to SRAM");
+                let rx: &mut [u8] = unsafe { &mut FALLBACK_RX_BUFS[id] };
+                let tx: &mut [u8] = unsafe { &mut FALLBACK_TX_BUFS[id] };
+                let http: &mut [u8] = unsafe { &mut FALLBACK_HTTP_REQ_BUFS[id] };
+                (rx, tx, http)
+            }
+        };
+
+    #[cfg(not(feature = "psram"))]
+    let (rx_buf, tx_buf, http_buf): (&mut [u8], &mut [u8], &mut [u8]) =
+        unsafe { (&mut RX_BUFS[id], &mut TX_BUFS[id], &mut HTTP_REQ_BUFS[id]) };
+
+    log::info!(
+        "http[{id}]: buffers ready (rx={}, tx={}, req={})",
+        RX_BUF_SIZE,
+        TX_BUF_SIZE,
+        REQ_BUF_SIZE
+    );
+
+    // Serve forever (never returns on current picoserve versions)
+    picoserve::listen_and_serve(
+        "http",
+        &app,
+        &cfg,
+        stack,
+        SERVER_PORT,
+        rx_buf,
+        tx_buf,
+        http_buf,
+    )
+    .await
+}
