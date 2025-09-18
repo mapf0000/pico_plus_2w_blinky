@@ -209,9 +209,6 @@ fn app() -> Html {
         <div class="container">
             <ToastBar toast={(*toast).clone()} />
             <div class="hero">
-                <div class="hero-visual">
-                    <img class="spider" src="/ui/spider.svg" alt="Origami-style Spider" />
-                </div>
                 <div class="hero-text">
                     <h1>{"Pico Endpoint"}</h1>
                     <p class="sub">{"A compact control surface for bring-up and scripting."}</p>

@@ -1,39 +1,19 @@
+# .cargo/config.toml (workspace root)
+# NOTE: no global [build].target here — this prevents ARM-only flags from
+#       leaking into the wasm32 frontend build.
+
 [target.thumbv8m.main-none-eabihf]
-# Use a custom runner that flashes via picotool and captures USB logs
+# Custom runner that flashes the board and captures logs
 runner = "./scripts/pico-run"
 
-# Pass some extra options to rustc, some of which get passed on to the linker.
-#
-# * linker argument --nmagic turns off page alignment of sections (which saves
-#   flash space)
-# * linker argument -Tlink.x tells the linker to use link.x as a linker script.
-#   This is usually provided by the cortex-m-rt crate, and by default the
-#   version in that crate will include a file called `memory.x` which describes
-#   the particular memory layout for your specific chip.
-# * linker argument -Tdefmt.x also tells the linker to use `defmt.x` as a
-#   secondary linker script. This is required to make defmt_rtt work.
+# Cortex-M (embedded) rustflags only apply to the thumb target
 rustflags = [
-    "-C", "link-arg=--nmagic",
-    "-C", "link-arg=-Tlink.x",
-    "-C", "link-arg=-Tdefmt.x",
-    "-C", "target-cpu=cortex-m33",
+  "-C", "link-arg=--nmagic",
+  "-C", "link-arg=-Tlink.x",
+  "-C", "link-arg=-Tdefmt.x",
+  "-C", "target-cpu=cortex-m33",
 ]
 
-[build]
-target = "thumbv8m.main-none-eabihf"
-
 [env]
+# defmt log level for firmware
 DEFMT_LOG = "debug"
-
-[alias]
-# Run host-side unit tests (Apple Silicon)
-test-host = "test --lib --no-default-features --target aarch64-apple-darwin"
-# If you are on Intel Macs, use:
-test-host-intel = "test --lib --no-default-features --target x86_64-apple-darwin"
-# Host-only checks (skip embedded target + frontend build)
-check-host = "check --no-default-features --target aarch64-apple-darwin"
-check-host-intel = "check --no-default-features --target x86_64-apple-darwin"
-check-host-linux = "check --no-default-features --target x86_64-unknown-linux-gnu"
-clippy-host = "clippy --no-default-features -- -D warnings"
-fmt-check = "fmt --all -- --check"
-run-flash = "run --release"

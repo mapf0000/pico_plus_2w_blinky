@@ -90,8 +90,12 @@ usb_autostart = []
 [workspace]
 members = [
   "frontend",
+  "build-support"
 ]
 
 [profile.release.package.frontend]
 opt-level = "z"
 codegen-units = 1
+
+[build-dependencies]
+build-support = { path = "./build-support" }

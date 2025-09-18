@@ -112,12 +112,9 @@ pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
         .route("/ui/app.js", get(route_frontend_js))
         .route("/ui/app.wasm", get(route_frontend_wasm))
         .route("/ui/style.css", get(route_frontend_style))
-        .route("/ui/spider.svg", get(route_frontend_spider))
         // Back-compat and robustness
         .route("/ui/ui/style.css", get(route_frontend_style))
-        .route("/ui/ui/spider.svg", get(route_frontend_spider))
         .route("/style.css", get(route_frontend_style))
-        .route("/spider.svg", get(route_frontend_spider))
         // API endpoints
         .route("/status", get(route_status))
         .route(
@@ -240,14 +237,6 @@ async fn route_frontend_style() -> impl picoserve::response::IntoResponse {
     Response::ok(BytesWithType {
         ty: "text/css; charset=utf-8",
         data: frontend_static::STYLE_CSS.as_bytes(),
-    })
-}
-
-async fn route_frontend_spider() -> impl picoserve::response::IntoResponse {
-    log::debug!("http: serve spider.svg");
-    Response::ok(BytesWithType {
-        ty: "image/svg+xml; charset=utf-8",
-        data: frontend_static::SPIDER_SVG.as_bytes(),
     })
 }
 
