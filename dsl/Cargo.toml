@@ -1,0 +1,29 @@
+[package]
+name = "pico_dsl"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+std = []
+
+# Enable serde derives and small UI helpers.
+ui = ["dep:serde"]
+
+# Pi/firmware integration: add executor using Embassy + usbd-hid.
+pi = [
+    "dep:embassy-time",
+    "dep:embassy-usb",
+    "dep:usbd-hid",
+    "dep:log",
+]
+
+[dependencies]
+log = { version = "0.4", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+heapless = "0.9"
+
+# Only used behind the `pi` feature for the executor.
+embassy-time = { version = "0.5", optional = true }
+embassy-usb = { version = "0.5", optional = true }
+usbd-hid = { version = "0.8.1", optional = true }

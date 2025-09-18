@@ -90,7 +90,8 @@ usb_autostart = []
 [workspace]
 members = [
   "frontend",
-  "build-support"
+  "build-support",
+  #"dsl",
 ]
 
 [profile.release.package.frontend]
