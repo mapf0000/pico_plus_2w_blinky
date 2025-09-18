@@ -1,3 +1,15 @@
+//! Build-support helpers invoked from the workspace `build.rs`.
+//!
+//! Responsibilities (kept small and focused):
+//! - Install the linker script (`memory.x`) into `OUT_DIR` and add it to the
+//!   link search path for the firmware target.
+//! - Ensure the Web UI (Yew) is built with Trunk to `frontend/dist/` when
+//!   sources change, then copy a few stable-named assets into `OUT_DIR` and
+//!   generate `frontend_static.rs` with `include_*` statements.
+//! - Avoid leaking embedded-only flags into the wasm build by scrubbing
+//!   environment variables when spawning Trunk.
+//! - Provide simple size guards via env variables.
+
 use anyhow::{bail, Context, Result};
 use std::{
     env, fs,
@@ -5,6 +17,12 @@ use std::{
 };
 use which::which;
 
+/// Entry point called from the workspace `build.rs`.
+///
+/// Steps:
+/// 1) Emit `rerun-if-*` hints for relevant env and files.
+/// 2) Copy `memory.x` into `OUT_DIR` and expose it to the linker.
+/// 3) Rebuild the Web UI with Trunk if sources changed, then embed assets.
 pub fn run() -> Result<()> {
     // Re-run on env var changes (only size guards now)
     cargo::rerun_if_env(&[env_consts::WARN_BYTES, env_consts::MAX_BYTES]);
@@ -27,16 +45,25 @@ pub fn run() -> Result<()> {
 /* ----------------------------- Config & Env ------------------------------ */
 
 #[derive(Debug)]
+/// Build-time configuration captured from Cargo environment.
 struct Config {
+    /// Cargo's per-build output directory.
     out_dir: PathBuf,
+    /// The manifest dir of the workspace root (contains `memory.x`, `frontend/`).
     manifest_dir: PathBuf,
+    /// Path to the frontend crate.
     frontend_dir: PathBuf,
+    /// Active profile (e.g., `debug` or `release`).
     profile: String,
+    /// Active compilation target triple.
     target: String,
+    /// Soft size threshold for the built WebAssembly (emits a warning).
     warn_bytes: u64,
+    /// Hard size limit for the WebAssembly (fails the build when exceeded).
     max_bytes: Option<u64>,
 }
 
+/// Environment variable names used by the build.
 mod env_consts {
     pub const WARN_BYTES: &str = "PICO_WASM_WARN_BYTES";
     pub const MAX_BYTES: &str = "PICO_WASM_MAX_BYTES";
@@ -68,6 +95,7 @@ impl Config {
     }
 
     #[allow(dead_code)]
+    /// True when building a release for an embedded `thumb*` target.
     fn is_embedded_release(&self) -> bool {
         self.profile == "release" && self.target.starts_with("thumb")
     }
@@ -75,20 +103,25 @@ impl Config {
 
 /* -------------------------------- Cargo ---------------------------------- */
 
+/// Minimal helpers to emit Cargo build script directives.
 mod cargo {
     use std::path::Path;
 
+    /// Emit a `rustc-link-search` directive for the given directory.
     pub fn link_search(dir: &Path) {
         println!("cargo:rustc-link-search={}", dir.display());
     }
+    /// Cause the build script to be re-run when any of the given env vars change.
     pub fn rerun_if_env(vars: &[&str]) {
         for v in vars {
             println!("cargo:rerun-if-env-changed={v}");
         }
     }
+    /// Cause the build script to be re-run when the given path changes.
     pub fn rerun_if_changed<P: AsRef<Path>>(p: P) {
         println!("cargo:rerun-if-changed={}", p.as_ref().display());
     }
+    /// Emit a Cargo build warning visible in build logs.
     pub fn warn(msg: impl AsRef<str>) {
         println!("cargo:warning={}", msg.as_ref());
     }
@@ -96,8 +129,10 @@ mod cargo {
 
 /* ------------------------------- Linker ---------------------------------- */
 
+/// Linker-related helpers (copy `memory.x` to `OUT_DIR`).
 mod linker {
     use super::*;
+    /// Copy the workspace `memory.x` into `OUT_DIR` and add `OUT_DIR` to link search.
     pub fn install_memory_x(cfg: &Config) -> Result<()> {
         cargo::link_search(&cfg.out_dir);
 
@@ -113,24 +148,20 @@ mod linker {
 
 /* ------------------------------ Frontend --------------------------------- */
 
+/// Frontend (Web UI) build and embedding pipeline.
 mod frontend {
     use super::*;
     const DIST_DIR: &str = "dist";
     const GEN_RS: &str = "frontend_static.rs";
     const FP_FILE: &str = "frontend.fingerprint";
 
+    /// Register broad change detection for the frontend sources.
     pub fn register_reruns(_cfg: &Config) {
         // One broad watch is enough; Cargo will re-run build.rs when anything changes.
         cargo::rerun_if_changed("frontend");
-        // If you prefer granular:
-        // cargo::rerun_if_changed("frontend/Cargo.toml");
-        // cargo::rerun_if_changed("frontend/Cargo.lock");
-        // cargo::rerun_if_changed("frontend/Trunk.toml");
-        // cargo::rerun_if_changed("frontend/index.html");
-        // cargo::rerun_if_changed("frontend/src");
-        // cargo::rerun_if_changed("frontend/ui");
     }
 
+    /// Ensure the UI is up-to-date, embed assets, and generate `frontend_static.rs`.
     pub fn prepare(cfg: &Config) -> Result<()> {
         if !cfg.frontend_dir.exists() {
             bail!(
@@ -163,6 +194,9 @@ mod frontend {
         Ok(())
     }
 
+    /// Attempt to build the frontend via `trunk build --release`.
+    /// Returns `Ok(true)` when Trunk succeeded, `Ok(false)` when Trunk was not
+    /// found or failed (the caller may decide to continue if a valid `dist/` exists).
     fn try_trunk_build(cfg: &Config) -> Result<bool> {
         if which("trunk").is_err() {
             cargo::warn("frontend: Trunk not found; will use existing dist if present");
@@ -173,7 +207,7 @@ mod frontend {
         let trunk_target = cfg.out_dir.join("trunk-target");
         let _ = std::fs::create_dir_all(&trunk_target);
 
-        // Spawn trunk with a “clean” env
+        // Spawn Trunk with a “clean” env to avoid leaking embedded flags into wasm.
         let mut cmd = std::process::Command::new("trunk");
         cmd.arg("build")
             .arg("--release")
@@ -204,6 +238,8 @@ mod frontend {
         }
     }
 
+    /// Copy `dist/` artifacts to `OUT_DIR` with stable names and generate
+    /// a small Rust module with `include_*` statements for serving over HTTP.
     fn embed_dist(cfg: &Config) -> Result<()> {
         let dist = cfg.frontend_dir.join(DIST_DIR);
         if !dist.exists() {
@@ -276,6 +312,7 @@ mod frontend {
         Ok(())
     }
 
+    /// Find exactly one file in `dir` with the given extension.
     fn pick_one_with_ext(dir: &Path, ext: &str) -> Result<PathBuf> {
         let mut matches = std::fs::read_dir(dir)?
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -292,6 +329,7 @@ mod frontend {
         }
     }
 
+    /// Normalize hashed asset names in `index.html` to stable `/ui/*` paths.
     fn rewrite_paths(index: &mut String, js: &Path, wasm: &Path) {
         let js_name = js.file_name().unwrap().to_string_lossy();
         let wasm_name = wasm.file_name().unwrap().to_string_lossy();
@@ -308,6 +346,7 @@ mod frontend {
 
     /* ------------------------- Fingerprinting ------------------------- */
 
+    /// Compute a deterministic hash of all frontend sources (excluding build outputs).
     fn fingerprint_frontend(root: &Path) -> Result<String> {
         use blake3::Hasher;
 
@@ -329,6 +368,7 @@ mod frontend {
         Ok(hasher.finalize().to_hex().to_string())
     }
 
+    /// Recursively collect files under `dir`, skipping any directory in `skip_dirs`.
     fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, skip_dirs: &[&str]) -> Result<()> {
         for entry in fs::read_dir(dir)? {
             let p = entry?.path();
