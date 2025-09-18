@@ -224,10 +224,7 @@ mod frontend {
             // Force wasm32 target for the inner cargo.
             .env("CARGO_BUILD_TARGET", "wasm32-unknown-unknown");
 
-        println!(
-            "cargo:warning=frontend: running trunk with CARGO_TARGET_DIR={}",
-            trunk_target.display()
-        );
+        // Avoid noisy cargo:warning output for normal trunk runs.
 
         let status = cmd.status().context("run trunk build")?;
         if status.success() {

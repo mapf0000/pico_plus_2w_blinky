@@ -14,15 +14,7 @@ impl<'a> Content for BytesWithType<'a> {
     }
 }
 
-pub(crate) struct JsonString<const N: usize>(pub(crate) heapless::String<N>);
-
-impl<const N: usize> Content for JsonString<N> {
-    fn content_type(&self) -> &'static str { "application/json" }
-    fn content_length(&self) -> usize { self.0.len() }
-    async fn write_content<W: picoserve::io::Write>(self, mut writer: W) -> Result<(), W::Error> {
-        writer.write_all(self.0.as_bytes()).await
-    }
-}
+// Removed JsonString since HTTP JSON endpoints moved to WebSocket
 
 // ===== utilities (fixed for UTF-8 correctness) =====
 

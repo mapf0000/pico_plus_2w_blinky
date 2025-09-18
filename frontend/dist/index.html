@@ -9,8 +9,8 @@
     <!-- Trunk will compile this crate to WASM and inject the loader script. -->
     
 <script type="module">
-import init, * as bindings from '/frontend-9240c0117aeaf4e3.js';
-const wasm = await init({ module_or_path: '/frontend-9240c0117aeaf4e3_bg.wasm' });
+import init, * as bindings from '/frontend-855cb371c9833cf8.js';
+const wasm = await init({ module_or_path: '/frontend-855cb371c9833cf8_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -19,7 +19,7 @@ window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
-  <link rel="modulepreload" href="/frontend-9240c0117aeaf4e3.js" crossorigin="anonymous" integrity="sha384-YaP8gjoNbYE3VONzktPdjXazLfycbwesEQ/10wXCc2nIyMPXrtS8ykN7ZTylRwpn"><link rel="preload" href="/frontend-9240c0117aeaf4e3_bg.wasm" crossorigin="anonymous" integrity="sha384-Vz7CM+0y/jSC7boMGk10MlGBk7ZXdyD9dosLKU245xVuh2eU40qHuSIXhMyFUpp/" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/frontend-855cb371c9833cf8.js" crossorigin="anonymous" integrity="sha384-xogPyMPcfyoNwTiVP2PfV4X+Kb8Uayv75B2TcV2a45Bh6mAKvtxRobGR0nF4EwSA"><link rel="preload" href="/frontend-855cb371c9833cf8_bg.wasm" crossorigin="anonymous" integrity="sha384-V8IJjsep2ZUgRN9dkJ1uCkq64M8e7yUBBuOLJ17Eyjj28Yq7VBP+aITrA6vtC8Qo" as="fetch" type="application/wasm"></head>
   <body>
     <!-- Yew will mount to body by default via #[wasm_bindgen(start)] -->
   </body>
