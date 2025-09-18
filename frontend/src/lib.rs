@@ -271,11 +271,11 @@ fn status_card(props: &StatusProps) -> Html {
     let host_os = st.as_ref().map(|s| s.host_os.clone()).unwrap_or_else(|| "unknown".into());
     html! {
         <div class="card">
-            <div class="row" style="justify-content: space-between; align-items: center;">
+            <div class="row between items-center">
                 <h2>{"Status"}</h2>
-                <div id="spinner" style={format!("display:{}", if props.busy {"inline-flex"} else {"none"})}>{"Working…"}</div>
+                <div id="spinner" class="hide-sm" style={format!("display:{}", if props.busy {"inline-flex"} else {"none"})}>{"Working…"}</div>
             </div>
-            <div id="status" class="status-bar" style="margin:6px 0 6px;">
+            <div id="status" class="status-bar my-1">
                 <span id="stUsbEnabled" class={classes!("badge", if usb_enabled {"on"} else {"off"})} title="USB device registration">{"🔌 USB: "}{ if usb_enabled {"on"} else {"off"} }</span>
                 <span id="stUsbReady" class={classes!("badge", if usb_ready {"on"} else {"off"})} title="USB host ready">{"⌨️ Ready: "}{ if usb_ready {"yes"} else {"no"} }</span>
                 <span id="stHostOs" class={classes!("badge", match host_os.as_str() {"mac"=>"mac","windows"=>"windows",_=>"neutral"})} title="Host OS">{"🖥️ OS: "}{host_os}</span>
@@ -320,8 +320,8 @@ fn identity_card(props: &IdentityProps) -> Html {
     html! {
         <div class="card" id="identityCard">
           <h2>{"Device Identity"}</h2>
-          <div class="row" style="gap:12px; align-items:flex-end; flex-wrap:wrap;">
-            <label class="field" style="flex:1 1 260px; min-width:240px;">
+          <div class="row gap-4 items-end wrap">
+            <label class="field flex-1">
               <div>
                 <span>{"USB manufacturer"}</span>
                 <input id="usbManufacturer" type="text" placeholder="Pico 2W" maxlength="32"
@@ -330,7 +330,7 @@ fn identity_card(props: &IdentityProps) -> Html {
                   disabled={disabled} />
               </div>
             </label>
-            <label class="field" style="flex:2 1 320px; min-width:280px;">
+            <label class="field flex-2">
               <div>
                 <span>{"USB product string"}</span>
                 <input id="usbProduct" type="text" placeholder="Logger + Keyboard" maxlength="48"
@@ -363,11 +363,11 @@ fn usb_card(props: &UsbProps) -> Html {
     html! {
         <div class="card" id="usbCard">
           <h2>{"USB Bring-up"}</h2>
-          <div class="row radio-bar" style="margin-bottom:8px">
+          <div class="row radio-bar mb-1">
             <label class="radio"><input type="radio" name="os" value="mac" checked={props.selected_os=="mac"} onclick={set_mac}/>{" macOS"}</label>
             <label class="radio"><input type="radio" name="os" value="windows" checked={props.selected_os=="windows"} onclick={set_win}/>{" Windows"}</label>
           </div>
-          <div class="row">
+          <div class="row gap-3">
             <button id="btnUsbAssistant" class="btn-accent" onclick={start_assist}>{"Start USB (Assistant)"}</button>
             <button id="btnUsbNoAssistant" onclick={start_noassist}>{"Start USB (No Assistant)"}</button>
           </div>
@@ -405,7 +405,7 @@ fn scripting_card(props: &ScriptProps) -> Html {
     html! {
         <div class="card full">
           <h2>{"Scripting"}</h2>
-          <div class="row" style="margin-bottom:8px; flex-direction: column; align-items: stretch; gap: 8px;">
+          <div class="row column gap-2 mb-1">
             <textarea id="scriptDsl" rows="6" cols="60" placeholder={"tap ENTER\nmodtap LGUI+SPACE\ndelay 400\ntext Terminal 10"}
               value={props.dsl_text.clone()} oninput={on_text} onkeydown={on_keydown} />
             <div class="row">
@@ -414,10 +414,10 @@ fn scripting_card(props: &ScriptProps) -> Html {
             </div>
           </div>
           if let Some(list) = &props.scripts {
-            <div class="row" style="flex-direction: column; align-items: stretch; gap: 6px;">
+            <div class="row column gap-2">
               <div class="hint">{"Built-in scripts:"}</div>
               { for list.iter().map(|s| html!{
-                <div class="row" style="justify-content: space-between; gap: 8px;">
+                <div class="row between gap-2">
                   <div><strong>{&s.name}</strong>{": "}{&s.description}</div>
                   <div class="row">
                     if let Some(pre) = &s.dsl {
@@ -449,8 +449,8 @@ fn log_card(props: &LogProps) -> Html {
     }
     html! {
         <div class="card full">
-          <div class="row" style="justify-content: space-between; align-items: center;">
-            <h2 style="margin:0">{"Log"}</h2>
+          <div class="row between items-center">
+            <h2 class="m-0">{"Log"}</h2>
             <button id="btnClearLog" onclick={{ let cb=props.on_clear.clone(); Callback::from(move |_| cb.emit(())) }}>{"Clear Log"}</button>
           </div>
           <div id="log" ref={node_ref}>{ for props.lines.iter().map(|l| html!{ <div>{l}</div> }) }</div>
@@ -463,15 +463,12 @@ struct ToastProps { pub toast: Option<(String, bool)> }
 #[function_component(ToastBar)]
 fn toast_bar(props: &ToastProps) -> Html {
     if let Some((msg, ok)) = &props.toast {
-        let color = if *ok { "#10b981" } else { "#ef4444" }; // green/red
-        let border = if *ok { "#065f46" } else { "#7f1d1d" };
-        let bg = if *ok { "#052314" } else { "#2a0d10" };
-        let style = format!(
-            "position:fixed;top:12px;right:12px;z-index:9999;padding:10px 14px;border-radius:10px;\
-            border:1px solid {};background:{};color:{};box-shadow:0 5px 20px #0006;",
-            border, bg, color
-        );
-        html! { <div style={style}>{ msg }</div> }
+        let class = if *ok { "toast ok" } else { "toast err" };
+        html! {
+          <div role="status" aria-live="polite" class={class.to_string()}>
+            { msg }
+          </div>
+        }
     } else {
         html! {}
     }
