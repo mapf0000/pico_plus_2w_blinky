@@ -1,9 +1,6 @@
 use embassy_net as net;
 use embassy_time::Duration;
 
-// Router is built via a macro in routes::router
-use super::routes;
-
 const SERVER_PORT: u16 = 80;
 
 /// Tune this to match your StackResources<SOCK> budget.

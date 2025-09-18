@@ -1,7 +1,3 @@
-use heapless::String;
-
-// Bring embedded-io-async WriteExt so .write_all(...) is available.
-use picoserve::io::embedded_io_async;
 use picoserve::response::Content;
 
 /// Static bytes with explicit content type (avoid duplicate header code).
