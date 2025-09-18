@@ -1,6 +1,9 @@
 # .cargo/config.toml (workspace root)
-# NOTE: no global [build].target here — this prevents ARM-only flags from
-#       leaking into the wasm32 frontend build.
+
+[build]
+# Default to the RP235x (Cortex-M33) target so `cargo run --release`
+# cross-compiles firmware and uses the custom runner.
+target = "thumbv8m.main-none-eabihf"
 
 [target.thumbv8m.main-none-eabihf]
 # Custom runner that flashes the board and captures logs

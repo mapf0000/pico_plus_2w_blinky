@@ -7,7 +7,7 @@ use which::which;
 
 pub fn run() -> Result<()> {
     // Re-run on env var changes (only size guards now)
-    cargo::rerun_if_env(&[ENV::WARN_BYTES, ENV::MAX_BYTES]);
+    cargo::rerun_if_env(&[env_consts::WARN_BYTES, env_consts::MAX_BYTES]);
 
     // Re-run when these files change (build-support itself lives in its own crate)
     cargo::rerun_if_changed("build.rs");
@@ -37,7 +37,7 @@ struct Config {
     max_bytes: Option<u64>,
 }
 
-mod ENV {
+mod env_consts {
     pub const WARN_BYTES: &str = "PICO_WASM_WARN_BYTES";
     pub const MAX_BYTES: &str = "PICO_WASM_MAX_BYTES";
 }
@@ -50,11 +50,11 @@ impl Config {
         let profile = env::var("PROFILE").unwrap_or_default();
         let target = env::var("TARGET").unwrap_or_default();
 
-        let warn_bytes = env::var(ENV::WARN_BYTES)
+        let warn_bytes = env::var(env_consts::WARN_BYTES)
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(1_200_000);
-        let max_bytes = env::var(ENV::MAX_BYTES).ok().and_then(|s| s.parse().ok());
+        let max_bytes = env::var(env_consts::MAX_BYTES).ok().and_then(|s| s.parse().ok());
 
         Ok(Self {
             out_dir,
@@ -179,9 +179,16 @@ mod frontend {
             .arg("--release")
             .current_dir(&cfg.frontend_dir)
             .env("CARGO_TARGET_DIR", &trunk_target)
-            // Avoid leaking MCU target into the frontend build:
+            // Avoid leaking MCU/outer Cargo state into the frontend build:
             .env_remove("TARGET")
-            .env_remove("CARGO_BUILD_TARGET");
+            .env_remove("CARGO_BUILD_TARGET")
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("RUSTDOCFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTDOCFLAGS")
+            .env_remove("RUSTC_WORKSPACE_WRAPPER")
+            // Force wasm32 target for the inner cargo.
+            .env("CARGO_BUILD_TARGET", "wasm32-unknown-unknown");
 
         println!(
             "cargo:warning=frontend: running trunk with CARGO_TARGET_DIR={}",
