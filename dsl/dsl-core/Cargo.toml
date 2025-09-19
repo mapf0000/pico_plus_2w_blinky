@@ -1,0 +1,12 @@
+[package]
+name = "dsl-core"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# Default to no_std. Enable "std" for host/tests/wasm conveniences.
+default = []
+std = []
+
+[dependencies]
+# no_std + alloc by default
