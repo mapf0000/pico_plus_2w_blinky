@@ -1,7 +1,8 @@
 use embassy_time::Timer;
 use embassy_usb::class::hid::HidWriter as UsbHidWriter;
 
-use crate::{keyboard, scripts};
+use crate::scripts;
+use crate::usb::keyboard;
 
 // Maintainability: centralized DSL limits
 const MAX_DSL_LINES: usize = 256;

@@ -14,8 +14,6 @@ impl<'a> Content for BytesWithType<'a> {
     }
 }
 
-// Removed JsonString since HTTP JSON endpoints moved to WebSocket
-
 // ===== utilities (fixed for UTF-8 correctness) =====
 
 pub(crate) fn escape_json_str(s: &str) -> heapless::String<512> {

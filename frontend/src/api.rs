@@ -52,17 +52,20 @@ fn hostname() -> String {
         .unwrap_or_else(|_| "192.168.4.1".into())
 }
 
-pub fn init_ws(on_log: impl Fn(String) + 'static) {
+pub fn init_ws(on_log: impl Fn(String) + 'static, on_state: impl Fn(bool) + 'static) {
     WS.with(|cell| {
         if cell.borrow().is_some() { return; }
         let url = format!("ws://{}/ws", hostname());
         let ws = WebSocket::new(&url).expect("ws connect");
 
         let on_log = Rc::new(on_log);
+        let on_state = Rc::new(on_state);
         let onopen = {
             let on_log = on_log.clone();
+            let on_state = on_state.clone();
             Closure::wrap(Box::new(move |_e: Event| {
                 on_log("WS open".into());
+                on_state(true);
             }) as Box<dyn FnMut(_)> )
         };
 
@@ -86,11 +89,19 @@ pub fn init_ws(on_log: impl Fn(String) + 'static) {
 
         let onerror = {
             let on_log = on_log.clone();
-            Closure::wrap(Box::new(move |_e: Event| on_log("WS error".into())) as Box<dyn FnMut(_)>)
+            let on_state = on_state.clone();
+            Closure::wrap(Box::new(move |_e: Event| {
+                on_log("WS error".into());
+                on_state(false);
+            }) as Box<dyn FnMut(_)>)
         };
         let onclose = {
             let on_log = on_log.clone();
-            Closure::wrap(Box::new(move |_e: CloseEvent| on_log("WS closed".into())) as Box<dyn FnMut(_)>)
+            let on_state = on_state.clone();
+            Closure::wrap(Box::new(move |_e: CloseEvent| {
+                on_log("WS closed".into());
+                on_state(false);
+            }) as Box<dyn FnMut(_)>)
         };
 
         ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
@@ -144,6 +155,11 @@ pub async fn usb_register(_assistant: bool, os: Option<&str>) -> Result<(), Stri
     let mut cmd = String::from("USB_REGISTER");
     if let Some(os) = os { if !os.is_empty() { cmd.push(' '); cmd.push_str(&format!("os={}", os)); } }
     let text = send_cmd(&cmd).await?;
+    if text.contains("\"ok\":true") { Ok(()) } else { Err(text) }
+}
+
+pub async fn usb_unregister() -> Result<(), String> {
+    let text = send_cmd("USB_UNREGISTER").await?;
     if text.contains("\"ok\":true") { Ok(()) } else { Err(text) }
 }
 

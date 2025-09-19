@@ -274,7 +274,10 @@ textarea#scriptDsl{
    TOAST
 ========================== */
 .toast{
-  position:fixed; top:12px; right:12px; z-index:9999;
+  position:fixed;
+  right: max(12px, env(safe-area-inset-right));
+  bottom: max(12px, env(safe-area-inset-bottom));
+  z-index:9999;
   padding:10px 14px; border-radius:10px; border:1px solid;
   box-shadow:0 5px 20px #0006;
 }
@@ -284,6 +287,52 @@ textarea#scriptDsl{
 /* =========================
    REDUCED MOTION
 ========================== */
-@media (prefers-reduced-motion: reduce){
-  * { animation: none !important; transition: none !important; }
+  @media (prefers-reduced-motion: reduce){
+    * { animation: none !important; transition: none !important; }
+  }
+
+/* =========================
+   PHASE 1 ADDITIONS
+   - Button variants
+   - Busy overlay for cards
+   - Improve red badge contrast
+========================== */
+
+/* Button variants */
+.btn-secondary{
+  background: color-mix(in srgb, var(--card) 80%, #0a1620);
+  border-color: color-mix(in srgb, var(--border) 85%, #395166);
+}
+.btn-secondary:hover{
+  background: color-mix(in srgb, var(--card) 70%, #0f2230);
+  border-color: #2a4557;
+}
+
+.btn-danger{
+  background: color-mix(in srgb, var(--bad) 20%, #1a0d10);
+  border-color: color-mix(in srgb, var(--bad) 65%, #3a1518);
+  color: #fee2e2;
+}
+.btn-danger:hover{
+  background: color-mix(in srgb, var(--bad) 28%, #281215);
+  border-color: color-mix(in srgb, var(--bad) 75%, #4a1b1f);
+}
+
+/* Busy state for cards */
+.card[aria-busy="true"]{ pointer-events: none; }
+.card[aria-busy="true"]::before{
+  content:""; position:absolute; inset:0; border-radius: inherit;
+  background: #0006;
+}
+.card[aria-busy="true"]::after{
+  content:""; position:absolute; top:12px; right:12px; width:16px; height:16px;
+  border:2px solid #bfd2de; border-right-color: transparent; border-radius:50%;
+  animation: spin .8s linear infinite;
+}
+
+/* Improve error/off badge contrast */
+.badge.off{
+  color: #fee2e2;
+  background: #3e1216;
+  border-color: color-mix(in srgb, var(--bad) 55%, var(--border));
 }

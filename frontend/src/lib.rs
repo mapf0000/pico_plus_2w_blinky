@@ -27,6 +27,7 @@ fn app() -> Html {
     let selected_os = use_state(|| String::from("mac"));
     let busy_count = use_state(|| 0u32);
     let log_lines = use_state(|| Vec::<String>::new());
+    let ws_connected = use_state(|| false);
     let toast = use_state(|| None::<(String, bool)>); // (message, ok?)
     // All WebSocket API calls are handled in api.rs via a single connection
 
@@ -110,8 +111,9 @@ fn app() -> Html {
     // Open a single WebSocket via api module and log messages
     {
         let push_log = push_log.clone();
+        let ws_connected = ws_connected.clone();
         use_effect_with((), move |_| {
-            api::init_ws(move |s| push_log.emit(s));
+            api::init_ws(move |s| push_log.emit(s), move |b| ws_connected.set(b));
             || ()
         });
     }
@@ -230,7 +232,7 @@ fn app() -> Html {
             </div>
 
             <div class="grid">
-                <StatusCard status={st.clone()} busy={busy} />
+                <StatusCard status={st.clone()} busy={busy} ws_connected={*ws_connected} />
                 <IdentityCard
                     config={conf.clone()}
                     usb_enabled={st.as_ref().map(|s| s.usb_enabled).unwrap_or(false)}
@@ -241,7 +243,27 @@ fn app() -> Html {
                         let selected_os = selected_os.clone();
                         Callback::from(move |os: String| selected_os.set(os))
                     }
-                    on_start={on_usb_start.clone()} />
+                    usb_enabled={st.as_ref().map(|s| s.usb_enabled).unwrap_or(false)}
+                    on_start={on_usb_start.clone()}
+                    on_stop={
+                        let set_busy = set_busy.clone();
+                        let push_log = push_log.clone();
+                        let toast_cb = show_toast.clone();
+                        Callback::from(move |_| {
+                            let set_busy = set_busy.clone();
+                            let push_log = push_log.clone();
+                            let show_toast = toast_cb.clone();
+                            wasm_bindgen_futures::spawn_local(async move {
+                                set_busy.emit(true);
+                                match api::usb_unregister().await {
+                                    Ok(()) => { push_log.emit("USB disabling request sent".into()); show_toast.emit(("USB disabling…".into(), true)); }
+                                    Err(e) => { push_log.emit(format!("usb stop error: {e}")); show_toast.emit((format!("USB stop failed: {e}"), false)); }
+                                }
+                                set_busy.emit(false);
+                            });
+                        })
+                    }
+                />
                 <ScriptingCard
                     dsl_text={(*dsl_text).clone()}
                     on_change={
@@ -262,7 +284,7 @@ fn app() -> Html {
 }
 
 #[derive(Properties, PartialEq, Clone)]
-struct StatusProps { pub status: Option<StatusState>, pub busy: bool }
+struct StatusProps { pub status: Option<StatusState>, pub busy: bool, pub ws_connected: bool }
 #[function_component(StatusCard)]
 fn status_card(props: &StatusProps) -> Html {
     let st = &props.status;
@@ -270,7 +292,7 @@ fn status_card(props: &StatusProps) -> Html {
     let usb_ready = st.as_ref().map(|s| s.usb_ready).unwrap_or(false);
     let host_os = st.as_ref().map(|s| s.host_os.clone()).unwrap_or_else(|| "unknown".into());
     html! {
-        <div class="card">
+        <div class="card" aria-busy={props.busy.to_string()}>
             <div class="row between items-center">
                 <h2>{"Status"}</h2>
                 <div id="spinner" class="hide-sm" style={format!("display:{}", if props.busy {"inline-flex"} else {"none"})}>{"Working…"}</div>
@@ -279,6 +301,7 @@ fn status_card(props: &StatusProps) -> Html {
                 <span id="stUsbEnabled" class={classes!("badge", if usb_enabled {"on"} else {"off"})} title="USB device registration">{"🔌 USB: "}{ if usb_enabled {"on"} else {"off"} }</span>
                 <span id="stUsbReady" class={classes!("badge", if usb_ready {"on"} else {"off"})} title="USB host ready">{"⌨️ Ready: "}{ if usb_ready {"yes"} else {"no"} }</span>
                 <span id="stHostOs" class={classes!("badge", match host_os.as_str() {"mac"=>"mac","windows"=>"windows",_=>"neutral"})} title="Host OS">{"🖥️ OS: "}{host_os}</span>
+                <span id="stWs" class={classes!("badge", if props.ws_connected {"on"} else {"off"})} title="WebSocket">{"🔗 WS: "}{ if props.ws_connected {"connected"} else {"disconnected"} }</span>
             </div>
             <div class="hint">{"Refreshes every 5s."}</div>
         </div>
@@ -310,7 +333,20 @@ fn identity_card(props: &IdentityProps) -> Html {
         });
     }
 
-    let disabled = props.usb_enabled;
+    // Disable save when USB is enabled or nothing changed
+    let orig_man = props
+        .config
+        .as_ref()
+        .map(|c| c.usb_manufacturer.clone())
+        .unwrap_or_default();
+    let orig_prod = props
+        .config
+        .as_ref()
+        .map(|c| c.usb_product.clone())
+        .unwrap_or_default();
+    let dirty = *man != orig_man || *prod != orig_prod;
+    let fields_disabled = props.usb_enabled;
+    let disabled = props.usb_enabled || !dirty; // for Save button only
     let on_save = {
         let man = man.clone();
         let prod = prod.clone();
@@ -327,7 +363,11 @@ fn identity_card(props: &IdentityProps) -> Html {
                 <input id="usbManufacturer" type="text" placeholder="Pico 2W" maxlength="32"
                   value={(*man).clone()}
                   oninput={{ let man=man.clone(); Callback::from(move |e: InputEvent| man.set(e.target_unchecked_into::<web_sys::HtmlInputElement>().value())) }}
-                  disabled={disabled} />
+                  disabled={fields_disabled} />
+                <div class="row between">
+                  <span class="hint">{"ASCII only, max 32 bytes."}</span>
+                  <span class="hint">{ format!("{}/32", (*man).as_bytes().len()) }</span>
+                </div>
               </div>
             </label>
             <label class="field flex-2">
@@ -336,7 +376,11 @@ fn identity_card(props: &IdentityProps) -> Html {
                 <input id="usbProduct" type="text" placeholder="Logger + Keyboard" maxlength="48"
                   value={(*prod).clone()}
                   oninput={{ let prod=prod.clone(); Callback::from(move |e: InputEvent| prod.set(e.target_unchecked_into::<web_sys::HtmlInputElement>().value())) }}
-                  disabled={disabled} />
+                  disabled={fields_disabled} />
+                <div class="row between">
+                  <span class="hint">{"ASCII only, max 48 bytes."}</span>
+                  <span class="hint">{ format!("{}/48", (*prod).as_bytes().len()) }</span>
+                </div>
               </div>
             </label>
             <button id="btnSaveIdentity" class="btn-accent" {disabled} onclick={on_save}>{"Save"}</button>
@@ -351,6 +395,8 @@ struct UsbProps {
     pub selected_os: String,
     pub on_select_os: Callback<String>,
     pub on_start: Callback<bool>,
+    pub on_stop: Callback<()>,
+    pub usb_enabled: bool,
 }
 #[function_component(UsbCard)]
 fn usb_card(props: &UsbProps) -> Html {
@@ -363,15 +409,24 @@ fn usb_card(props: &UsbProps) -> Html {
     html! {
         <div class="card" id="usbCard">
           <h2>{"USB Bring-up"}</h2>
-          <div class="row radio-bar mb-1">
-            <label class="radio"><input type="radio" name="os" value="mac" checked={props.selected_os=="mac"} onclick={set_mac}/>{" macOS"}</label>
-            <label class="radio"><input type="radio" name="os" value="windows" checked={props.selected_os=="windows"} onclick={set_win}/>{" Windows"}</label>
-          </div>
-          <div class="row gap-3">
-            <button id="btnUsbAssistant" class="btn-accent" onclick={start_assist}>{"Start USB (Assistant)"}</button>
-            <button id="btnUsbNoAssistant" onclick={start_noassist}>{"Start USB (No Assistant)"}</button>
-          </div>
-          <div class="hint">{"Assistant forces macOS Keyboard Setup Assistant sequence when enabled."}</div>
+          if !props.usb_enabled {
+            <>
+              <div class="row radio-bar mb-1">
+                <label class="radio"><input type="radio" name="os" value="mac" checked={props.selected_os=="mac"} onclick={set_mac}/>{" macOS"}</label>
+                <label class="radio"><input type="radio" name="os" value="windows" checked={props.selected_os=="windows"} onclick={set_win}/>{" Windows"}</label>
+              </div>
+              <div class="row gap-3">
+                <button id="btnUsbAssistant" class="btn-accent" onclick={start_assist} disabled={props.selected_os=="windows"}>{"Start USB on macOS (Assistant)"}</button>
+                <button id="btnUsbNoAssistant" class="btn-secondary" onclick={start_noassist}>{"Start USB"}</button>
+              </div>
+              <div class="hint">{"Assistant forces macOS Keyboard Setup Assistant sequence when enabled."}</div>
+            </>
+          } else {
+            <div class="row gap-3">
+              <button id="btnUsbStop" class="btn-danger" onclick={{ let cb = props.on_stop.clone(); Callback::from(move |_| cb.emit(())) }}>{"Stop USB"}</button>
+            </div>
+            <div class="hint">{"Stops the composite USB device until you start it again."}</div>
+          }
         </div>
     }
 }
@@ -402,21 +457,26 @@ fn scripting_card(props: &ScriptProps) -> Html {
         move |_| { cb.emit(text.clone()); }
     };
 
-    html! {
-        <div class="card full">
-          <h2>{"Scripting"}</h2>
-          <div class="row column gap-2 mb-1">
-            <textarea id="scriptDsl" rows="6" cols="60" placeholder={"tap ENTER\nmodtap LGUI+SPACE\ndelay 400\ntext Terminal 10"}
-              value={props.dsl_text.clone()} oninput={on_text} onkeydown={on_keydown} />
-            <div class="row">
-              <button id="btnRunDsl" class="btn-accent" onclick={{ let cb=props.on_run.clone(); Callback::from(move |_| cb.emit(())) }}>{"Run Script"}</button>
-              <span class="hint">{"Commands: "}<code>{"tap KEY"}</code>{"; "}<code>{"modtap MOD+KEY"}</code>{"; "}<code>{"delay MS"}</code>{"; "}<code>{"text STRING [DELAY]"}</code>{"."}</span>
-            </div>
+  html! {
+      <div class="card full">
+        <h2>{"Scripting"}</h2>
+        <div class="row column gap-2 mb-1">
+          <textarea id="scriptDsl" rows="6" cols="60" placeholder={"tap ENTER\nmodtap LGUI+SPACE\ndelay 400\ntext Terminal 10"}
+            value={props.dsl_text.clone()} oninput={on_text} onkeydown={on_keydown} />
+          <div class="row">
+            <button id="btnRunDsl" class="btn-accent" onclick={{ let cb=props.on_run.clone(); Callback::from(move |_| cb.emit(())) }}>{"Run Script"}</button>
+            <span class="hint">{"Commands: "}<code>{"tap KEY"}</code>{"; "}<code>{"modtap MOD+KEY"}</code>{"; "}<code>{"delay MS"}</code>{"; "}<code>{"text STRING [DELAY]"}</code>{" — Press Ctrl/⌘+Enter to run."}</span>
+            {{
+              let bytes = props.dsl_text.as_bytes().len();
+              let style = if bytes > 512 { "color: var(--bad)".to_string() } else { String::new() };
+              html! { <span class="hint" style={style}>{ format!("{}/512 bytes", bytes) }</span> }
+            }}
           </div>
-          if let Some(list) = &props.scripts {
-            <div class="row column gap-2">
-              <div class="hint">{"Built-in scripts:"}</div>
-              { for list.iter().map(|s| html!{
+        </div>
+        if let Some(list) = &props.scripts {
+          <div class="row column gap-2">
+            <div class="hint">{"Built-in scripts:"}</div>
+            { for list.iter().map(|s| html!{
                 <div class="row between gap-2">
                   <div><strong>{&s.name}</strong>{": "}{&s.description}</div>
                   <div class="row">
@@ -451,7 +511,7 @@ fn log_card(props: &LogProps) -> Html {
         <div class="card full">
           <div class="row between items-center">
             <h2 class="m-0">{"Log"}</h2>
-            <button id="btnClearLog" onclick={{ let cb=props.on_clear.clone(); Callback::from(move |_| cb.emit(())) }}>{"Clear Log"}</button>
+            <button id="btnClearLog" class="btn-secondary" onclick={{ let cb=props.on_clear.clone(); Callback::from(move |_| cb.emit(())) }}>{"Clear Log"}</button>
           </div>
           <div id="log" ref={node_ref}>{ for props.lines.iter().map(|l| html!{ <div>{l}</div> }) }</div>
         </div>
@@ -464,8 +524,9 @@ struct ToastProps { pub toast: Option<(String, bool)> }
 fn toast_bar(props: &ToastProps) -> Html {
     if let Some((msg, ok)) = &props.toast {
         let class = if *ok { "toast ok" } else { "toast err" };
+        let role = if *ok { "status" } else { "alert" };
         html! {
-          <div role="status" aria-live="polite" class={class.to_string()}>
+          <div role={role} aria-live="polite" class={class.to_string()}>
             { msg }
           </div>
         }

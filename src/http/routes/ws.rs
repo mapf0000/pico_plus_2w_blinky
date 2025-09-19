@@ -2,8 +2,8 @@ use picoserve::response::ws;
 use picoserve::io::embedded_io_async; // for Read/Write trait bounds
 
 use crate::host::{self, HostOs};
-use crate::hid::{HID_CHAN, HidCommand, USB_READY};
-use crate::{USB_ENABLED, USB_START};
+use crate::usb::hid::{HID_CHAN, HidCommand, USB_READY};
+use crate::usb::usb_supervisor;
 use crate::http::util::{escape_json_str, percent_decode_str};
 
 pub(crate) async fn ws_handler(
@@ -53,7 +53,7 @@ async fn handle_command<W: embedded_io_async::Write>(
     tx: &mut ws::SocketTx<W>,
 ) -> Result<(), W::Error> {
     if cmd.eq_ignore_ascii_case("STATUS") {
-        let enabled = USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
+        let enabled = usb_supervisor::USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
         let ready = USB_READY.load(core::sync::atomic::Ordering::SeqCst);
         let mut body: heapless::String<96> = heapless::String::new();
         let _ = core::fmt::write(
@@ -97,7 +97,7 @@ async fn handle_command<W: embedded_io_async::Write>(
                 }
             }
         }
-        if USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst) {
+        if usb_supervisor::USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst) {
             return tx.send_text("{\"error\":\"USB already enabled\"}").await;
         }
         match crate::device_config::set_partial(man_dec.as_deref(), prod_dec.as_deref()).await {
@@ -122,7 +122,11 @@ async fn handle_command<W: embedded_io_async::Write>(
             }
         }
         let run_assistant = true;
-        USB_START.signal(run_assistant);
+        let _ = usb_supervisor::start(run_assistant).await;
+        return tx.send_text("{\"ok\":true}").await;
+    } else if cmd.eq_ignore_ascii_case("USB_UNREGISTER") {
+        USB_READY.store(false, core::sync::atomic::Ordering::SeqCst);
+        let _ = usb_supervisor::stop(150).await;
         return tx.send_text("{\"ok\":true}").await;
     } else if cmd.eq_ignore_ascii_case("SCRIPTS_LIST") {
         // Build JSON array into a heapless string

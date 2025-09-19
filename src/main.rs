@@ -3,12 +3,11 @@
 
 // ===== Imports =====
 
-use core::sync::atomic::{AtomicBool, Ordering};
+// use core::sync::atomic::Ordering; // no longer used in this module
 
 use cyw43_pio::PioSpi; // RM2 divider is used directly via RM2_CLOCK_DIVIDER
 use cyw43_pio::RM2_CLOCK_DIVIDER;
 use embassy_executor::Spawner;
-use embassy_futures::join::join3;
 use embassy_net::{self as net, Config, StackResources};
 use embassy_rp::bind_interrupts;
 use embassy_rp::clocks::RoscRng;
@@ -17,11 +16,9 @@ use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::pio::Pio;
 use embassy_rp::usb::Driver as UsbDriver;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
-use embassy_usb::class::cdc_acm::{CdcAcmClass as UsbCdcAcmClass, State as UsbCdcState};
-use embassy_usb::class::hid::{HidWriter as UsbHidWriter, State as UsbHidState};
-use embassy_usb::{Builder as UsbBuilder, Config as UsbConfig};
+// USB classes are handled in `crate::usb` now
 use static_cell::StaticCell;
-use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
+// HID report descriptors handled in `crate::usb` now
 
 use crate::http::spawn_http_server_pool;
 
@@ -29,7 +26,7 @@ use {defmt_rtt as _, panic_probe as _};
 
 // ===== Interrupt bindings =====
 
-bind_interrupts!(struct Irqs {
+bind_interrupts!(pub struct Irqs {
     // USB controller interrupt for the logger
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<USB>;
     // PIO interrupt for CYW43 PIO-SPI
@@ -38,29 +35,21 @@ bind_interrupts!(struct Irqs {
 
 // ===== Globals =====
 
-// Global signal to trigger on-demand USB bring-up from HTTP handler
+// Global signal reserved (legacy) — replaced by usb_supervisor direct calls
 pub static USB_START: Signal<ThreadModeRawMutex, bool> = Signal::new();
-pub static USB_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // ===== Module-local constants (small & auditable) =====
-
-const USB_CFG_MAX_POWER_MA: u16 = 100; // UsbConfig::max_power expects u16 (mA)
-const USB_CTRL_BUF_LEN: usize = 64;
-const USB_DESC_BUF_LEN: usize = 256;
-const USB_MAX_PACKET_SIZE_0: u8 = 64;
-const HID_POLL_MS: u8 = 10;
 
 const AP_SSID: &str = "PicoEndpoint";
 const AP_PASS: &str = "pico12345"; // WPA2: 8+ chars
 const AP_CHANNEL: u8 = 6;
 
-// Force macOS Keyboard Setup Assistant on every boot by varying PID/serial
-const USB_FORCE_ASSISTANT_EACH_BOOT: bool = false;
+// USB config moved under `usb::task`
 
 // ===== Small utilities =====
 
 #[inline]
-fn log_spawn<T, E: core::fmt::Debug>(name: &str, res: Result<T, E>) -> bool {
+pub fn log_spawn<T, E: core::fmt::Debug>(name: &str, res: Result<T, E>) -> bool {
     match res {
         Ok(_) => true,
         Err(e) => {
@@ -71,12 +60,7 @@ fn log_spawn<T, E: core::fmt::Debug>(name: &str, res: Result<T, E>) -> bool {
 }
 
 /// Start early USB (CDC logger + HID) for immediate logging at boot.
-fn early_usb_logging(spawner: &Spawner, driver: UsbDriver<'static, USB>) {
-    log::info!("usb: early start at boot");
-    if log_spawn("usb_task", spawner.spawn(usb_task(driver, false))) {
-        USB_ENABLED.store(true, Ordering::SeqCst);
-    }
-}
+// Early-USB removed: USB is started on demand via WS USB_REGISTER
 
 /// Seed RNG and log the value; returns the seed.
 fn seed_rng() -> u64 {
@@ -142,99 +126,6 @@ fn spawn_http(spawner: &Spawner, stack: &'static net::Stack<'static>) -> bool {
 
 // ===== Tasks =====
 
-/// USB task: composite device with CDC logger + HID keyboard
-#[embassy_executor::task]
-async fn usb_task(driver: UsbDriver<'static, USB>, run_mac_assistant: bool) {
-    // --- Device configuration ---
-    let mut rng = RoscRng;
-
-    // Choose a PID depending on whether we want to force macOS assistant each boot.
-    let pid = if USB_FORCE_ASSISTANT_EACH_BOOT {
-        if (rng.next_u32() & 1) == 0 {
-            0x0001
-        } else {
-            0x0002
-        }
-    } else {
-        0x0001
-    };
-
-    let mut cfg = UsbConfig::new(0x1209, pid); // pid.codes style VID/PID (dummy)
-
-    // Read current device identity from runtime config
-    let dev_cfg = crate::device_config::get().await;
-    static MANUF: StaticCell<heapless::String<{ crate::device_config::MANUFACTURER_MAX }>> =
-        StaticCell::new();
-    static PROD: StaticCell<heapless::String<{ crate::device_config::PRODUCT_MAX }>> =
-        StaticCell::new();
-    let mref = MANUF.init(dev_cfg.usb_manufacturer);
-    let pref = PROD.init(dev_cfg.usb_product);
-    cfg.manufacturer = Some(mref.as_str());
-    cfg.product = Some(pref.as_str());
-
-    if USB_FORCE_ASSISTANT_EACH_BOOT {
-        use core::fmt::Write as _;
-        static SN: StaticCell<heapless::String<16>> = StaticCell::new();
-        let s = SN.init(heapless::String::new());
-        let r = rng.next_u32();
-        let _ = write!(s, "{:08X}", r);
-        cfg.serial_number = Some(s.as_str());
-    } else {
-        cfg.serial_number = None;
-    }
-
-    cfg.max_power = USB_CFG_MAX_POWER_MA;
-    cfg.max_packet_size_0 = USB_MAX_PACKET_SIZE_0;
-
-    // Descriptor/control buffers
-    let mut config_descriptor = [0u8; USB_DESC_BUF_LEN];
-    let mut bos_descriptor = [0u8; USB_DESC_BUF_LEN];
-    let mut msos_descriptor = [0u8; USB_DESC_BUF_LEN];
-    let mut control_buf = [0u8; USB_CTRL_BUF_LEN];
-
-    // Class states (logger CDC + HID)
-    let mut log_cdc_state = UsbCdcState::new();
-    let mut hid_state = UsbHidState::new();
-
-    // Build USB device + classes
-    let mut builder = UsbBuilder::new(
-        driver,
-        cfg,
-        &mut config_descriptor,
-        &mut bos_descriptor,
-        &mut msos_descriptor,
-        &mut control_buf,
-    );
-
-    // CDC-ACM class used by embassy-usb-logger
-    let logger_class = UsbCdcAcmClass::new(
-        &mut builder,
-        &mut log_cdc_state,
-        embassy_usb_logger::MAX_PACKET_SIZE as u16,
-    );
-
-    // HID keyboard (IN only)
-    let hid_cfg = embassy_usb::class::hid::Config {
-        report_descriptor: KeyboardReport::desc(),
-        request_handler: None,
-        poll_ms: HID_POLL_MS,
-        max_packet_size: 64,
-    };
-    let hid_writer: UsbHidWriter<'_, _, 8> =
-        UsbHidWriter::new(&mut builder, &mut hid_state, hid_cfg);
-
-    // Finalize device
-    let mut usb = builder.build();
-
-    // Futures
-    let usb_fut = usb.run();
-    let log_fut = embassy_usb_logger::with_class!(1024, log::LevelFilter::Info, logger_class);
-    let hid_fut = crate::hid::run_hid(hid_writer, run_mac_assistant);
-
-    // Run device, logger and HID concurrently.
-    join3(usb_fut, log_fut, hid_fut).await;
-}
-
 /// Drives low-level CYW43 events
 #[embassy_executor::task]
 async fn cyw43_task(
@@ -257,8 +148,9 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
     // 1) Early USB for logs (CDC) + HID (kept running after)
+    // Prepare USB supervisor: start USB on demand via WS command
     let usb_driver = UsbDriver::new(p.USB, Irqs);
-    early_usb_logging(&spawner, usb_driver);
+    crate::usb::usb_supervisor::init(usb_driver, spawner);
 
     // 2) Runtime config + (optional) PSRAM + flash persistence
     crate::device_config::init().await;
@@ -330,7 +222,7 @@ async fn main(spawner: Spawner) {
     // Start a tiny HTTP server to receive the USB trigger (don’t block on config)
     let _ = spawn_http(&spawner, stack);
 
-    // USB is already running; HTTP endpoint will report it as enabled.
+    // USB will be started on demand; HTTP/WebSocket endpoint commands control it.
 
     // Park forever; tasks run forever.
     core::future::pending::<()>().await;
@@ -340,10 +232,9 @@ async fn main(spawner: Spawner) {
 
 mod device_config;
 mod dhcp;
-mod hid;
 mod host;
 mod http;
-mod keyboard;
+mod usb;
 #[cfg(feature = "psram")]
 mod psram_pool;
 mod script_dsl;
