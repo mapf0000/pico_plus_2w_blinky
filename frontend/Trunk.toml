@@ -16,3 +16,9 @@ backend = "http://192.168.4.1/kb"
 
 
 # No need to proxy UI assets; Trunk serves them locally during dev.
+
+[watch]
+ignore = [
+  "dist/**",
+  "dist"
+]
