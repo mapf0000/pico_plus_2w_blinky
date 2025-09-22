@@ -1,0 +1,4 @@
+# Example: deep call graph
+
+call A
+

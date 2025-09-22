@@ -37,29 +37,36 @@ macro_rules! __mods_str {
 macro_rules! __dsl_lines {
     () => { "" };
     ( tap( $key:ident ) ; $($rest:tt)* ) => {
-        concat!( "tap ", stringify!($key), "\n", $crate::__dsl_lines!( $($rest)* ) )
+        concat!( "tap(\"", stringify!($key), "\")\n", $crate::__dsl_lines!( $($rest)* ) )
     };
     ( modtap( $mods:tt , $key:ident ) ; $($rest:tt)* ) => {
-        concat!( "modtap ", $crate::__mods_str!($mods), "+", stringify!($key), "\n", $crate::__dsl_lines!( $($rest)* ) )
+        concat!(
+            "modtap(\"",
+            $crate::__mods_str!($mods),
+            "+",
+            stringify!($key),
+            "\")\n",
+            $crate::__dsl_lines!( $($rest)* )
+        )
     };
     ( delay( $ms:expr ) ; $($rest:tt)* ) => {
-        concat!( "delay ", stringify!($ms), "\n", $crate::__dsl_lines!( $($rest)* ) )
+        concat!( "delay(", stringify!($ms), ")\n", $crate::__dsl_lines!( $($rest)* ) )
     };
     ( text( $s:literal , $ms:expr ) ; $($rest:tt)* ) => {
-        concat!( "text ", $s, " ", stringify!($ms), "\n", $crate::__dsl_lines!( $($rest)* ) )
+        concat!( "text(", $s, ", ", stringify!($ms), ")\n", $crate::__dsl_lines!( $($rest)* ) )
     };
     ( text( $s:literal ) ; $($rest:tt)* ) => {
-        concat!( "text ", $s, "\n", $crate::__dsl_lines!( $($rest)* ) )
+        concat!( "text(", $s, ")\n", $crate::__dsl_lines!( $($rest)* ) )
     };
     ( call( $id:ident ) ; $($rest:tt)* ) => {
         concat!( "call ", stringify!($id), "\n", $crate::__dsl_lines!( $($rest)* ) )
     };
     // Allow trailing single item forms
-    ( tap( $key:ident ) ; ) => { concat!( "tap ", stringify!($key), "\n" ) };
-    ( modtap( $mods:tt , $key:ident ) ; ) => { concat!( "modtap ", $crate::scripts::__mods_str!($mods), "+", stringify!($key), "\n" ) };
-    ( delay( $ms:expr ) ; ) => { concat!( "delay ", stringify!($ms), "\n" ) };
-    ( text( $s:literal , $ms:expr ) ; ) => { concat!( "text ", $s, " ", stringify!($ms), "\n" ) };
-    ( text( $s:literal ) ; ) => { concat!( "text ", $s, "\n" ) };
+    ( tap( $key:ident ) ; ) => { concat!( "tap(\"", stringify!($key), "\")\n" ) };
+    ( modtap( $mods:tt , $key:ident ) ; ) => { concat!( "modtap(\"", $crate::scripts::__mods_str!($mods), "+", stringify!($key), "\")\n" ) };
+    ( delay( $ms:expr ) ; ) => { concat!( "delay(", stringify!($ms), ")\n" ) };
+    ( text( $s:literal , $ms:expr ) ; ) => { concat!( "text(", $s, ", ", stringify!($ms), ")\n" ) };
+    ( text( $s:literal ) ; ) => { concat!( "text(", $s, ")\n" ) };
     ( call( $id:ident ) ; ) => { concat!( "call ", stringify!($id), "\n" ) };
 }
 

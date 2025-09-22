@@ -1,10 +1,10 @@
+use futures_channel::oneshot;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
-use web_sys::{MessageEvent, WebSocket, Event, CloseEvent};
-use wasm_bindgen::{closure::Closure, JsCast};
-use futures_channel::oneshot;
-use std::{cell::RefCell, rc::Rc};
 use std::thread_local;
+use std::{cell::RefCell, rc::Rc};
+use wasm_bindgen::{closure::Closure, JsCast};
+use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Status {
@@ -54,7 +54,9 @@ fn hostname() -> String {
 
 pub fn init_ws(on_log: impl Fn(String) + 'static, on_state: impl Fn(bool) + 'static) {
     WS.with(|cell| {
-        if cell.borrow().is_some() { return; }
+        if cell.borrow().is_some() {
+            return;
+        }
         let url = format!("ws://{}/ws", hostname());
         let ws = WebSocket::new(&url).expect("ws connect");
 
@@ -66,7 +68,7 @@ pub fn init_ws(on_log: impl Fn(String) + 'static, on_state: impl Fn(bool) + 'sta
             Closure::wrap(Box::new(move |_e: Event| {
                 on_log("WS open".into());
                 on_state(true);
-            }) as Box<dyn FnMut(_)> )
+            }) as Box<dyn FnMut(_)>)
         };
 
         let onmessage = {
@@ -83,8 +85,10 @@ pub fn init_ws(on_log: impl Fn(String) + 'static, on_state: impl Fn(bool) + 'sta
                         }
                     }
                 });
-                if !delivered { on_log(format!("WS msg: {}", s)); }
-            }) as Box<dyn FnMut(_)> )
+                if !delivered {
+                    on_log(format!("WS msg: {}", s));
+                }
+            }) as Box<dyn FnMut(_)>)
         };
 
         let onerror = {
@@ -109,7 +113,14 @@ pub fn init_ws(on_log: impl Fn(String) + 'static, on_state: impl Fn(bool) + 'sta
         ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
         ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
 
-        cell.replace(Some(WsState { ws, pending: None, _onopen: onopen, _onmessage: onmessage, _onerror: onerror, _onclose: onclose }));
+        cell.replace(Some(WsState {
+            ws,
+            pending: None,
+            _onopen: onopen,
+            _onmessage: onmessage,
+            _onerror: onerror,
+            _onclose: onclose,
+        }));
     });
 }
 
@@ -129,7 +140,9 @@ async fn send_cmd(cmd: &str) -> Result<String, String> {
             }
         }
     });
-    if !ok { return Err("ws not connected or busy".into()); }
+    if !ok {
+        return Err("ws not connected or busy".into());
+    }
     rx.await.map_err(|_| "ws response canceled".into())
 }
 
@@ -148,19 +161,36 @@ pub async fn save_config(manufacturer: &str, product: &str) -> Result<(), String
     let p = utf8_percent_encode(product, NON_ALPHANUMERIC).to_string();
     let cmd = format!("CONFIG_SET manufacturer={}&product={}", m, p);
     let text = send_cmd(&cmd).await?;
-    if text.contains("\"ok\":true") { Ok(()) } else { Err(text) }
+    if text.contains("\"ok\":true") {
+        Ok(())
+    } else {
+        Err(text)
+    }
 }
 
 pub async fn usb_register(_assistant: bool, os: Option<&str>) -> Result<(), String> {
     let mut cmd = String::from("USB_REGISTER");
-    if let Some(os) = os { if !os.is_empty() { cmd.push(' '); cmd.push_str(&format!("os={}", os)); } }
+    if let Some(os) = os {
+        if !os.is_empty() {
+            cmd.push(' ');
+            cmd.push_str(&format!("os={}", os));
+        }
+    }
     let text = send_cmd(&cmd).await?;
-    if text.contains("\"ok\":true") { Ok(()) } else { Err(text) }
+    if text.contains("\"ok\":true") {
+        Ok(())
+    } else {
+        Err(text)
+    }
 }
 
 pub async fn usb_unregister() -> Result<(), String> {
     let text = send_cmd("USB_UNREGISTER").await?;
-    if text.contains("\"ok\":true") { Ok(()) } else { Err(text) }
+    if text.contains("\"ok\":true") {
+        Ok(())
+    } else {
+        Err(text)
+    }
 }
 
 pub async fn list_scripts() -> Result<Vec<ScriptMeta>, String> {
@@ -172,5 +202,9 @@ pub async fn list_scripts() -> Result<Vec<ScriptMeta>, String> {
 pub async fn run_script(dsl: &str) -> Result<(), String> {
     let cmd = format!("SCRIPT_RUN {}", dsl);
     let text = send_cmd(&cmd).await?;
-    if text.contains("\"ok\":true") { Ok(()) } else { Err(text) }
+    if text.contains("\"ok\":true") {
+        Ok(())
+    } else {
+        Err(text)
+    }
 }

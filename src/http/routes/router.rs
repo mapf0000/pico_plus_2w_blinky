@@ -5,7 +5,7 @@
 /// Usage: `let app = crate::http::routes::app_router!();`
 macro_rules! app_router {
     () => {{
-        use picoserve::routing::{get, Router};
+        use picoserve::routing::{Router, get};
         // Use absolute paths so macro expansion works from any call site.
         use $crate::http::routes::{api, frontend, ws};
 

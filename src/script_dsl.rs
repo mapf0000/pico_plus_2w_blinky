@@ -245,8 +245,8 @@ where
 /// Execute a small line-based DSL against the HID writer.
 ///
 /// Supported commands (case-insensitive):
-/// - "tap KEY"
-/// - "modtap MOD+MOD+KEY" (MOD: LCTRL, LSHIFT, LALT, LGUI, RCTRL, RSHIFT, RALT, RGUI; aliases: CTRL, SHIFT, ALT, GUI, CMD, WIN, OPTION, CONTROL)
+/// - `tap("KEY")` (legacy `tap KEY` still accepted)
+/// - `modtap("MOD+MOD+KEY")` (MOD: LCTRL, LSHIFT, LALT, LGUI, RCTRL, RSHIFT, RALT, RGUI; aliases: CTRL, SHIFT, ALT, GUI, CMD, WIN, OPTION, CONTROL)
 /// - "delay N" (milliseconds, clamped)
 /// - "text STRING [DELAY]" (optional per-char delay in ms)
 /// - "call ID" (ID from `GET /kb/scripts`)
@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn compile_simple_program() {
-        let src = "tap A\nmodtap LCTRL+LALT+DELETE\ntext Hello 25\ndelay 0\ncall hello_world\n";
+        let src = "tap(\"A\")\nmodtap(\"LCTRL+LALT+DELETE\")\ntext(\"Hello\", 25)\ndelay(0)\ncall hello_world\n";
         let prog = compile_dsl(src).expect("compile_dsl ok");
         // Expect: Tap(A), Tap(DELETE with mods), Text("Hello",25), Call("hello_world")
         let mut it = prog.ops.iter();
@@ -554,10 +554,10 @@ mod tests {
         // Too many lines (256 allowed, 257th should fail)
         let mut s = heapless::String::<{ MAX_DSL_LINES * 8 }>::new();
         for _ in 0..(MAX_DSL_LINES) {
-            let _ = s.push_str("tap A\n");
+            let _ = s.push_str("tap(\"A\")\n");
         }
         // Add one more non-empty command
-        let _ = s.push_str("tap A\n");
+        let _ = s.push_str("tap(\"A\")\n");
         match compile_dsl(&s) {
             Err(DslError::TooManyLines) => {}
             _ => panic!("expected TooManyLines"),

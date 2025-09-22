@@ -1,10 +1,10 @@
-use picoserve::response::ws;
-use picoserve::io::embedded_io_async; // for Read/Write trait bounds
+use picoserve::io::embedded_io_async;
+use picoserve::response::ws; // for Read/Write trait bounds
 
 use crate::host::{self, HostOs};
+use crate::http::util::{escape_json_str, percent_decode_str};
 use crate::usb::hid::{HID_CHAN, HidCommand, USB_READY};
 use crate::usb::usb_supervisor;
-use crate::http::util::{escape_json_str, percent_decode_str};
 
 pub(crate) async fn ws_handler(
     upgrade: ws::WebSocketUpgrade,
@@ -28,8 +28,12 @@ impl ws::WebSocketCallback for HelloWs {
             match rx.next_message(&mut buf).await {
                 Ok(ws::Message::Text(s)) => {
                     let cmd = s.trim();
-                    if cmd.is_empty() { continue; }
-                    if let Err(_) = handle_command(cmd, &mut tx).await { break; }
+                    if cmd.is_empty() {
+                        continue;
+                    }
+                    if let Err(_) = handle_command(cmd, &mut tx).await {
+                        break;
+                    }
                 }
                 Ok(ws::Message::Binary(_b)) => {
                     // No binary protocol; ignore
@@ -86,7 +90,8 @@ async fn handle_command<W: embedded_io_async::Write>(
 
     if let Some(rest) = cmd.strip_prefix("CONFIG_SET ") {
         // Parse query string: manufacturer=..&product=..
-        let mut man_dec: Option<heapless::String<{ crate::device_config::MANUFACTURER_MAX }>> = None;
+        let mut man_dec: Option<heapless::String<{ crate::device_config::MANUFACTURER_MAX }>> =
+            None;
         let mut prod_dec: Option<heapless::String<{ crate::device_config::PRODUCT_MAX }>> = None;
         for pair in rest.split('&') {
             if let Some((k, v)) = pair.split_once('=') {
@@ -101,10 +106,19 @@ async fn handle_command<W: embedded_io_async::Write>(
             return tx.send_text("{\"error\":\"USB already enabled\"}").await;
         }
         match crate::device_config::set_partial(man_dec.as_deref(), prod_dec.as_deref()).await {
-            Ok(()) => { let _ = crate::device_config::save().await; tx.send_text("{\"ok\":true}").await }
-            Err(crate::device_config::SetError::TooLongManufacturer) => tx.send_text("{\"error\":\"bad manufacturer\"}").await,
-            Err(crate::device_config::SetError::TooLongProduct) => tx.send_text("{\"error\":\"bad product\"}").await,
-            Err(crate::device_config::SetError::InvalidChars) => tx.send_text("{\"error\":\"invalid characters\"}").await,
+            Ok(()) => {
+                let _ = crate::device_config::save().await;
+                tx.send_text("{\"ok\":true}").await
+            }
+            Err(crate::device_config::SetError::TooLongManufacturer) => {
+                tx.send_text("{\"error\":\"bad manufacturer\"}").await
+            }
+            Err(crate::device_config::SetError::TooLongProduct) => {
+                tx.send_text("{\"error\":\"bad product\"}").await
+            }
+            Err(crate::device_config::SetError::InvalidChars) => {
+                tx.send_text("{\"error\":\"invalid characters\"}").await
+            }
         }
     } else if cmd.eq_ignore_ascii_case("USB_REGISTER") || cmd.starts_with("USB_REGISTER ") {
         // optional: USB_REGISTER assistant=1&os=mac (we accept but assistant currently unused)
@@ -133,7 +147,9 @@ async fn handle_command<W: embedded_io_async::Write>(
         let mut out: heapless::String<2048> = heapless::String::new();
         let _ = out.push('[');
         for (i, s) in crate::scripts::SCRIPTS.iter().enumerate() {
-            if i != 0 { let _ = out.push(','); }
+            if i != 0 {
+                let _ = out.push(',');
+            }
             let _ = core::fmt::write(
                 &mut out,
                 format_args!(
@@ -155,11 +171,18 @@ async fn handle_command<W: embedded_io_async::Write>(
         return tx.send_text(&out).await;
     } else if let Some(dsl) = cmd.strip_prefix("SCRIPT_RUN ") {
         let bytes = dsl.as_bytes();
-        if bytes.is_empty() || bytes.len() > 512 || !bytes.iter().all(|b| matches!(b, 9 | 10 | 13 | 32..=126)) {
+        if bytes.is_empty()
+            || bytes.len() > 512
+            || !bytes.iter().all(|b| matches!(b, 9 | 10 | 13 | 32..=126))
+        {
             return tx.send_text("{\"error\":\"bad dsl\"}").await;
         }
         let mut s: heapless::String<512> = heapless::String::new();
-        for &ch in bytes.iter() { if s.push(ch as char).is_err() { return tx.send_text("{\"error\":\"dsl too large\"}").await; } }
+        for &ch in bytes.iter() {
+            if s.push(ch as char).is_err() {
+                return tx.send_text("{\"error\":\"dsl too large\"}").await;
+            }
+        }
         match HID_CHAN.try_send(HidCommand::RunDsl { dsl: s }) {
             Ok(()) => tx.send_text("{\"ok\":true,\"queued\":true}").await,
             Err(_) => tx.send_text("{\"error\":\"busy\"}").await,

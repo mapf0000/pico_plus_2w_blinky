@@ -1,4 +1,3 @@
-
 fn main() {
     if let Err(e) = build_support::run() {
         eprintln!("error: {e:?}");

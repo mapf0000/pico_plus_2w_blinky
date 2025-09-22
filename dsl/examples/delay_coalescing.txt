@@ -1,0 +1,7 @@
+# Example: adjacent delays coalesce (lint warns)
+
+let SHORT = 100
+delay(SHORT)
+delay(200)
+text("Coalesced to 300", 0)
+tap("ENTER")

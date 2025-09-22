@@ -1,5 +1,5 @@
 use embassy_futures::join::join3;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{Either, select};
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver as UsbDriver;
@@ -131,4 +131,3 @@ pub async fn usb_task(
     crate::usb::usb_supervisor::USB_ENABLED.store(false, core::sync::atomic::Ordering::SeqCst);
     crate::usb::usb_supervisor::notify_stopped();
 }
-

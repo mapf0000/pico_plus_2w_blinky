@@ -1,0 +1,4 @@
+{
+  "A": "tap(\"TAB\")\n call B",
+  "B": "text(\"Deep\", 10)\n tap(\"ENTER\")"
+}

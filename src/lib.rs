@@ -10,4 +10,6 @@ pub mod scripts;
 // device-specific USB modules (`hid`, `usb_supervisor`).
 #[path = "usb/keyboard.rs"]
 pub(crate) mod usb_keyboard;
-mod usb { pub(crate) use crate::usb_keyboard as keyboard; }
+mod usb {
+    pub(crate) use crate::usb_keyboard as keyboard;
+}

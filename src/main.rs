@@ -234,9 +234,9 @@ mod device_config;
 mod dhcp;
 mod host;
 mod http;
-mod usb;
 #[cfg(feature = "psram")]
 mod psram_pool;
 mod script_dsl;
 mod scripts;
+mod usb;
 // mod usb_ctrl; // disabled: control CDC removed to keep only keyboard + logging

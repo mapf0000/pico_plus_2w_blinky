@@ -1,0 +1,12 @@
+# Example: nested repeats for cursor movement
+
+repeat(3) {
+  repeat(5) {
+    tap("RIGHT")
+  }
+  tap("ENTER")
+}
+
+repeat(3) {
+  tap("UP")
+}

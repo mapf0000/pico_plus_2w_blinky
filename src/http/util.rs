@@ -7,8 +7,12 @@ pub(crate) struct BytesWithType<'a> {
 }
 
 impl<'a> Content for BytesWithType<'a> {
-    fn content_type(&self) -> &'static str { self.ty }
-    fn content_length(&self) -> usize { self.data.len() }
+    fn content_type(&self) -> &'static str {
+        self.ty
+    }
+    fn content_length(&self) -> usize {
+        self.data.len()
+    }
     async fn write_content<W: picoserve::io::Write>(self, mut writer: W) -> Result<(), W::Error> {
         writer.write_all(self.data).await
     }
@@ -20,15 +24,27 @@ pub(crate) fn escape_json_str(s: &str) -> heapless::String<512> {
     let mut out: heapless::String<512> = heapless::String::new();
     for ch in s.chars() {
         match ch {
-            '\"' => { let _ = out.push_str("\\\""); }
-            '\\' => { let _ = out.push_str("\\\\"); }
-            '\n' => { let _ = out.push_str("\\n"); }
-            '\r' => { let _ = out.push_str("\\r"); }
-            '\t' => { let _ = out.push_str("\\t"); }
+            '\"' => {
+                let _ = out.push_str("\\\"");
+            }
+            '\\' => {
+                let _ = out.push_str("\\\\");
+            }
+            '\n' => {
+                let _ = out.push_str("\\n");
+            }
+            '\r' => {
+                let _ = out.push_str("\\r");
+            }
+            '\t' => {
+                let _ = out.push_str("\\t");
+            }
             c if (c as u32) < 0x20 => {
                 let _ = core::fmt::write(&mut out, format_args!("\\u{:04X}", c as u32));
             }
-            c => { let _ = out.push(c); }
+            c => {
+                let _ = out.push(c);
+            }
         }
     }
     out
@@ -53,15 +69,21 @@ pub(crate) fn percent_decode_str<const N: usize>(s: &str) -> Option<heapless::St
                 let hi = hex_val(bytes[i + 1])?;
                 let lo = hex_val(bytes[i + 2])?;
                 let b = (hi << 4) | lo;
-                if out_bytes.push(b).is_err() { return None; }
+                if out_bytes.push(b).is_err() {
+                    return None;
+                }
                 i += 3;
             }
             b'+' => {
-                if out_bytes.push(b' ').is_err() { return None; }
+                if out_bytes.push(b' ').is_err() {
+                    return None;
+                }
                 i += 1;
             }
             c => {
-                if out_bytes.push(c).is_err() { return None; }
+                if out_bytes.push(c).is_err() {
+                    return None;
+                }
                 i += 1;
             }
         }

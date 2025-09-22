@@ -1,0 +1,5 @@
+{
+  "A": "let X = \"Hello\"\ntext(X, 15)",
+  "B": "let X = \"World\"\ntext(X, 15)",
+  "C": "let MSG = \"Hola\"\nfn greet(MSG) {\n  text(MSG, 20)\n}\ngreet(MSG)"
+}

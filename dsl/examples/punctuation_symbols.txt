@@ -1,0 +1,4 @@
+# Example: exercise US ANSI punctuation symbols
+
+text `~!@#$%^&*()_+[]{}|\;:'",.<>/? 15
+

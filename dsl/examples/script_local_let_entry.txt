@@ -1,0 +1,5 @@
+# Example: verify file-local let scoping between scripts
+
+call A
+call B
+

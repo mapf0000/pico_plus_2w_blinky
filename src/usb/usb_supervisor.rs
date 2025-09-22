@@ -19,7 +19,12 @@ pub fn init(driver: UsbDriver<'static, USB>, spawner: Spawner) {
     // Spawn a single USB task that will wait for START_REQ, then run until canceled.
     let _ = crate::log_spawn(
         "usb_task",
-        spawner.spawn(crate::usb::task::usb_task(driver, &USB_CANCEL, &START_REQ, false)),
+        spawner.spawn(crate::usb::task::usb_task(
+            driver,
+            &USB_CANCEL,
+            &START_REQ,
+            false,
+        )),
     );
 }
 
@@ -40,7 +45,9 @@ pub async fn stop(_detach_ms: u64) -> Result<(), ()> {
     Ok(())
 }
 
-pub fn is_running() -> bool { STARTED.load(Ordering::SeqCst) }
+pub fn is_running() -> bool {
+    STARTED.load(Ordering::SeqCst)
+}
 
 pub(crate) fn notify_stopped() {
     STARTED.store(false, Ordering::SeqCst);

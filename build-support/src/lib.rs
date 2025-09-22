@@ -10,7 +10,7 @@
 //!   environment variables when spawning Trunk.
 //! - Provide simple size guards via env variables.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -81,7 +81,9 @@ impl Config {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(1_200_000);
-        let max_bytes = env::var(env_consts::MAX_BYTES).ok().and_then(|s| s.parse().ok());
+        let max_bytes = env::var(env_consts::MAX_BYTES)
+            .ok()
+            .and_then(|s| s.parse().ok());
 
         Ok(Self {
             out_dir,
@@ -230,7 +232,9 @@ mod frontend {
         if status.success() {
             Ok(true)
         } else {
-            cargo::warn(format!("frontend: trunk build failed with status: {status}"));
+            cargo::warn(format!(
+                "frontend: trunk build failed with status: {status}"
+            ));
             Ok(false)
         }
     }
@@ -348,7 +352,11 @@ mod frontend {
         use blake3::Hasher;
 
         let mut files = Vec::<PathBuf>::new();
-        collect_files(root, &mut files, &["dist", "target", ".git", "node_modules"])?;
+        collect_files(
+            root,
+            &mut files,
+            &["dist", "target", ".git", "node_modules"],
+        )?;
         files.sort(); // stable order
 
         let mut hasher = Hasher::new();

@@ -1,0 +1,4 @@
+{
+  "type_password": "text S3cr3t! 30",
+  "post_login": "delay(250)\n tap(\"F12\")"
+}

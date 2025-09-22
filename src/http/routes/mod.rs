@@ -1,6 +1,6 @@
-pub mod frontend;
 pub mod api;
-pub mod ws;
+pub mod frontend;
 pub mod router;
+pub mod ws;
 
 pub(crate) use router::app_router;
