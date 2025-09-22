@@ -4,12 +4,10 @@
 extern crate alloc;
 
 #[cfg(feature = "std")]
-use std::vec::Vec;
-#[cfg(feature = "std")]
-use std::string::String;
+use std::{vec::Vec, string::String, borrow::ToOwned, string::ToString, format};
 
 #[cfg(not(feature = "std"))]
-use alloc::{vec::Vec, string::String};
+use alloc::{vec::Vec, string::String, borrow::ToOwned, string::ToString, format};
 
 //
 // -------- Public Limits --------
@@ -17,6 +15,10 @@ use alloc::{vec::Vec, string::String};
 pub const MAX_DSL_LINES: usize = 256;
 pub const MAX_DSL_DELAY_MS: u64 = 5000;
 pub const MAX_TOTAL_FLAT_OPS: usize = 10_000;
+
+// Internal caps for Phase 1 preprocessor (repeat/let) — not public API.
+const MAX_REPEAT_N: u32 = 100;
+const MAX_EXPANDED_LINES: usize = 4096;
 
 //
 // -------- Errors & Diagnostics --------
@@ -336,14 +338,14 @@ impl<const N: usize> ArrayString<N> {
 
 /// Simple provider used during linking. Returns DSL text for a script id.
 pub trait ScriptProvider {
-    fn get(&self, id: &str) -> Option<&str>;
+    fn get<'a>(&self, id: &'a str) -> Option<&'a str>;
 }
 
 impl<F> ScriptProvider for F
 where
-    F: Fn(&str) -> Option<&str>,
+    for<'a> F: Fn(&'a str) -> Option<&'a str>,
 {
-    fn get(&self, id: &str) -> Option<&str> { (self)(id) }
+    fn get<'a>(&self, id: &'a str) -> Option<&'a str> { (self)(id) }
 }
 
 /// Compile `entry_dsl`, resolve & inline all `call`s using `provider`,
@@ -352,8 +354,17 @@ pub fn compile_and_link<'a>(
     entry_dsl: &'a str,
     provider: &impl ScriptProvider,
 ) -> Result<ProgramOwned, DslErrorAt> {
+    // Preprocess entry script (repeat/let), then parse.
+    let pre = preprocess(entry_dsl, &PreprocessOptions::default())
+        .map_err(|e| DslErrorAt { kind: DslError::InvalidLine, line: e.line })?;
     let exists = |id: &str| provider.get(id).is_some();
-    let ast = compile_dsl_with_diag(entry_dsl, exists)?;
+    let ast = match compile_dsl_with_diag(&pre.text, exists) {
+        Ok(p) => p,
+        Err(e) => {
+            let line = map_pre_line(e.line, &pre.sourcemap);
+            return Err(DslErrorAt { kind: e.kind, line });
+        }
+    };
     let mut out = ProgramOwned::new();
     let mut stack: Vec<String> = Vec::new();
     inline_into_owned(&ast, provider, &mut out, &mut stack)?;
@@ -380,8 +391,17 @@ fn inline_into_owned(
                 let Some(text) = provider.get(id) else {
                     return Err(DslErrorAt { kind: DslError::UnknownScript, line: (idx as u16)+1 });
                 };
+                // Preprocess callee independently (file-local scope), then parse and inline.
+                let pre = preprocess(text, &PreprocessOptions::default())
+                    .map_err(|e| DslErrorAt { kind: DslError::InvalidLine, line: e.line })?;
                 let exists = |sid: &str| provider.get(sid).is_some();
-                let sub = compile_dsl_with_diag(text, exists)?;
+                let sub = match compile_dsl_with_diag(&pre.text, exists) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let line = map_pre_line(e.line, &pre.sourcemap);
+                        return Err(DslErrorAt { kind: e.kind, line });
+                    }
+                };
                 inline_into_owned(&sub, provider, out, stack)?;
                 stack.pop();
             }
@@ -422,6 +442,396 @@ pub fn char_to_key_us(c: char) -> Option<(u8, u8)> {
         '/' => Some((KEY_SLASH, 0)),       '?' => Some((KEY_SLASH, MOD_LSHIFT)),
         _ => None,
     }
+}
+
+// -------- Phase 1 Preprocessor (repeat, let, limited lints) --------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity { Warning, Error }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnostic {
+    pub severity: Severity,
+    pub code: &'static str,
+    pub message: String,
+    pub line: u16,
+    pub col: u16,
+    pub span_len: u16,
+    pub suggestion: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrigLoc { pub line: u16, pub col: u16 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreprocessOutput {
+    pub text: String,
+    pub sourcemap: Vec<OrigLoc>,
+    pub diags: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreError { pub code: &'static str, pub message: String, pub line: u16, pub col: u16 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PreprocessOptions { pub max_repeat_n: u32, pub max_expanded_lines: usize, pub near_cap_ratio: f32 }
+impl Default for PreprocessOptions {
+    fn default() -> Self { Self { max_repeat_n: MAX_REPEAT_N, max_expanded_lines: MAX_EXPANDED_LINES, near_cap_ratio: 0.9 } }
+}
+
+fn map_pre_line(pre_line: u16, sm: &[OrigLoc]) -> u16 {
+    let idx = (pre_line as usize).saturating_sub(1);
+    if idx < sm.len() { sm[idx].line } else { pre_line }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConstVal { Str(String), Num(u64) }
+
+#[derive(Debug, Default)]
+struct LetEnv { items: Vec<(String, ConstVal)> }
+impl LetEnv {
+    fn get(&self, name: &str) -> Option<&ConstVal> { self.items.iter().rev().find(|(n, _)| n.as_str() == name).map(|(_, v)| v) }
+    fn insert(&mut self, name: String, val: ConstVal) -> Result<(), ()> {
+        if self.items.iter().any(|(n, _)| n == &name) { return Err(()); }
+        self.items.push((name, val));
+        Ok(())
+    }
+    fn clone_from_parent(parent: &LetEnv) -> Self { Self { items: parent.items.clone() } }
+}
+
+pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutput, PreError> {
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut sm: Vec<OrigLoc> = Vec::new();
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    let mut env = LetEnv::default();
+
+    let mut lines: Vec<&str> = Vec::new();
+    for l in src.split('\n') { lines.push(l); }
+
+    let mut i = 0usize;
+    while i < lines.len() {
+        let raw = lines[i];
+        let trimmed = raw.trim();
+        let line_no = (i + 1) as u16;
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            // Skip non-semantic lines in output; mapping is for semantic lines only.
+            i += 1;
+            continue;
+        }
+        if let Some(rest) = starts_with_ci(trimmed, "let") {
+            // let NAME = VALUE
+            match parse_let(rest) {
+                Ok((name, val)) => {
+                    if !is_upper_name(&name) {
+                        return Err(PreError { code: "LetInvalidName", message: format!("invalid constant name '{}': must be [A-Z_][A-Z0-9_]*", name), line: line_no, col: 1 });
+                    }
+                    if env.insert(name, val).is_err() {
+                        return Err(PreError { code: "LetRedefinition", message: "constant already defined".into(), line: line_no, col: 1 });
+                    }
+                }
+                Err(pe) => { return Err(PreError { code: pe.0, message: pe.1, line: line_no, col: 1 }); }
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(rest) = starts_with_ci(trimmed, "repeat") {
+            // repeat N {  ...  }
+            let (n, has_brace) = match parse_repeat_header(rest) {
+                Ok((n, b)) => (n, b),
+                Err((code, msg)) => { return Err(PreError { code, message: msg, line: line_no, col: 1 }); }
+            };
+            if !has_brace { return Err(PreError { code: "RepeatMissingBrace", message: "expected '{' after repeat N".into(), line: line_no, col: 1 }); }
+            if n > opts.max_repeat_n { return Err(PreError { code: "RepeatNTooLarge", message: format!("repeat count {} exceeds cap {}", n, opts.max_repeat_n), line: line_no, col: 1 }); }
+            // Collect body until matching single-line '}' with nesting on nested repeat headers.
+            let mut body_start = i + 1;
+            let mut depth: i32 = 1;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let t = lines[j].trim();
+                if t.is_empty() || t.starts_with('#') { j += 1; continue; }
+                if let Some(r2) = starts_with_ci(t, "repeat") {
+                    if let Ok((_cn, has)) = parse_repeat_header(r2) { if has { depth += 1; } }
+                } else if t == "}" {
+                    depth -= 1;
+                    if depth == 0 { break; }
+                }
+                j += 1;
+            }
+            if depth != 0 { return Err(PreError { code: "RepeatMissingBrace", message: "missing closing '}' for repeat block".into(), line: line_no, col: 1 }); }
+            let body_end = j; // exclusive of '}'
+
+            // Preprocess body once using a cloned environment (block-local additions do not leak out).
+            let child_env = LetEnv::clone_from_parent(&env);
+            let body = preprocess_block(&lines, body_start, body_end, opts, child_env)?;
+
+            // Projected expansion cap
+            if out_lines.len() + body.lines.len().saturating_mul(n as usize) > opts.max_expanded_lines {
+                return Err(PreError { code: "RepeatExpansionTooLarge", message: "expanded lines exceed cap".into(), line: line_no, col: 1 });
+            }
+            for _ in 0..n { append_block(&body, &mut out_lines, &mut sm); }
+
+            i = j + 1; // skip body and closing brace
+            continue;
+        }
+
+        // Regular command line: perform targeted substitutions.
+        match substitute_and_emit(trimmed, line_no, &env, &mut out_lines, &mut sm, &mut diags) {
+            Ok(()) => { /* ok */ }
+            Err(pe) => { return Err(PreError { code: pe.0, message: pe.1, line: line_no, col: 1 }); }
+        }
+        // Caps & basic lints
+        if out_lines.len() > opts.max_expanded_lines { return Err(PreError { code: "ExpandedLinesTooLarge", message: "expanded lines exceed cap".into(), line: line_no, col: 1 }); }
+        i += 1;
+    }
+
+    // Near-cap lint for lines vs MAX_DSL_LINES (non-empty logical lines)
+    let approx_nonempty = out_lines.len();
+    if approx_nonempty as f32 >= (MAX_DSL_LINES as f32 * opts.near_cap_ratio) {
+        diags.push(Diagnostic { severity: Severity::Warning, code: "NearCapLines", message: format!("lines approaching cap: {} / {}", approx_nonempty, MAX_DSL_LINES), line: 0, col: 0, span_len: 0, suggestion: None });
+    }
+
+    Ok(PreprocessOutput { text: join_lines(&out_lines), sourcemap: sm, diags })
+}
+
+#[derive(Debug)]
+struct PreBlock { lines: Vec<String>, map: Vec<OrigLoc> }
+
+fn preprocess_block(lines: &Vec<&str>, start: usize, end: usize, opts: &PreprocessOptions, mut env: LetEnv) -> Result<PreBlock, PreError> {
+    let mut out: Vec<String> = Vec::new();
+    let mut sm: Vec<OrigLoc> = Vec::new();
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    let mut i = start;
+    while i < end {
+        let raw = lines[i];
+        let t = raw.trim();
+        let line_no = (i + 1) as u16;
+        if t.is_empty() || t.starts_with('#') { i += 1; continue; }
+        if let Some(rest) = starts_with_ci(t, "let") {
+            match parse_let(rest) {
+                Ok((name, val)) => {
+                    if !is_upper_name(&name) {
+                        return Err(PreError { code: "LetInvalidName", message: format!("invalid constant name '{}': must be [A-Z_][A-Z0-9_]*", name), line: line_no, col: 1 });
+                    }
+                    if env.insert(name, val).is_err() {
+                        return Err(PreError { code: "LetRedefinition", message: "constant already defined".into(), line: line_no, col: 1 });
+                    }
+                }
+                Err(pe) => { return Err(PreError { code: pe.0, message: pe.1, line: line_no, col: 1 }); }
+            }
+            i += 1; continue;
+        }
+        if let Some(rest) = starts_with_ci(t, "repeat") {
+            let (n, has) = match parse_repeat_header(rest) { Ok(v) => v, Err((c, m)) => return Err(PreError { code: c, message: m, line: line_no, col: 1 }) };
+            if !has { return Err(PreError { code: "RepeatMissingBrace", message: "expected '{' after repeat N".into(), line: line_no, col: 1 }); }
+            if n > opts.max_repeat_n { return Err(PreError { code: "RepeatNTooLarge", message: format!("repeat count {} exceeds cap {}", n, opts.max_repeat_n), line: line_no, col: 1 }); }
+            // Find matching '}'
+            let mut depth: i32 = 1; let mut j = i + 1; let body_start = i + 1;
+            while j < end { let tt = lines[j].trim(); if tt.is_empty() || tt.starts_with('#') { j += 1; continue; }
+                if let Some(r2) = starts_with_ci(tt, "repeat") { if let Ok((_cn, hb)) = parse_repeat_header(r2) { if hb { depth += 1; } } }
+                else if tt == "}" { depth -= 1; if depth == 0 { break; } }
+                j += 1; }
+            if depth != 0 { return Err(PreError { code: "RepeatMissingBrace", message: "missing closing '}' for repeat block".into(), line: line_no, col: 1 }); }
+            let body = preprocess_block(lines, body_start, j, opts, LetEnv::clone_from_parent(&env))?;
+            if out.len() + body.lines.len().saturating_mul(n as usize) > opts.max_expanded_lines { return Err(PreError { code: "RepeatExpansionTooLarge", message: "expanded lines exceed cap".into(), line: line_no, col: 1 }); }
+            for _ in 0..n { append_block(&body, &mut out, &mut sm); }
+            i = j + 1; continue;
+        }
+        // Regular line
+        match substitute_and_emit(t, line_no, &env, &mut out, &mut sm, &mut diags) {
+            Ok(()) => {}
+            Err(pe) => { return Err(PreError { code: pe.0, message: pe.1, line: line_no, col: 1 }); }
+        }
+        if out.len() > opts.max_expanded_lines { return Err(PreError { code: "ExpandedLinesTooLarge", message: "expanded lines exceed cap".into(), line: line_no, col: 1 }); }
+        i += 1;
+    }
+    Ok(PreBlock { lines: out, map: sm })
+}
+
+fn append_block(b: &PreBlock, out_lines: &mut Vec<String>, sm: &mut Vec<OrigLoc>) {
+    for (k, l) in b.lines.iter().enumerate() {
+        out_lines.push(l.clone());
+        sm.push(b.map.get(k).copied().unwrap_or(OrigLoc { line: 0, col: 0 }));
+    }
+}
+
+fn join_lines(lines: &[String]) -> String {
+    let mut out = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        if i != 0 { out.push('\n'); }
+        out.push_str(l);
+    }
+    out
+}
+
+fn is_upper_name(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() { return false; }
+    let mut it = bytes.iter();
+    let b0 = *it.next().unwrap();
+    if !(b'A'..=b'Z').contains(&b0) && b0 != b'_' { return false; }
+    for &b in it { if !(b'A'..=b'Z').contains(&b) && !(b'0'..=b'9').contains(&b) && b != b'_' { return false; } }
+    true
+}
+
+fn starts_with_ci<'a>(line: &'a str, kw: &str) -> Option<&'a str> {
+    let mut it = line.splitn(2, char::is_whitespace);
+    let head = it.next()?;
+    if head.eq_ignore_ascii_case(kw) { Some(it.next().unwrap_or("").trim_start()) } else { None }
+}
+
+fn parse_let(rest: &str) -> Result<(String, ConstVal), (&'static str, String)> {
+    // rest: NAME = VALUE
+    let mut parts = rest.splitn(2, '=');
+    let lhs = parts.next().unwrap_or("").trim();
+    let rhs = parts.next().ok_or(("LetMissingEquals", "expected '='".into()))?.trim();
+    if lhs.is_empty() { return Err(("LetInvalidName", "missing name".into())); }
+    if rhs.is_empty() { return Err(("LetMissingValue", "missing value".into())); }
+    if rhs.starts_with('"') {
+        // string literal: consume until closing unescaped '"'
+        if !rhs.ends_with('"') || rhs.len() < 2 { return Err(("InvalidString", "unterminated string literal".into())); }
+        let inner = &rhs[1..rhs.len()-1];
+        let s = unescape_string(inner).map_err(|e| ("InvalidStringEscape", e))?;
+        return Ok((lhs.to_string(), ConstVal::Str(s)));
+    } else {
+        // number
+        let n = rhs.parse::<u64>().map_err(|_| ("LetValueNotNumber", "expected number".into()))?;
+        return Ok((lhs.to_string(), ConstVal::Num(n)));
+    }
+}
+
+fn unescape_string(s: &str) -> Result<String, String> {
+    let mut out = String::new();
+    let mut iter = s.chars();
+    while let Some(ch) = iter.next() {
+        if ch == '\\' {
+            match iter.next() {
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('t') => out.push('\t'),
+                Some('n') => return Err("\\n not allowed in Phase 1".into()),
+                Some(other) => return Err(format!("unsupported escape \\{}", other)),
+                None => return Err("dangling escape".into()),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Ok(out)
+}
+
+fn parse_repeat_header(rest: &str) -> Result<(u32, bool), (&'static str, String)> {
+    // rest: N {   (brace required on same line)
+    let mut it = rest.trim().split_whitespace();
+    let n_tok = it.next().ok_or(("RepeatMissingCount", "missing count".into()))?;
+    let n = n_tok.parse::<u32>().map_err(|_| ("RepeatCountNotNumber", "repeat count must be a number".into()))?;
+    // detect '{'
+    let has_brace = rest.contains('{');
+    Ok((n, has_brace))
+}
+
+fn substitute_and_emit(
+    trimmed: &str,
+    orig_line: u16,
+    env: &LetEnv,
+    out_lines: &mut Vec<String>,
+    sm: &mut Vec<OrigLoc>,
+    diags: &mut Vec<Diagnostic>,
+) -> Result<(), (&'static str, String)> {
+    // hold/release warnings
+    if starts_with_ci(trimmed, "hold").is_some() || starts_with_ci(trimmed, "release").is_some() {
+        diags.push(Diagnostic { severity: Severity::Warning, code: "HoldReleaseNotSupported", message: "hold/release require firmware update; try modtap/tap".into(), line: orig_line, col: 1, span_len: 0, suggestion: Some("Use 'modtap MOD+KEY' or 'tap KEY'".into()) });
+    }
+
+    // delay substitution
+    if let Some(rest) = starts_with_ci(trimmed, "delay") {
+        let tok = rest.trim();
+        let val = if is_upper_name(tok) {
+            match env.get(tok) {
+                Some(ConstVal::Num(n)) => n.to_string(),
+                Some(ConstVal::Str(_)) => return Err(("LetTypeMismatch", "delay expects a number".into())),
+                None => return Err(("LetUndefined", format!("undefined constant '{}'", tok))),
+            }
+        } else {
+            tok.to_string()
+        };
+        // Lints: delay 0 and adjacent delays — detect here (adjacent check via last emitted)
+        if val.trim() == "0" {
+            diags.push(Diagnostic { severity: Severity::Warning, code: "UselessDelayZero", message: "delay 0 is a no-op".into(), line: orig_line, col: 1, span_len: 0, suggestion: Some("Remove this line".into()) });
+        }
+        let prev_is_delay = out_lines.last().map(|l| l.trim_start().to_ascii_lowercase().starts_with("delay ")).unwrap_or(false);
+        if prev_is_delay { diags.push(Diagnostic { severity: Severity::Warning, code: "AdjacentDelays", message: "adjacent delays will be coalesced".into(), line: orig_line, col: 1, span_len: 0, suggestion: Some("Combine into one delay".into()) }); }
+        out_lines.push(format!("delay {}", val));
+        sm.push(OrigLoc { line: orig_line, col: 1 });
+        return Ok(());
+    }
+
+    // text substitution
+    if let Some(rest) = starts_with_ci(trimmed, "text") {
+        let rest = rest.trim();
+        if rest.is_empty() { return Err(("TextEmpty", "missing text".into())); }
+        // Split last whitespace to detect optional delay token
+        let mut text_part = rest;
+        let mut delay_part = "";
+        if let Some(idx) = rest.rfind(char::is_whitespace) {
+            let (lhs, rhs) = rest.split_at(idx);
+            let maybe = rhs.trim();
+            if !maybe.is_empty() { delay_part = maybe; text_part = lhs.trim_end(); }
+        }
+        let mut new_text: String = String::new();
+        // First token may be a NAME for substitution
+        if let Some((first, tail)) = split2(text_part) {
+            if is_upper_name(first) {
+                match env.get(first) {
+                    Some(ConstVal::Str(s)) => { new_text.push_str(s); text_part = tail.trim_start(); }
+                    Some(ConstVal::Num(_)) => { return Err(("LetTypeMismatch", "text expects a string".into())); }
+                    None => { return Err(("LetUndefined", format!("undefined constant '{}'", first))); }
+                }
+            } else {
+                new_text.push_str(text_part);
+                text_part = ""; // consumed as literal
+            }
+        } else if is_upper_name(text_part) {
+            match env.get(text_part) {
+                Some(ConstVal::Str(s)) => { new_text.push_str(s); text_part = ""; }
+                Some(ConstVal::Num(_)) => { return Err(("LetTypeMismatch", "text expects a string".into())); }
+                None => { return Err(("LetUndefined", format!("undefined constant '{}'", text_part))); }
+            }
+        } else {
+            new_text.push_str(text_part);
+            text_part = "";
+        }
+        if !text_part.is_empty() {
+            if !new_text.is_empty() { new_text.push(' '); }
+            new_text.push_str(text_part);
+        }
+        // Substitute trailing delay if it's a NAME
+        let mut out_line = String::new(); out_line.push_str("text "); out_line.push_str(&new_text);
+        if !delay_part.is_empty() {
+            let dval = if is_upper_name(delay_part) {
+                match env.get(delay_part) {
+                    Some(ConstVal::Num(n)) => n.to_string(),
+                    Some(ConstVal::Str(_)) => return Err(("LetTypeMismatch", "text delay expects a number".into())),
+                    None => return Err(("LetUndefined", format!("undefined constant '{}'", delay_part))),
+                }
+            } else { delay_part.to_string() };
+            out_line.push(' '); out_line.push_str(&dval);
+        }
+        out_lines.push(out_line);
+        sm.push(OrigLoc { line: orig_line, col: 1 });
+        return Ok(());
+    }
+
+    // Pass-through other commands unchanged (tap/modtap/call/etc.).
+    out_lines.push(trimmed.to_string());
+    sm.push(OrigLoc { line: orig_line, col: 1 });
+    Ok(())
+}
+
+fn split2(s: &str) -> Option<(&str, &str)> {
+    let mut it = s.splitn(2, char::is_whitespace);
+    let a = it.next()?;
+    let b = it.next()?;
+    Some((a, b))
 }
 
 /// Lower an owned, call-free program into a US-only FlatProgram.
@@ -596,5 +1006,134 @@ pub mod bytecode {
             }
         }
         !crc
+    }
+}
+
+// -------- Tests (Phase 1 preprocessor) --------
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeat_unroll_simple() {
+        let entry = "repeat 3 {\n  tap A\n}";
+        let provider = |_id: &str| -> Option<&str> { None };
+        let owned = compile_and_link(entry, &provider).expect("compile_and_link");
+        let flat = lower_to_flat_us(&owned).expect("lower_to_flat_us");
+        let taps = flat.ops.iter().filter(|op| matches!(op, FlatOp::Tap { .. })).count();
+        assert_eq!(taps, 3);
+    }
+
+    #[test]
+    fn repeat_unroll_nested() {
+        let entry = "repeat 2 {\n  repeat 2 {\n    tap A\n  }\n}";
+        let provider = |_id: &str| -> Option<&str> { None };
+        let owned = compile_and_link(entry, &provider).expect("compile_and_link");
+        let flat = lower_to_flat_us(&owned).expect("lower_to_flat_us");
+        let taps = flat.ops.iter().filter(|op| matches!(op, FlatOp::Tap { .. })).count();
+        assert_eq!(taps, 4);
+    }
+
+    #[test]
+    fn let_number_in_delay() {
+        let entry = "let D = 150\n delay D";
+        let provider = |_id: &str| -> Option<&str> { None };
+        let owned = compile_and_link(entry, &provider).expect("compile_and_link");
+        assert!(matches!(owned.ops.as_slice(), [OpOwned::DelayMs(150)]));
+    }
+
+    #[test]
+    fn let_string_in_text() {
+        let entry = "let S = \"Hi\"\n text S 5";
+        let provider = |_id: &str| -> Option<&str> { None };
+        let owned = compile_and_link(entry, &provider).expect("compile_and_link");
+        match owned.ops.as_slice() {
+            [OpOwned::Text { s, delay_ms }] => { assert_eq!(s, "Hi"); assert_eq!(*delay_ms, 5); }
+            other => panic!("unexpected ops: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn repeat_missing_brace_errors() {
+        let entry = "repeat 2 {\n tap A\n"; // missing closing brace
+        let provider = |_id: &str| -> Option<&str> { None };
+        let err = compile_and_link(entry, &provider).unwrap_err();
+        assert_eq!(err.line, 1); // header line
+        assert!(matches!(err.kind, DslError::InvalidLine));
+    }
+
+    #[test]
+    fn let_redefinition_errors() {
+        let entry = "let A = 1\nlet A = 2\n tap A";
+        let provider = |_id: &str| -> Option<&str> { None };
+        let err = compile_and_link(entry, &provider).unwrap_err();
+        assert_eq!(err.line, 2);
+        assert!(matches!(err.kind, DslError::InvalidLine));
+    }
+
+    #[test]
+    fn repeat_expansion_cap_errors() {
+        // 100 * 100 * 1 line = 10_000 > MAX_EXPANDED_LINES (4096)
+        let entry = "repeat 100 {\n  repeat 100 {\n    tap A\n  }\n}";
+        let provider = |_id: &str| -> Option<&str> { None };
+        let err = compile_and_link(entry, &provider).unwrap_err();
+        // Error reported at the outer repeat header
+        assert_eq!(err.line, 1);
+        assert!(matches!(err.kind, DslError::InvalidLine));
+    }
+
+    #[test]
+    fn sourcemap_maps_error_inside_repeat_body() {
+        // 'zzz' is an unknown command on line 2; it repeats but we expect
+        // the first error to map back to original line 2.
+        let entry = "repeat 2 {\n  zzz\n}";
+        let provider = |_id: &str| -> Option<&str> { None };
+        let err = compile_and_link(entry, &provider).unwrap_err();
+        assert_eq!(err.line, 2);
+        assert!(matches!(err.kind, DslError::UnknownCommand));
+    }
+
+    #[test]
+    fn nested_sourcemap_deep_error() {
+        // Error occurs inside inner repeat body at original line 3
+        let entry = "repeat 2 {\n  repeat 3 {\n    zzz\n  }\n}";
+        let provider = |_id: &str| -> Option<&str> { None };
+        let err = compile_and_link(entry, &provider).unwrap_err();
+        assert_eq!(err.line, 3);
+        assert!(matches!(err.kind, DslError::UnknownCommand));
+    }
+
+    #[test]
+    fn redefinition_inside_nested_block_errors() {
+        let entry = "let A = \"X\"\nrepeat 2 {\n  let A = \"Y\"\n  tap A\n}";
+        let provider = |_id: &str| -> Option<&str> { None };
+        let err = compile_and_link(entry, &provider).unwrap_err();
+        // Error should point to the nested 'let A = "Y"' at original line 3
+        assert_eq!(err.line, 3);
+        assert!(matches!(err.kind, DslError::InvalidLine));
+    }
+
+    #[test]
+    fn cross_script_error_maps_to_callee_line() {
+        let entry = "call sub";
+        let sub = "# sub\nzzz\n"; // error at line 2
+        let provider = move |id: &str| -> Option<&str> { if id == "sub" { Some(sub) } else { None } };
+        let err = compile_and_link(entry, &provider).unwrap_err();
+        assert_eq!(err.line, 2);
+        assert!(matches!(err.kind, DslError::UnknownCommand));
+    }
+
+    #[test]
+    fn nested_cross_script_error_maps_deep() {
+        let entry = "call A";
+        let a = "call B";
+        let b = "zzz"; // error at line 1 in B
+        let provider = move |id: &str| -> Option<&str> {
+            match id { "A" => Some(a), "B" => Some(b), _ => None }
+        };
+        let err = compile_and_link(entry, &provider).unwrap_err();
+        assert_eq!(err.line, 1);
+        assert!(matches!(err.kind, DslError::UnknownCommand));
     }
 }
