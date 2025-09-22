@@ -53,6 +53,8 @@ struct Config {
     manifest_dir: PathBuf,
     /// Path to the frontend crate.
     frontend_dir: PathBuf,
+    /// Path to the DSL workspace (dsl-core, dsl-wasm, firmware-exec).
+    dsl_dir: PathBuf,
     /// Active profile (e.g., `debug` or `release`).
     profile: String,
     /// Active compilation target triple.
@@ -74,6 +76,7 @@ impl Config {
         let out_dir = PathBuf::from(env::var_os("OUT_DIR").context("OUT_DIR missing")?);
         let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
         let frontend_dir = manifest_dir.join("frontend");
+        let dsl_dir = manifest_dir.join("dsl");
         let profile = env::var("PROFILE").unwrap_or_default();
         let target = env::var("TARGET").unwrap_or_default();
 
@@ -89,6 +92,7 @@ impl Config {
             out_dir,
             manifest_dir,
             frontend_dir,
+            dsl_dir,
             profile,
             target,
             warn_bytes,
@@ -158,9 +162,25 @@ mod frontend {
     const FP_FILE: &str = "frontend.fingerprint";
 
     /// Register broad change detection for the frontend sources.
-    pub fn register_reruns(_cfg: &Config) {
+    pub fn register_reruns(cfg: &Config) {
         // One broad watch is enough; Cargo will re-run build.rs when anything changes.
         cargo::rerun_if_changed("frontend");
+
+        if cfg.dsl_dir.exists() {
+            const DSL_PATHS: &[&str] = &[
+                "dsl/Cargo.toml",
+                "dsl/dsl-core/Cargo.toml",
+                "dsl/dsl-core/src",
+                "dsl/dsl-wasm/Cargo.toml",
+                "dsl/dsl-wasm/src",
+                "dsl/firmware-exec/Cargo.toml",
+                "dsl/firmware-exec/src",
+                "dsl/examples",
+            ];
+            for path in DSL_PATHS {
+                cargo::rerun_if_changed(path);
+            }
+        }
     }
 
     /// Ensure the UI is up-to-date, embed assets, and generate `frontend_static.rs`.
@@ -173,7 +193,12 @@ mod frontend {
         }
 
         // Compute fingerprint of *sources* (excluding dist/ & friends)
-        let cur_fp = fingerprint_frontend(&cfg.frontend_dir)?;
+        let frontend_fp = fingerprint_tree(
+            &cfg.frontend_dir,
+            &["dist", "target", ".git", "node_modules"],
+        )?;
+        let dsl_fp = fingerprint_optional(&cfg.dsl_dir, &["target", ".git", "pkg"])?;
+        let cur_fp = format!("front={frontend_fp};dsl={dsl_fp}");
         let fp_path = cfg.out_dir.join(FP_FILE);
         let prev_fp = fs::read_to_string(&fp_path).ok();
 
@@ -348,15 +373,11 @@ mod frontend {
     /* ------------------------- Fingerprinting ------------------------- */
 
     /// Compute a deterministic hash of all frontend sources (excluding build outputs).
-    fn fingerprint_frontend(root: &Path) -> Result<String> {
+    fn fingerprint_tree(root: &Path, skip_dirs: &[&str]) -> Result<String> {
         use blake3::Hasher;
 
         let mut files = Vec::<PathBuf>::new();
-        collect_files(
-            root,
-            &mut files,
-            &["dist", "target", ".git", "node_modules"],
-        )?;
+        collect_files(root, &mut files, skip_dirs)?;
         files.sort(); // stable order
 
         let mut hasher = Hasher::new();
@@ -371,6 +392,13 @@ mod frontend {
             hasher.update(&fs::read(&path)?);
         }
         Ok(hasher.finalize().to_hex().to_string())
+    }
+
+    fn fingerprint_optional(root: &Path, skip_dirs: &[&str]) -> Result<String> {
+        if !root.exists() {
+            return Ok(String::from("missing"));
+        }
+        fingerprint_tree(root, skip_dirs)
     }
 
     /// Recursively collect files under `dir`, skipping any directory in `skip_dirs`.

@@ -1,6 +1,5 @@
 #![no_std]
 
-use dsl_core::{bytecode, KEY_ENTER, MOD_LSHIFT}; // just to show reuse; not strictly needed
 use embassy_time::Timer;
 use embassy_usb::class::hid::HidWriter as UsbHidWriter;
 use usbd_hid::descriptor::KeyboardReport;
@@ -111,4 +110,95 @@ where
     }
     r.verify_crc()?;
     Ok(())
+}
+
+mod bytecode {
+    pub const MAGIC: [u8; 4] = *b"KBD1";
+    pub const OP_DELAY: u8 = 0x01;
+    pub const OP_TAP: u8 = 0x02;
+    pub const OP_END: u8 = 0xFF;
+
+    #[derive(Debug)]
+    pub enum DecodeError {
+        BadMagic,
+        UnexpectedEof,
+        BadVarint,
+        BadOpcode,
+        BadCrc,
+    }
+
+    pub struct Reader<'a> {
+        data: &'a [u8],
+        pos: usize,
+        crc_range_end: usize,
+    }
+
+    impl<'a> Reader<'a> {
+        pub fn new(data: &'a [u8]) -> Result<Self, DecodeError> {
+            if data.len() < 9 {
+                return Err(DecodeError::UnexpectedEof);
+            }
+            if &data[0..4] != &MAGIC {
+                return Err(DecodeError::BadMagic);
+            }
+            let crc_range_end = data
+                .len()
+                .checked_sub(4)
+                .ok_or(DecodeError::UnexpectedEof)?;
+            Ok(Self {
+                data,
+                pos: 5,
+                crc_range_end,
+            })
+        }
+
+        pub fn read_u8(&mut self) -> Result<u8, DecodeError> {
+            if self.pos >= self.crc_range_end {
+                return Err(DecodeError::UnexpectedEof);
+            }
+            let b = self.data[self.pos];
+            self.pos += 1;
+            Ok(b)
+        }
+
+        pub fn read_varu32(&mut self) -> Result<u32, DecodeError> {
+            let mut result: u32 = 0;
+            let mut shift = 0;
+            for _ in 0..5 {
+                let b = self.read_u8()?;
+                result |= ((b & 0x7F) as u32) << shift;
+                if (b & 0x80) == 0 {
+                    return Ok(result);
+                }
+                shift += 7;
+            }
+            Err(DecodeError::BadVarint)
+        }
+
+        pub fn verify_crc(self) -> Result<(), DecodeError> {
+            if self.data.len() < self.crc_range_end + 4 {
+                return Err(DecodeError::UnexpectedEof);
+            }
+            let trailer = &self.data[self.crc_range_end..self.crc_range_end + 4];
+            let expected = u32::from_le_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
+            let actual = crc32(&self.data[..self.crc_range_end]);
+            if expected == actual {
+                Ok(())
+            } else {
+                Err(DecodeError::BadCrc)
+            }
+        }
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in bytes {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xEDB88320u32 & mask);
+            }
+        }
+        !crc
+    }
 }

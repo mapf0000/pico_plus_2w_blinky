@@ -1,0 +1,30 @@
+[package]
+name = "leasehund"
+version = "0.2.0"
+edition = "2024"
+authors = ["rttf <contact@rttf.dev>"]
+description = "A lightweight, embedded-friendly DHCP server implementation for Rust no_std environments"
+documentation = "https://docs.rs/leasehund"
+homepage = "https://github.com/rttfd/leasehund"
+repository = "https://github.com/rttfd/leasehund"
+license = "MIT"
+keywords = ["dhcp", "embedded", "no-std", "networking", "embassy"]
+readme = "README.md"
+
+[dependencies]
+embassy-net = { version = "0.7.0", features = [
+    "tcp",
+    "udp",
+    "dhcpv4",
+    "medium-ethernet",
+    "proto-ipv4",
+] }
+embassy-time = "0.4.0"
+heapless = "0.8.0"
+smoltcp = { version = "0.12.0", default-features = false, features = [
+    "proto-ipv4",
+    "proto-dhcpv4",
+    "socket-udp",
+] }
+
+[dev-dependencies]

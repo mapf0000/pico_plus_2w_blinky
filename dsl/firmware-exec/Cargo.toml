@@ -5,7 +5,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-dsl-core = { path = "../dsl-core" }   # no_std by default
 embassy-time = { version = "0.5.0", default-features = false }        # match your versions
 embassy-usb = { version = "0.5.1", default-features = false }
 usbd-hid    = { version = "0.8.2", default-features = false }

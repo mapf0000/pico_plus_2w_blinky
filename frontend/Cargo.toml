@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 yew = { version = "0.21", features = ["csr"] }
@@ -25,4 +25,7 @@ web-sys = { version = "0.3", features = [
   "ErrorEvent"
 ] }
 wasm-bindgen-futures = "0.4.53"
-#pico_dsl = { path = "../dsl", features = ["ui"], default-features = true }
+dsl-core = { path = "../dsl/dsl-core" }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

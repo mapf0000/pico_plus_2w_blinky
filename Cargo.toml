@@ -32,8 +32,6 @@ embassy-rp = { version = "0.8", optional = true, features = [
     "unstable-pac",
     "time-driver",
     "critical-section-impl",
-    # Use the correct RP2350 variant. Pico 2 / 2 W boards ship with 'B' silicon.
-    # If your board is 'A' silicon, switch this feature back to "rp235xa".
     "rp235xb",
     "binary-info",
 ] }
@@ -65,11 +63,13 @@ cyw43-pio = { version = "0.8", optional = true, features = [
 ] }
 leasehund = { version = "0.2", optional = true }
 picoserve = { version = "0.16.0", features = ["embassy"] }
+firmware-exec = { path = "dsl/firmware-exec" }
+embassy-time-compat = { package = "embassy-time", version = "0.4", default-features = false }
 
 
 [features]
 psram = []
-default = ["firmware"]
+default = ["firmware", "psram"]
 firmware = [
   "cortex-m",
   "cortex-m-rt",
@@ -100,3 +100,19 @@ codegen-units = 1
 
 [build-dependencies]
 build-support = { path = "./build-support" }
+
+[patch.crates-io]
+embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", rev = "de5dd10a5832b330465d93399b3a9cb761e24029" }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy.git", rev = "de5dd10a5832b330465d93399b3a9cb761e24029" }
+embassy-hal-internal = { git = "https://github.com/embassy-rs/embassy.git", rev = "de5dd10a5832b330465d93399b3a9cb761e24029" }
+embassy-net = { git = "https://github.com/embassy-rs/embassy.git", rev = "de5dd10a5832b330465d93399b3a9cb761e24029" }
+embassy-rp = { git = "https://github.com/embassy-rs/embassy.git", rev = "de5dd10a5832b330465d93399b3a9cb761e24029" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", rev = "de5dd10a5832b330465d93399b3a9cb761e24029" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "de5dd10a5832b330465d93399b3a9cb761e24029" }
+embassy-time-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "de5dd10a5832b330465d93399b3a9cb761e24029" }
+embassy-usb = { git = "https://github.com/embassy-rs/embassy.git", rev = "de5dd10a5832b330465d93399b3a9cb761e24029" }
+embassy-usb-logger = { git = "https://github.com/embassy-rs/embassy.git", rev = "de5dd10a5832b330465d93399b3a9cb761e24029" }
+embassy-net-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "de5dd10a5832b330465d93399b3a9cb761e24029" }
+embassy-net-driver-channel = { git = "https://github.com/embassy-rs/embassy.git", rev = "de5dd10a5832b330465d93399b3a9cb761e24029" }
+embassy-usb-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "de5dd10a5832b330465d93399b3a9cb761e24029" }
+leasehund = { path = "third_party/leasehund" }

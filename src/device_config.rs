@@ -8,11 +8,11 @@ use heapless::String;
 pub const MANUFACTURER_MAX: usize = 32;
 pub const PRODUCT_MAX: usize = 48;
 
-// Pimoroni Pico Plus 2 W: 16 MiB external flash
+// Pimoroni Pico Plus 2 W: 16 MiB external flash (XiP)
 pub const FLASH_CAPACITY: usize = 16 * 1024 * 1024;
 const PERSIST_SLOTS: usize = 2;
 const SLOT_SIZE: usize = 4096; // one erase block
-const PERSIST_TOTAL: usize = SLOT_SIZE * PERSIST_SLOTS; // 8K total
+const PERSIST_TOTAL: usize = SLOT_SIZE * PERSIST_SLOTS; // 8K total (two slots)
 const PERSIST_OFFSET: usize = FLASH_CAPACITY - PERSIST_TOTAL;
 const MAGIC: u32 = 0x50494346; // 'P','I','C','F'
 const VERSION: u8 = 1;
@@ -190,6 +190,12 @@ fn decode_payload(buf: &[u8]) -> Option<DeviceConfig> {
     Some(cfg)
 }
 
+#[inline]
+fn seq_is_newer(a: u32, b: u32) -> bool {
+    let diff = a.wrapping_sub(b);
+    diff != 0 && diff < 0x8000_0000
+}
+
 async fn with_flash<R>(f: impl FnOnce(&mut FlashDrv) -> R) -> Result<R, ()> {
     let mut guard = FLASH_DRV.lock().await;
     let Some(ref mut drv) = *guard else {
@@ -204,8 +210,9 @@ async fn read_slot(idx: usize) -> Result<Option<(u32 /*seq*/, DeviceConfig)>, ()
     }
     let mut hdr_buf = [0u8; 16];
     let slot_off = PERSIST_OFFSET + idx * SLOT_SIZE;
-    let _ = with_flash(|f| f.blocking_read(slot_off as u32, &mut hdr_buf))
+    with_flash(|f| f.blocking_read(slot_off as u32, &mut hdr_buf))
         .await
+        .map_err(|_| ())?
         .map_err(|_| ())?;
     let magic = u32::from_le_bytes([hdr_buf[0], hdr_buf[1], hdr_buf[2], hdr_buf[3]]);
     if magic != MAGIC {
@@ -219,10 +226,16 @@ async fn read_slot(idx: usize) -> Result<Option<(u32 /*seq*/, DeviceConfig)>, ()
     let len = u16::from_le_bytes([hdr_buf[12], hdr_buf[13]]) as usize;
     // Read remaining 2 bytes of CRC tail + payload
     let mut tail_and_payload = [0u8; 2 + 1 + MANUFACTURER_MAX + 1 + PRODUCT_MAX];
+    let max_payload = 1 + MANUFACTURER_MAX + 1 + PRODUCT_MAX;
+    if len > max_payload {
+        return Ok(None);
+    }
     let need = 2 + len;
-    // Safety: need <= buffer size by construction
     let buf_slice = &mut tail_and_payload[..need];
-    let _ = with_flash(|f| f.blocking_read((slot_off as u32) + 16, buf_slice)).await;
+    with_flash(|f| f.blocking_read((slot_off as u32) + 16, buf_slice))
+        .await
+        .map_err(|_| ())?
+        .map_err(|_| ())?;
     let crc_full = u32::from_le_bytes([hdr_buf[14], hdr_buf[15], buf_slice[0], buf_slice[1]]);
     let payload = &buf_slice[2..];
     let calc = crc32_ieee(0, payload);
@@ -242,7 +255,7 @@ async fn load_from_flash() -> Result<Option<DeviceConfig>, ()> {
     let b = read_slot(1).await?;
     let chosen = match (a, b) {
         (Some((sa, ca)), Some((sb, cb))) => {
-            if sa >= sb {
+            if seq_is_newer(sa, sb) {
                 Some(ca)
             } else {
                 Some(cb)
@@ -258,18 +271,19 @@ async fn load_from_flash() -> Result<Option<DeviceConfig>, ()> {
 async fn persist_to_flash() -> Result<(), ()> {
     // Determine next seq and next slot
     let cur = get().await;
-    let mut seq_a = 0u32;
-    let mut seq_b = 0u32;
-    if let Some((s, _)) = read_slot(0).await? {
-        seq_a = s;
-    }
-    if let Some((s, _)) = read_slot(1).await? {
-        seq_b = s;
-    }
-    let (target_idx, next_seq) = if seq_a <= seq_b {
-        (0usize, seq_b.wrapping_add(1))
-    } else {
-        (1usize, seq_a.wrapping_add(1))
+    let slot_a = read_slot(0).await?;
+    let slot_b = read_slot(1).await?;
+    let (target_idx, next_seq) = match (slot_a.as_ref(), slot_b.as_ref()) {
+        (Some((sa, _)), Some((sb, _))) => {
+            if seq_is_newer(*sa, *sb) {
+                (1usize, sa.wrapping_add(1))
+            } else {
+                (0usize, sb.wrapping_add(1))
+            }
+        }
+        (Some((sa, _)), None) => (1usize, sa.wrapping_add(1)),
+        (None, Some((sb, _))) => (0usize, sb.wrapping_add(1)),
+        (None, None) => (0usize, 0),
     };
 
     let mut payload = [0u8; 1 + MANUFACTURER_MAX + 1 + PRODUCT_MAX];
@@ -291,19 +305,23 @@ async fn persist_to_flash() -> Result<(), ()> {
 
     let slot_off = PERSIST_OFFSET + target_idx * SLOT_SIZE;
     // Erase target slot
-    let _ = with_flash(|f| f.blocking_erase(slot_off as u32, (slot_off + SLOT_SIZE) as u32))
+    with_flash(|f| f.blocking_erase(slot_off as u32, (slot_off + SLOT_SIZE) as u32))
         .await
+        .map_err(|_| ())?
         .map_err(|_| ())?;
     // Program header first 16 bytes
-    let _ = with_flash(|f| f.blocking_write(slot_off as u32, &header[..16]))
+    with_flash(|f| f.blocking_write(slot_off as u32, &header[..16]))
         .await
+        .map_err(|_| ())?
         .map_err(|_| ())?;
     // Program rest: last 2 bytes of header (crc), then payload
-    let _ = with_flash(|f| f.blocking_write((slot_off as u32) + 16, &tail))
+    with_flash(|f| f.blocking_write((slot_off as u32) + 16, &tail))
         .await
+        .map_err(|_| ())?
         .map_err(|_| ())?;
-    let _ = with_flash(|f| f.blocking_write((slot_off as u32) + 18, &payload[..plen]))
+    with_flash(|f| f.blocking_write((slot_off as u32) + 18, &payload[..plen]))
         .await
+        .map_err(|_| ())?
         .map_err(|_| ())?;
     Ok(())
 }

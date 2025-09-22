@@ -1295,17 +1295,8 @@ fn preprocess_block(
                             col: 1,
                         })?;
                     expand_function(
-                        call.name,
-                        &args,
-                        line_no,
-                        lines,
-                        opts,
-                        &env,
-                        functions,
-                        stack,
-                        &mut out,
-                        &mut sm,
-                        hints,
+                        call.name, &args, line_no, lines, opts, &env, functions, stack, &mut out,
+                        &mut sm, hints,
                     )?;
                     if out.len() > opts.max_expanded_lines {
                         return Err(PreError {
@@ -2168,10 +2159,7 @@ fn substitute_and_emit(
             let key_string = match parse_call_args(call.args, env) {
                 Ok(args) => {
                     if args.len() != 1 {
-                        return Err((
-                            "TapArgCount",
-                            "tap() expects exactly one argument".into(),
-                        ));
+                        return Err(("TapArgCount", "tap() expects exactly one argument".into()));
                     }
                     match &args[0] {
                         ConstVal::Str(s) => s.clone(),

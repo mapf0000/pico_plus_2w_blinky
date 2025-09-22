@@ -1,9 +1,9 @@
 #![cfg(feature = "psram")]
 
-use core::slice;
-use embassy_rp::Peripherals;
+use core::{ptr::NonNull, slice};
 use embassy_rp::psram::{Config as PsramConfig, Psram};
 use embassy_rp::qmi_cs1::QmiCs1;
+use embassy_rp::Peri;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::mutex::Mutex;
 
@@ -12,10 +12,13 @@ pub const HTTP_RX_SIZE: usize = 8 * 1024;
 pub const HTTP_TX_SIZE: usize = 4 * 1024;
 
 static PSRAM_INIT: Mutex<ThreadModeRawMutex, bool> = Mutex::new(false);
-static mut HTTP_RX: Option<&'static mut [u8]> = None;
-static mut HTTP_TX: Option<&'static mut [u8]> = None;
+static mut HTTP_RX: Option<NonNull<[u8]>> = None;
+static mut HTTP_TX: Option<NonNull<[u8]>> = None;
 
-pub async fn init(p: &Peripherals) {
+pub async fn init(
+    qmi_cs1: Peri<'static, embassy_rp::peripherals::QMI_CS1>,
+    cs_pin: Peri<'static, embassy_rp::peripherals::PIN_0>,
+) {
     // Avoid re-init if already done
     if *PSRAM_INIT.lock().await {
         return;
@@ -23,7 +26,7 @@ pub async fn init(p: &Peripherals) {
 
     // On Pimoroni Pico Plus 2 W, PSRAM (APS6404) is on QMI CS1.
     // CS pin is board-specific; GP0 is a common choice. Adjust if needed.
-    let qmi = QmiCs1::new(p.QMI_CS1, p.PIN_0);
+    let qmi = QmiCs1::new(qmi_cs1, cs_pin);
     let cfg = PsramConfig::aps6404l();
     let Ok(psram) = Psram::new(qmi, cfg) else {
         log::warn!("psram: not detected; continuing without PSRAM buffers");
@@ -46,8 +49,8 @@ pub async fn init(p: &Peripherals) {
         }
         let (rx, rest) = all.split_at_mut(HTTP_RX_SIZE);
         let (tx, _rest2) = rest.split_at_mut(HTTP_TX_SIZE);
-        HTTP_RX = Some(rx);
-        HTTP_TX = Some(tx);
+        HTTP_RX = Some(NonNull::from(rx));
+        HTTP_TX = Some(NonNull::from(tx));
     }
 
     *PSRAM_INIT.lock().await = true;
@@ -61,9 +64,14 @@ pub async fn init(p: &Peripherals) {
 
 pub fn http_buffers() -> Option<(&'static mut [u8], &'static mut [u8])> {
     unsafe {
-        match (HTTP_RX.as_deref_mut(), HTTP_TX.as_deref_mut()) {
-            (Some(rx), Some(tx)) => Some((rx, tx)),
-            _ => None,
-        }
+        let rx_ptr = match HTTP_RX {
+            Some(ptr) => ptr.as_ptr(),
+            None => return None,
+        };
+        let tx_ptr = match HTTP_TX {
+            Some(ptr) => ptr.as_ptr(),
+            None => return None,
+        };
+        Some((&mut *rx_ptr, &mut *tx_ptr))
     }
 }

@@ -1,10 +1,12 @@
 use embassy_net as net;
-use embassy_time::Duration;
+use embassy_time_compat as embassy_time_legacy;
 
 const SERVER_PORT: u16 = 80;
 
 /// Tune this to match your StackResources<SOCK> budget.
 pub const WEB_TASK_POOL_SIZE: usize = 4;
+
+type TimerDuration = embassy_time_legacy::Duration;
 
 // Centralized HTTP sizes and limits for maintainability
 #[cfg(feature = "psram")]
@@ -43,8 +45,11 @@ static mut FALLBACK_HTTP_REQ_BUFS: [[u8; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
 /// Spawn the HTTP worker pool (call this from your init).
 pub fn spawn_http_server_pool(spawner: &embassy_executor::Spawner, stack: net::Stack<'static>) {
     for id in 0..WEB_TASK_POOL_SIZE {
-        match spawner.spawn(server_task(id, stack)) {
-            Ok(()) => log::info!("http: spawned worker {id} (port {SERVER_PORT})"),
+        match server_task(id, stack) {
+            Ok(token) => {
+                spawner.spawn(token);
+                log::info!("http: spawned worker {id} (port {SERVER_PORT})");
+            }
             Err(e) => log::error!("http: spawn worker {id} failed: {:?}", e),
         }
     }
@@ -60,10 +65,10 @@ pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
 
     // Keep connections alive so WS upgrade stays open.
     let cfg = picoserve::Config::new(picoserve::Timeouts {
-        start_read_request: Some(Duration::from_secs(5)),
-        persistent_start_read_request: Some(Duration::from_secs(3)),
-        read_request: Some(Duration::from_secs(2)),
-        write: Some(Duration::from_secs(3)),
+        start_read_request: Some(TimerDuration::from_secs(5)),
+        persistent_start_read_request: Some(TimerDuration::from_secs(3)),
+        read_request: Some(TimerDuration::from_secs(2)),
+        write: Some(TimerDuration::from_secs(3)),
     })
     .keep_connection_alive();
 

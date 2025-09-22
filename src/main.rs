@@ -14,7 +14,6 @@ use embassy_rp::clocks::RoscRng;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::pio::Pio;
-use embassy_rp::usb::Driver as UsbDriver;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 // USB classes are handled in `crate::usb` now
 use static_cell::StaticCell;
@@ -49,9 +48,12 @@ const AP_CHANNEL: u8 = 6;
 // ===== Small utilities =====
 
 #[inline]
-pub fn log_spawn<T, E: core::fmt::Debug>(name: &str, res: Result<T, E>) -> bool {
-    match res {
-        Ok(_) => true,
+pub fn log_spawn<S>(spawner: &Spawner, name: &str, token: Result<embassy_executor::SpawnToken<S>, embassy_executor::SpawnError>) -> bool {
+    match token {
+        Ok(task) => {
+            spawner.spawn(task);
+            true
+        }
         Err(e) => {
             log::error!("spawn {} failed: {:?}", name, e);
             false
@@ -109,7 +111,7 @@ async fn start_access_point(control: &mut cyw43::Control<'static>) {
 
 /// Spawn DHCP server.
 fn spawn_dhcp(spawner: &Spawner, stack: &'static net::Stack<'static>) -> bool {
-    let ok = log_spawn("dhcp::server_task", spawner.spawn(dhcp::server_task(stack)));
+    let ok = log_spawn(spawner, "dhcp::server_task", dhcp::server_task(stack));
     if ok {
         log::info!("dhcp: server task spawned (port 67)");
     }
@@ -149,15 +151,14 @@ async fn main(spawner: Spawner) {
 
     // 1) Early USB for logs (CDC) + HID (kept running after)
     // Prepare USB supervisor: start USB on demand via WS command
-    let usb_driver = UsbDriver::new(p.USB, Irqs);
-    crate::usb::usb_supervisor::init(usb_driver, spawner);
+    crate::usb::usb_supervisor::init(spawner);
 
     // 2) Runtime config + (optional) PSRAM + flash persistence
     crate::device_config::init().await;
 
     #[cfg(feature = "psram")]
     {
-        psram_pool::init(&p).await;
+        psram_pool::init(p.QMI_CS1, p.PIN_0).await;
     }
 
     let flash_drv = embassy_rp::flash::Flash::<
@@ -193,7 +194,7 @@ async fn main(spawner: Spawner) {
     log::info!("cyw43: loading firmware and bringing up chip");
     let (net_device, mut control, cyw_runner) = cyw43::new(state, pwr, spi, fw).await;
     log::info!("cyw43: init complete; spawning runner");
-    let _ = log_spawn("cyw43_task", spawner.spawn(cyw43_task(cyw_runner)));
+    let _ = log_spawn(&spawner, "cyw43_task", cyw43_task(cyw_runner));
 
     log::info!("cyw43: applying CLM/regulatory data");
     control.init(clm).await;
@@ -205,7 +206,7 @@ async fn main(spawner: Spawner) {
     // --- Embassy net stack (Static IPv4 for AP mode) ---
     let seed = seed_rng();
     let (stack, net_runner) = init_net_stack(net_device, seed);
-    let _ = log_spawn("net_task", spawner.spawn(net_task(net_runner)));
+    let _ = log_spawn(&spawner, "net_task", net_task(net_runner));
     log::info!("net: stack runner spawned (static IPv4)");
 
     // --- Bring up a WPA2-protected Access Point ---
@@ -236,7 +237,5 @@ mod host;
 mod http;
 #[cfg(feature = "psram")]
 mod psram_pool;
-mod script_dsl;
-mod scripts;
 mod usb;
 // mod usb_ctrl; // disabled: control CDC removed to keep only keyboard + logging

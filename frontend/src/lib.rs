@@ -1,9 +1,12 @@
-use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
 use yew::prelude::*;
 
+use dsl_core::MAX_DSL_LINES;
+
 mod api;
+pub mod codec;
+pub mod dsl;
+pub mod scripts;
 
 #[derive(Clone, PartialEq)]
 struct StatusState {
@@ -29,7 +32,7 @@ fn app() -> Html {
     let log_lines = use_state(|| Vec::<String>::new());
     let ws_connected = use_state(|| false);
     let toast = use_state(|| None::<(String, bool)>); // (message, ok?)
-                                                      // All WebSocket API calls are handled in api.rs via a single connection
+    // All WebSocket API calls are handled in api.rs via a single connection
 
     let set_busy = {
         let busy_count = busy_count.clone();
@@ -169,37 +172,58 @@ fn app() -> Html {
         })
     };
 
-    let on_usb_start = {
-        let selected_os = selected_os.clone();
-        let set_busy = set_busy.clone();
-        let push_log = push_log.clone();
-        let toast_cb = show_toast.clone();
-        Callback::from(move |assistant: bool| {
-            let selected_os = (*selected_os).clone();
+    let on_usb_start =
+        {
+            let selected_os = selected_os.clone();
             let set_busy = set_busy.clone();
             let push_log = push_log.clone();
-            let show_toast = toast_cb.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                set_busy.emit(true);
-                let os_opt = if selected_os == "unknown" {
-                    None
-                } else {
-                    Some(selected_os.as_str())
-                };
-                match api::usb_register(assistant, os_opt).await {
-                    Ok(()) => {
-                        push_log.emit("USB enabling request sent".to_string());
-                        show_toast.emit(("USB enabling…".into(), true));
+            let toast_cb = show_toast.clone();
+            Callback::from(move |assistant: bool| {
+                let selected_os = (*selected_os).clone();
+                let set_busy = set_busy.clone();
+                let push_log = push_log.clone();
+                let show_toast = toast_cb.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    set_busy.emit(true);
+                    let os_opt = if selected_os == "unknown" {
+                        None
+                    } else {
+                        Some(selected_os.as_str())
+                    };
+                    match api::usb_register(assistant, os_opt).await {
+                        Ok(()) => {
+                            push_log.emit("USB enabling request sent".to_string());
+                            show_toast.emit(("USB enabling…".into(), true));
+                            if assistant {
+                                match scripts::lookup("assistant_once") {
+                                    Some(script_dsl) => match dsl::compile(script_dsl) {
+                                        Ok(bytecode) => match api::run_script(&bytecode).await {
+                                            Ok(()) => push_log
+                                                .emit("macOS assistant script queued".into()),
+                                            Err(e) => push_log
+                                                .emit(format!("assistant script failed: {e}")),
+                                        },
+                                        Err(err) => {
+                                            push_log.emit(format!(
+                                                "assistant compile error: {}",
+                                                err.message
+                                            ));
+                                        }
+                                    },
+                                    None => push_log
+                                        .emit("assistant script unavailable in frontend".into()),
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            push_log.emit(format!("usb start error: {e}"));
+                            show_toast.emit((format!("USB start failed: {e}"), false));
+                        }
                     }
-                    Err(e) => {
-                        push_log.emit(format!("usb start error: {e}"));
-                        show_toast.emit((format!("USB start failed: {e}"), false));
-                    }
-                }
-                set_busy.emit(false);
-            });
-        })
-    };
+                    set_busy.emit(false);
+                });
+            })
+        };
 
     let on_run_dsl = {
         let dsl_text = dsl_text.clone();
@@ -212,18 +236,22 @@ fn app() -> Html {
                 push_log.emit("empty script".to_string());
                 return;
             }
-            if txt.as_bytes().len() > 512 {
-                push_log.emit("script too large (max 512 bytes)".to_string());
-                return;
-            }
             let set_busy = set_busy.clone();
             let push_log = push_log.clone();
             let show_toast = toast_cb.clone();
             wasm_bindgen_futures::spawn_local(async move {
+                let bytecode = match dsl::compile(&txt) {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        push_log.emit(format!("compile error: {}", err.message));
+                        show_toast.emit((format!("Compile failed: {}", err.message), false));
+                        return;
+                    }
+                };
                 set_busy.emit(true);
-                match api::run_script(&txt).await {
+                match api::run_script(&bytecode).await {
                     Ok(()) => {
-                        push_log.emit("queued".to_string());
+                        push_log.emit(format!("queued ({} bytes)", bytecode.len()));
                         show_toast.emit(("Script queued".into(), true));
                     }
                     Err(e) => {
@@ -523,9 +551,9 @@ fn scripting_card(props: &ScriptProps) -> Html {
             <button id="btnRunDsl" class="btn-accent" onclick={{ let cb=props.on_run.clone(); Callback::from(move |_| cb.emit(())) }}>{"Run Script"}</button>
             <span class="hint">{"Commands: "}<code>{"tap(\"KEY\")"}</code>{"; "}<code>{"modtap(\"MOD+KEY\")"}</code>{"; "}<code>{"delay(MS)"}</code>{"; "}<code>{"text(\"STRING\", [DELAY])"}</code>{" — Press Ctrl/⌘+Enter to run."}</span>
             {{
-              let bytes = props.dsl_text.as_bytes().len();
-              let style = if bytes > 512 { "color: var(--bad)".to_string() } else { String::new() };
-              html! { <span class="hint" style={style}>{ format!("{}/512 bytes", bytes) }</span> }
+              let lines = props.dsl_text.lines().count();
+              let style = if lines > MAX_DSL_LINES { "color: var(--bad)".to_string() } else { String::new() };
+              html! { <span class="hint" style={style}>{ format!("{} lines (max {})", lines, MAX_DSL_LINES) }</span> }
             }}
           </div>
         </div>

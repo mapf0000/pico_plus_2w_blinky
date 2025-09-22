@@ -3,8 +3,9 @@ use picoserve::response::ws; // for Read/Write trait bounds
 
 use crate::host::{self, HostOs};
 use crate::http::util::{escape_json_str, percent_decode_str};
-use crate::usb::hid::{HID_CHAN, HidCommand, USB_READY};
+use crate::usb::hid::{HID_CHAN, HidCommand, MAX_BYTECODE, USB_READY};
 use crate::usb::usb_supervisor;
+use heapless::Vec;
 
 pub(crate) async fn ws_handler(
     upgrade: ws::WebSocketUpgrade,
@@ -106,10 +107,10 @@ async fn handle_command<W: embedded_io_async::Write>(
             return tx.send_text("{\"error\":\"USB already enabled\"}").await;
         }
         match crate::device_config::set_partial(man_dec.as_deref(), prod_dec.as_deref()).await {
-            Ok(()) => {
-                let _ = crate::device_config::save().await;
-                tx.send_text("{\"ok\":true}").await
-            }
+            Ok(()) => match crate::device_config::save().await {
+                Ok(()) => tx.send_text("{\"ok\":true}").await,
+                Err(_) => tx.send_text("{\"error\":\"persist failed\"}").await,
+            },
             Err(crate::device_config::SetError::TooLongManufacturer) => {
                 tx.send_text("{\"error\":\"bad manufacturer\"}").await
             }
@@ -121,7 +122,8 @@ async fn handle_command<W: embedded_io_async::Write>(
             }
         }
     } else if cmd.eq_ignore_ascii_case("USB_REGISTER") || cmd.starts_with("USB_REGISTER ") {
-        // optional: USB_REGISTER assistant=1&os=mac (we accept but assistant currently unused)
+        // optional: USB_REGISTER assistant=1&os=mac
+        let mut run_assistant = false;
         if let Some(q) = cmd.strip_prefix("USB_REGISTER ") {
             for pair in q.split('&') {
                 if let Some((k, v)) = pair.split_once('=') {
@@ -131,64 +133,62 @@ async fn handle_command<W: embedded_io_async::Write>(
                             "windows" => host::set_host_os(HostOs::Windows),
                             _ => host::set_host_os(HostOs::Unknown),
                         }
+                    } else if k == "assistant" {
+                        run_assistant = v != "0";
                     }
                 }
             }
         }
-        let run_assistant = true;
-        let _ = usb_supervisor::start(run_assistant).await;
-        return tx.send_text("{\"ok\":true}").await;
+        match usb_supervisor::start(run_assistant).await {
+            Ok(()) => return tx.send_text("{\"ok\":true}").await,
+            Err(_) => return tx.send_text("{\"error\":\"usb start failed\"}").await,
+        }
     } else if cmd.eq_ignore_ascii_case("USB_UNREGISTER") {
         USB_READY.store(false, core::sync::atomic::Ordering::SeqCst);
-        let _ = usb_supervisor::stop(150).await;
-        return tx.send_text("{\"ok\":true}").await;
-    } else if cmd.eq_ignore_ascii_case("SCRIPTS_LIST") {
-        // Build JSON array into a heapless string
-        let mut out: heapless::String<2048> = heapless::String::new();
-        let _ = out.push('[');
-        for (i, s) in crate::scripts::SCRIPTS.iter().enumerate() {
-            if i != 0 {
-                let _ = out.push(',');
-            }
-            let _ = core::fmt::write(
-                &mut out,
-                format_args!(
-                    "{{\"id\":\"{}\",\"name\":\"{}\",\"description\":\"{}\"",
-                    escape_json_str(s.id),
-                    escape_json_str(s.name),
-                    escape_json_str(s.description)
-                ),
-            );
-            if let Some(pre) = s.dsl_preview {
-                let _ = core::fmt::write(
-                    &mut out,
-                    format_args!(",\"dsl\":\"{}\"", escape_json_str(pre)),
-                );
-            }
-            let _ = out.push('}');
+        match usb_supervisor::stop(150).await {
+            Ok(()) => return tx.send_text("{\"ok\":true}").await,
+            Err(_) => return tx.send_text("{\"error\":\"usb stop failed\"}").await,
         }
-        let _ = out.push_str("]");
-        return tx.send_text(&out).await;
-    } else if let Some(dsl) = cmd.strip_prefix("SCRIPT_RUN ") {
-        let bytes = dsl.as_bytes();
-        if bytes.is_empty()
-            || bytes.len() > 512
-            || !bytes.iter().all(|b| matches!(b, 9 | 10 | 13 | 32..=126))
-        {
-            return tx.send_text("{\"error\":\"bad dsl\"}").await;
-        }
-        let mut s: heapless::String<512> = heapless::String::new();
-        for &ch in bytes.iter() {
-            if s.push(ch as char).is_err() {
-                return tx.send_text("{\"error\":\"dsl too large\"}").await;
-            }
-        }
-        match HID_CHAN.try_send(HidCommand::RunDsl { dsl: s }) {
-            Ok(()) => tx.send_text("{\"ok\":true,\"queued\":true}").await,
-            Err(_) => tx.send_text("{\"error\":\"busy\"}").await,
+    } else if let Some(hex) = cmd.strip_prefix("SCRIPT_RUN_HEX ") {
+        match decode_hex(hex.trim()) {
+            Ok(program) => match HID_CHAN.try_send(HidCommand::RunBytecode { program }) {
+                Ok(()) => tx.send_text("{\"ok\":true,\"queued\":true}").await,
+                Err(_) => tx.send_text("{\"error\":\"busy\"}").await,
+            },
+            Err(_) => tx.send_text("{\"error\":\"bad bytecode\"}").await,
         }
     } else {
         // Unknown command
         tx.send_text("{\"error\":\"unknown command\"}").await
+    }
+}
+
+fn decode_hex(input: &str) -> Result<Vec<u8, { MAX_BYTECODE }>, ()> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.len() % 2 != 0 {
+        return Err(());
+    }
+    let max_bytes = trimmed.len() / 2;
+    if max_bytes > MAX_BYTECODE {
+        return Err(());
+    }
+    let mut out = Vec::<u8, { MAX_BYTECODE }>::new();
+    let bytes = trimmed.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let hi = decode_nibble(bytes[idx])?;
+        let lo = decode_nibble(bytes[idx + 1])?;
+        out.push((hi << 4) | lo).map_err(|_| ())?;
+        idx += 2;
+    }
+    Ok(out)
+}
+
+fn decode_nibble(ch: u8) -> Result<u8, ()> {
+    match ch {
+        b'0'..=b'9' => Ok(ch - b'0'),
+        b'a'..=b'f' => Ok(10 + ch - b'a'),
+        b'A'..=b'F' => Ok(10 + ch - b'A'),
+        _ => Err(()),
     }
 }

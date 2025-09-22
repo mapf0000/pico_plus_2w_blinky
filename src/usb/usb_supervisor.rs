@@ -1,8 +1,6 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_executor::Spawner;
-use embassy_rp::peripherals::USB;
-use embassy_rp::usb::Driver as UsbDriver;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 
 // Reuse global flags from main
@@ -11,46 +9,50 @@ pub static USB_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // Signals for triggering start/stop of the single USB session.
 pub(crate) static START_REQ: Signal<ThreadModeRawMutex, bool> = Signal::new();
-static USB_CANCEL: Signal<ThreadModeRawMutex, ()> = Signal::new();
+static USB_CANCEL: Signal<ThreadModeRawMutex, u64> = Signal::new();
 static USB_STOPPED: Signal<ThreadModeRawMutex, ()> = Signal::new();
 static STARTED: AtomicBool = AtomicBool::new(false);
 
-pub fn init(driver: UsbDriver<'static, USB>, spawner: Spawner) {
-    // Spawn a single USB task that will wait for START_REQ, then run until canceled.
+pub fn init(spawner: Spawner) {
+    // Spawn a single USB task that will wait for START_REQ, then run sessions on demand.
     let _ = crate::log_spawn(
+        &spawner,
         "usb_task",
-        spawner.spawn(crate::usb::task::usb_task(
-            driver,
-            &USB_CANCEL,
-            &START_REQ,
-            false,
-        )),
+        crate::usb::task::usb_task(&USB_CANCEL, &START_REQ),
     );
 }
 
 pub async fn start(run_mac_assistant: bool) -> Result<(), ()> {
-    if STARTED.swap(true, Ordering::SeqCst) {
-        return Ok(()); // already started
+    if USB_ENABLED.swap(true, Ordering::SeqCst) {
+        return Ok(()); // already enabled or in-flight
     }
-    USB_ENABLED.store(true, Ordering::SeqCst);
     START_REQ.signal(run_mac_assistant);
     Ok(())
 }
 
-pub async fn stop(_detach_ms: u64) -> Result<(), ()> {
-    USB_CANCEL.signal(());
-    // Wait until the task confirms it stopped
-    USB_STOPPED.wait().await;
-    USB_ENABLED.store(false, Ordering::SeqCst);
+pub async fn stop(detach_ms: u64) -> Result<(), ()> {
+    if !USB_ENABLED.swap(false, Ordering::SeqCst) {
+        return Ok(());
+    }
+    if STARTED.load(Ordering::SeqCst) {
+        USB_CANCEL.signal(detach_ms);
+        USB_STOPPED.wait().await;
+    }
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn is_running() -> bool {
     STARTED.load(Ordering::SeqCst)
 }
 
+pub(crate) fn notify_started() {
+    STARTED.store(true, Ordering::SeqCst);
+}
+
 pub(crate) fn notify_stopped() {
     STARTED.store(false, Ordering::SeqCst);
+    USB_ENABLED.store(false, Ordering::SeqCst);
     USB_STOPPED.signal(());
 }
 

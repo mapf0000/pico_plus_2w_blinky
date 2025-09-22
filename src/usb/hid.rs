@@ -2,17 +2,18 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
 use embassy_usb::class::hid::HidWriter as UsbHidWriter;
-use heapless::String;
-
-use crate::{script_dsl, scripts};
+use firmware_exec::{self, ExecError};
+use heapless::Vec;
 
 // Command channel and state
 pub enum HidCommand {
-    RunDsl { dsl: String<512> },
+    RunBytecode { program: Vec<u8, { MAX_BYTECODE }> },
 }
 
 pub static HID_CHAN: Channel<ThreadModeRawMutex, HidCommand, 8> = Channel::new();
 pub static USB_READY: AtomicBool = AtomicBool::new(false);
+
+pub const MAX_BYTECODE: usize = 2048;
 
 /// Long-lived HID worker: waits for ready, optionally runs mac assistant, then processes commands.
 pub async fn run_hid<'d, D>(
@@ -27,18 +28,25 @@ where
     log::info!("usb: HID keyboard ready");
 
     if run_mac_assistant_on_start {
-        scripts::run_builtin(scripts::BuiltinScript::MacAssistantOnce, &mut writer).await;
+        log::info!("usb: mac assistant requested at startup; expect frontend to queue script");
     }
 
     loop {
         let cmd = HID_CHAN.receive().await;
         match cmd {
-            HidCommand::RunDsl { dsl } => match script_dsl::run_dsl(&mut writer, &dsl).await {
-                Ok(()) => {}
-                Err(e) => {
-                    log::warn!("dsl: error executing script: {:?}", e);
+            HidCommand::RunBytecode { program } => {
+                if let Err(e) = firmware_exec::exec_bytecode(&mut writer, program.as_slice()).await
+                {
+                    match e {
+                        ExecError::Decode(de) => {
+                            log::warn!("bytecode decode error: {:?}", de);
+                        }
+                        ExecError::TooLong => {
+                            log::warn!("bytecode too long; aborting execution");
+                        }
+                    }
                 }
-            },
+            }
         }
     }
 }

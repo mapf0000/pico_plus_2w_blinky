@@ -2,6 +2,8 @@ MEMORY {
     /*
      * The RP2350 has either external or internal flash.
      * Pimoroni Pico Plus 2 W ships with 16 MiB external flash.
+     * (Board also includes 8 MiB PSRAM that firmware uses when the
+     * `psram` feature is enabled.)
      */
     /* Reserve 8 KiB at the end of flash for persistent config */
     FLASH : ORIGIN = 0x10000000, LENGTH = 16376K

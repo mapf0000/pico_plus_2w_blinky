@@ -1,10 +1,13 @@
 use futures_channel::oneshot;
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use std::thread_local;
+use std::vec::Vec;
 use std::{cell::RefCell, rc::Rc};
-use wasm_bindgen::{closure::Closure, JsCast};
+use wasm_bindgen::{JsCast, closure::Closure};
 use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
+
+use crate::{codec, scripts};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Status {
@@ -168,12 +171,23 @@ pub async fn save_config(manufacturer: &str, product: &str) -> Result<(), String
     }
 }
 
-pub async fn usb_register(_assistant: bool, os: Option<&str>) -> Result<(), String> {
+pub async fn usb_register(assistant: bool, os: Option<&str>) -> Result<(), String> {
     let mut cmd = String::from("USB_REGISTER");
+    let mut params: Vec<String> = Vec::new();
+    if assistant {
+        params.push("assistant=1".to_string());
+    }
     if let Some(os) = os {
         if !os.is_empty() {
-            cmd.push(' ');
-            cmd.push_str(&format!("os={}", os));
+            params.push(format!("os={}", os));
+        }
+    }
+    if let Some(first) = params.first() {
+        cmd.push(' ');
+        cmd.push_str(first);
+        for extra in params.iter().skip(1) {
+            cmd.push('&');
+            cmd.push_str(extra);
         }
     }
     let text = send_cmd(&cmd).await?;
@@ -194,13 +208,21 @@ pub async fn usb_unregister() -> Result<(), String> {
 }
 
 pub async fn list_scripts() -> Result<Vec<ScriptMeta>, String> {
-    let text = send_cmd("SCRIPTS_LIST").await?;
-    serde_json::from_str::<Vec<ScriptMeta>>(&text)
-        .map_err(|e| format!("parse scripts: {e}: {} chars", text.len()))
+    let list = scripts::all()
+        .iter()
+        .map(|s| ScriptMeta {
+            id: s.id.to_string(),
+            name: s.name.to_string(),
+            description: s.description.to_string(),
+            dsl: Some(s.dsl.to_string()),
+        })
+        .collect();
+    Ok(list)
 }
 
-pub async fn run_script(dsl: &str) -> Result<(), String> {
-    let cmd = format!("SCRIPT_RUN {}", dsl);
+pub async fn run_script(bytecode: &[u8]) -> Result<(), String> {
+    let encoded = codec::encode_hex(bytecode);
+    let cmd = format!("SCRIPT_RUN_HEX {}", encoded);
     let text = send_cmd(&cmd).await?;
     if text.contains("\"ok\":true") {
         Ok(())

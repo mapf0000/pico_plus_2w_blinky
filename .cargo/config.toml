@@ -8,7 +8,6 @@ target = "thumbv8m.main-none-eabihf"
 [target.thumbv8m.main-none-eabihf]
 # Custom runner that flashes the board and captures logs
 runner = "./scripts/pico-run"
-
 # Cortex-M (embedded) rustflags only apply to the thumb target
 rustflags = [
   "-C", "link-arg=--nmagic",
@@ -16,6 +15,10 @@ rustflags = [
   "-C", "link-arg=-Tdefmt.x",
   "-C", "target-cpu=cortex-m33",
 ]
+
+# Use wasm-bindgen test runner for wasm32 test invocations
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"
 
 [env]
 # defmt log level for firmware

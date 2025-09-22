@@ -7,10 +7,16 @@ This workspace builds two artifacts together:
 The build is wired so a single `cargo run --release` builds both parts, flashes the board, and opens a serial log.
 
 ## Overview
+- Primary hardware target: Pimoroni Pico Plus 2 W (RP2350B) with 16 MiB QSPI flash, 8 MiB PSRAM, and 520 KiB SRAM.
 - Default Cargo target is `thumbv8m.main-none-eabihf` for firmware.
 - The frontend crate (`frontend/`) always targets `wasm32-unknown-unknown` and is built by Trunk from `build.rs`.
 - A custom runner (`scripts/pico-run`) uses `picotool` to flash the ELF and then tails the USB CDC log.
 - The built frontend files are embedded at compile time and served by the firmware under `/` and `/ui/*`.
+
+### Memory configuration
+- `memory.x` reserves 16 MiB of flash, splitting the final 8 KiB into a persistent configuration area.
+- `src/device_config.rs` mirrors that layout via `FLASH_CAPACITY` (`16 * 1024 * 1024` bytes) and persists two 4 KiB slots.
+- The PSRAM worker pool feature (`psram`) is enabled by default so HTTP buffers allocate from the 8 MiB external RAM exposed by the Embassy git HAL.
 
 ## Prerequisites
 - Rust targets
@@ -48,6 +54,14 @@ The build is wired so a single `cargo run --release` builds both parts, flashes 
   - `cd frontend && trunk serve` (proxies API calls per `Trunk.toml`)
 - Frontend only (release build):
   - `cd frontend && trunk build --release` (outputs to `frontend/dist/`)
+
+## Testing
+- Host-only unit tests (skip embedded dependencies):
+  - `cargo test --no-default-features --features "" --target aarch64-apple-darwin`
+    - Disables the default `firmware` feature so crates that expect a Cortex-M target are not pulled in when running on macOS/ARM.
+- Frontend wasm tests:
+  - `cargo test -p frontend --target wasm32-unknown-unknown --no-run`
+  - Then execute the produced `.wasm` with `wasm-bindgen-test-runner target/wasm32-unknown-unknown/debug/deps/<name>.wasm` (install via `cargo install wasm-bindgen-test`).
 
 ## Cargo/Target Configuration
 - Root config: `.cargo/config.toml`
@@ -99,4 +113,3 @@ Licensed under either of
 - Apache License, Version 2.0, or
 - MIT license
 at your option.
-
