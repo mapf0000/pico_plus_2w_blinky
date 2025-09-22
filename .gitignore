@@ -14,4 +14,4 @@ target/
 !.vscode/settings.json
 
 # Frontend build output
-frontend/dist/*
+frontend/dist/
