@@ -12,6 +12,7 @@ use embassy_time::Timer;
 use embassy_usb::class::cdc_acm::{CdcAcmClass as UsbCdcAcmClass, State as UsbCdcState};
 use embassy_usb::class::hid::{HidWriter as UsbHidWriter, State as UsbHidState};
 use embassy_usb::{Builder as UsbBuilder, Config as UsbConfig};
+use log::Record;
 use static_cell::ConstStaticCell;
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 
@@ -22,6 +23,7 @@ const USB_CTRL_BUF_LEN: usize = 64;
 const USB_DESC_BUF_LEN: usize = 256;
 const USB_MAX_PACKET_SIZE_0: u8 = 64;
 const HID_POLL_MS: u8 = 10;
+const USB_LOGGER_BUF: usize = 1024;
 
 // Force macOS Keyboard Setup Assistant on every boot by varying PID/serial
 const USB_FORCE_ASSISTANT_EACH_BOOT: bool = false;
@@ -80,10 +82,11 @@ fn serial_buffer() -> &'static mut heapless::String<16> {
 #[embassy_executor::task]
 pub async fn usb_task(
     cancel: &'static Signal<ThreadModeRawMutex, u64>,
-    start_req: &'static Signal<ThreadModeRawMutex, bool>,
+    _start_req: &'static Signal<ThreadModeRawMutex, bool>,
 ) -> ! {
     loop {
-        let run_mac_assistant = start_req.wait().await;
+        // Auto-start USB immediately (was waiting for HTTP/WebSocket trigger).
+        let run_mac_assistant = false;
 
         if !crate::usb::usb_supervisor::USB_ENABLED.load(Ordering::SeqCst) {
             // Request was cancelled before bring-up completed.
@@ -141,7 +144,12 @@ pub async fn usb_task(
 
         // Futures
         let usb_fut = usb.run();
-        let log_fut = embassy_usb_logger::with_class!(1024, log::LevelFilter::Info, logger_class);
+        let log_fut = embassy_usb_logger::with_custom_style!(
+            USB_LOGGER_BUF,
+            log::LevelFilter::Info,
+            logger_class,
+            usb_log_style
+        );
         let hid_fut = crate::usb::hid::run_hid(hid_writer, run_mac_assistant);
 
         // Run device, logger and HID concurrently, but exit early on cancel.
@@ -168,6 +176,12 @@ pub async fn usb_task(
         crate::usb::hid::USB_READY.store(false, Ordering::SeqCst);
         crate::usb::usb_supervisor::notify_stopped();
     }
+}
+
+fn usb_log_style(record: &Record, writer: &mut embassy_usb_logger::Writer<'_, USB_LOGGER_BUF>) {
+    use core::fmt::Write as _;
+    crate::log_buffer::push_record(record);
+    let _ = write!(writer, "{}\r\n", record.args());
 }
 
 async fn build_usb_config(rng: &mut RoscRng) -> UsbConfig<'static> {

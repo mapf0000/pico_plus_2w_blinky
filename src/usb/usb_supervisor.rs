@@ -15,11 +15,9 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 
 pub fn init(spawner: Spawner) {
     // Spawn a single USB task that will wait for START_REQ, then run sessions on demand.
-    let _ = crate::log_spawn(
-        &spawner,
-        "usb_task",
-        crate::usb::task::usb_task(&USB_CANCEL, &START_REQ),
-    );
+    let _ = crate::log_spawn(&spawner, "usb_task", crate::usb::task::usb_task(&USB_CANCEL, &START_REQ));
+    // Auto-enable so CDC logs come up without a trigger.
+    USB_ENABLED.store(true, Ordering::SeqCst);
 }
 
 pub async fn start(run_mac_assistant: bool) -> Result<(), ()> {

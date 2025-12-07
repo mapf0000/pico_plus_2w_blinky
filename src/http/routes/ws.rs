@@ -1,5 +1,6 @@
 use picoserve::io::embedded_io_async;
 use picoserve::response::ws; // for Read/Write trait bounds
+use picoserve::futures::Either;
 
 use crate::host::{self, HostOs};
 use crate::http::util::{escape_json_str, percent_decode_str};
@@ -26,8 +27,11 @@ impl ws::WebSocketCallback for HelloWs {
 
         let mut buf = [0u8; 1024];
         loop {
-            match rx.next_message(&mut buf).await {
-                Ok(ws::Message::Text(s)) => {
+            match rx
+                .next_message(&mut buf, core::future::pending::<()>())
+                .await
+            {
+                Ok(Either::First(Ok(ws::Message::Text(s)))) => {
                     let cmd = s.trim();
                     if cmd.is_empty() {
                         continue;
@@ -36,12 +40,14 @@ impl ws::WebSocketCallback for HelloWs {
                         break;
                     }
                 }
-                Ok(ws::Message::Binary(_b)) => {
+                Ok(Either::First(Ok(ws::Message::Binary(_b)))) => {
                     // No binary protocol; ignore
                 }
-                Ok(ws::Message::Ping(p)) => tx.send_pong(p).await?,
-                Ok(ws::Message::Pong(_)) => { /* ignore */ }
-                Ok(ws::Message::Close(_)) => break,
+                Ok(Either::First(Ok(ws::Message::Ping(p)))) => tx.send_pong(p).await?,
+                Ok(Either::First(Ok(ws::Message::Pong(_)))) => { /* ignore */ }
+                Ok(Either::First(Ok(ws::Message::Close(_)))) => break,
+                Ok(Either::First(Err(_))) => break,
+                Ok(Either::Second(_)) => break,
                 Err(_) => break,
             }
         }

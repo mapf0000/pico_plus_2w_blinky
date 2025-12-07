@@ -48,12 +48,9 @@ const AP_CHANNEL: u8 = 6;
 // ===== Small utilities =====
 
 #[inline]
-pub fn log_spawn<S>(spawner: &Spawner, name: &str, token: Result<embassy_executor::SpawnToken<S>, embassy_executor::SpawnError>) -> bool {
-    match token {
-        Ok(task) => {
-            spawner.spawn(task);
-            true
-        }
+pub fn log_spawn<S>(spawner: &Spawner, name: &str, token: embassy_executor::SpawnToken<S>) -> bool {
+    match spawner.spawn(token) {
+        Ok(()) => true,
         Err(e) => {
             log::error!("spawn {} failed: {:?}", name, e);
             false
@@ -156,6 +153,27 @@ async fn main(spawner: Spawner) {
     // 2) Runtime config + (optional) PSRAM + flash persistence
     crate::device_config::init().await;
 
+    // Bring up the Pico Display 2.8 (ST7789 + buttons + RGB LED).
+    let display_pins = display::DisplayPins {
+        adc: p.ADC,
+        temp_sensor: p.ADC_TEMP_SENSOR,
+        spi: p.SPI0,
+        sck: p.PIN_18,
+        mosi: p.PIN_19,
+        cs: p.PIN_17,
+        dc: p.PIN_16,
+        backlight: p.PIN_20,
+        btn_a: p.PIN_12,
+        btn_b: p.PIN_13,
+        btn_x: p.PIN_14,
+        btn_y: p.PIN_15,
+        led_r: p.PIN_26,
+        led_g: p.PIN_27,
+        led_b: p.PIN_28,
+        ap_ssid: AP_SSID,
+    };
+    let _ = display::spawn(&spawner, display_pins);
+
     #[cfg(feature = "psram")]
     {
         psram_pool::init(p.QMI_CS1, p.PIN_0).await;
@@ -233,8 +251,10 @@ async fn main(spawner: Spawner) {
 
 mod device_config;
 mod dhcp;
+mod display;
 mod host;
 mod http;
+mod log_buffer;
 #[cfg(feature = "psram")]
 mod psram_pool;
 mod usb;

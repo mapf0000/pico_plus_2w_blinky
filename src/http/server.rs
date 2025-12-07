@@ -1,5 +1,5 @@
 use embassy_net as net;
-use embassy_time_compat as embassy_time_legacy;
+use embassy_time as embassy_time_legacy;
 
 const SERVER_PORT: u16 = 80;
 
@@ -45,12 +45,10 @@ static mut FALLBACK_HTTP_REQ_BUFS: [[u8; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
 /// Spawn the HTTP worker pool (call this from your init).
 pub fn spawn_http_server_pool(spawner: &embassy_executor::Spawner, stack: net::Stack<'static>) {
     for id in 0..WEB_TASK_POOL_SIZE {
-        match server_task(id, stack) {
-            Ok(token) => {
-                spawner.spawn(token);
-                log::info!("http: spawned worker {id} (port {SERVER_PORT})");
-            }
-            Err(e) => log::error!("http: spawn worker {id} failed: {:?}", e),
+        if let Err(e) = spawner.spawn(server_task(id, stack)) {
+            log::error!("http: spawn worker {id} failed: {:?}", e);
+        } else {
+            log::info!("http: spawned worker {id} (port {SERVER_PORT})");
         }
     }
 }
@@ -101,15 +99,8 @@ pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
     );
 
     // Serve forever (never returns on current picoserve versions)
-    picoserve::listen_and_serve(
-        "http",
-        &app,
-        &cfg,
-        stack,
-        SERVER_PORT,
-        rx_buf,
-        tx_buf,
-        http_buf,
-    )
-    .await
+    picoserve::Server::new(&app, &cfg, http_buf)
+        .listen_and_serve("http", stack, SERVER_PORT, rx_buf, tx_buf)
+        .await
+        .into_never()
 }

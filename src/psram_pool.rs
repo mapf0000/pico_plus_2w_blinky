@@ -1,9 +1,9 @@
 #![cfg(feature = "psram")]
 
 use core::{ptr::NonNull, slice};
+use embassy_rp::Peri;
 use embassy_rp::psram::{Config as PsramConfig, Psram};
 use embassy_rp::qmi_cs1::QmiCs1;
-use embassy_rp::Peri;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::mutex::Mutex;
 
