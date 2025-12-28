@@ -4,6 +4,7 @@ use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
 use embassy_usb::class::hid::HidWriter as UsbHidWriter;
 use firmware_exec::{self, ExecError};
 use heapless::Vec;
+pub use bytecode_constants::MAX_BYTECODE;
 
 // Command channel and state
 pub enum HidCommand {
@@ -12,8 +13,6 @@ pub enum HidCommand {
 
 pub static HID_CHAN: Channel<ThreadModeRawMutex, HidCommand, 8> = Channel::new();
 pub static USB_READY: AtomicBool = AtomicBool::new(false);
-
-pub const MAX_BYTECODE: usize = 2048;
 
 /// Long-lived HID worker: waits for ready, optionally runs mac assistant, then processes commands.
 pub async fn run_hid<'d, D>(

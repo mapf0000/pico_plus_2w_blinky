@@ -68,6 +68,7 @@ cyw43-pio = { version = "0.9.0", optional = true, features = [
 leasehund = { version = "0.2", optional = true }
 picoserve = { version = "0.17.1", features = ["embassy", "ws"] }
 firmware-exec = { path = "dsl/firmware-exec" }
+bytecode-constants = { path = "bytecode-constants" }
 
 
 [features]
@@ -94,6 +95,8 @@ usb_autostart = []
 members = [
   "frontend",
   "build-support",
+  "bytecode-constants",
+  "builtin-scripts",
   #"dsl",
 ]
 

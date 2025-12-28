@@ -37,13 +37,12 @@ use static_cell::StaticCell;
 use crate::log_buffer;
 
 mod page_common;
-mod page_item1;
-mod page_item2;
-mod page_item3;
+mod page_payloads;
 mod page_logs;
 mod page_system;
 
 use page_common::{build_text_line, format_hms};
+use page_payloads::PayloadsPageState;
 use page_logs::LogsPageState;
 use page_system::SystemPageState;
 
@@ -71,11 +70,38 @@ pub struct DisplayPins<'d> {
     pub ap_ssid: &'static str,
 }
 
+#[derive(Clone, Copy)]
+pub struct DisplayPalette {
+    pub white: Rgb565,
+    pub yellow: Rgb565,
+    pub teal: Rgb565,
+    pub blue: Rgb565,
+    pub black: Rgb565,
+    pub green: Rgb565,
+}
+
+impl DisplayPalette {
+    pub fn new() -> Self {
+        Self {
+            white: Rgb565::from(Rgb888::new(0xFF, 0xFF, 0xFF)),
+            yellow: Rgb565::from(Rgb888::new(0xF9, 0xDB, 0x6D)),
+            teal: Rgb565::from(Rgb888::new(0x36, 0x82, 0x7F)),
+            blue: Rgb565::from(Rgb888::new(0x46, 0x4D, 0x77)),
+            black: Rgb565::from(Rgb888::new(0x00, 0x00, 0x00)),
+            green: Rgb565::from(Rgb888::new(0x00, 0x87, 0x61)),
+        }
+    }
+}
+
+impl Default for DisplayPalette {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
-    Item1,
-    Item2,
-    Item3,
+    Payloads,
     System,
     Logs,
 }
@@ -93,10 +119,17 @@ impl Layout {
     fn compute(screen: Size, cfg: &DisplayConfig, menu_open: bool) -> Self {
         let screen_w = screen.width;
         let screen_h = screen.height;
+        let content_pad = if menu_open { cfg.content_padding } else { 0 };
 
         let menu_w = if menu_open { cfg.menu_width } else { 0 };
         let menu_rect = Rectangle::new(Point::new(0, 0), Size::new(menu_w, screen_h));
-        let menu_clear_w = menu_w.saturating_add(cfg.gutter).saturating_add(cfg.divider_width);
+        let menu_clear_w = if menu_open {
+            menu_w
+                .saturating_add(cfg.gutter)
+                .saturating_add(cfg.divider_width)
+        } else {
+            0
+        };
         let menu_clear_rect = Rectangle::new(Point::new(0, 0), Size::new(menu_clear_w, screen_h));
 
         let divider_rect = if menu_open {
@@ -110,13 +143,13 @@ impl Layout {
         };
 
         let content_x = if menu_open {
-            (menu_w + cfg.gutter + cfg.divider_width) as i32 + cfg.content_padding
+            (menu_w + cfg.gutter + cfg.divider_width) as i32 + content_pad
         } else {
-            cfg.content_padding
+            content_pad
         };
         let content_w = screen_w
             .saturating_sub(content_x as u32)
-            .saturating_sub(cfg.content_padding as u32);
+            .saturating_sub(content_pad as u32);
         let content_rect =
             Rectangle::new(Point::new(content_x, 0), Size::new(content_w, screen_h));
 
@@ -138,17 +171,20 @@ pub struct DisplayConfig {
     pub content_padding: i32,
     pub header_bg: Rgb565,
     pub header_text: Rgb565,
+    pub palette: DisplayPalette,
 }
 
 impl Default for DisplayConfig {
     fn default() -> Self {
+        let palette = DisplayPalette::default();
         Self {
             menu_width: 100,
             gutter: 4,
             divider_width: 2,
             content_padding: 10,
-            header_bg: Rgb565::from(Rgb888::new(54, 130, 127)),
-            header_text: Rgb565::BLACK,
+            header_bg: palette.teal,
+            header_text: palette.white,
+            palette,
         }
     }
 }
@@ -258,10 +294,8 @@ fn flash_status_line(total: usize, free: usize) -> String<48> {
     line
 }
 
-const MENU_ITEMS: [(Page, &str); 5] = [
-    (Page::Item1, "Item 1"),
-    (Page::Item2, "Item 2"),
-    (Page::Item3, "Item 3"),
+const MENU_ITEMS: [(Page, &str); 3] = [
+    (Page::Payloads, "Payloads"),
     (Page::System, "System"),
     (Page::Logs, "Logs"),
 ];
@@ -377,7 +411,7 @@ fn menu_page(idx: usize) -> Page {
 fn default_menu_index() -> usize {
     MENU_ITEMS
         .iter()
-        .position(|(page, _)| matches!(page, Page::System))
+        .position(|(page, _)| matches!(page, Page::Payloads))
         .unwrap_or(0)
 }
 
@@ -405,10 +439,11 @@ fn draw_menu_item(
     label: &str,
     selected: bool,
     menu_bg: Rgb565,
+    palette: &DisplayPalette,
 ) {
     let y = base_y + (idx as i32 * item_h);
-    let sel_bg = if selected { Rgb565::WHITE } else { menu_bg };
-    let sel_fg = if selected { Rgb565::BLACK } else { Rgb565::WHITE };
+    let sel_bg = if selected { palette.white } else { menu_bg };
+    let sel_fg = if selected { palette.black } else { palette.white };
     let _ = Rectangle::new(
         Point::new(menu_x + 2, y - 9),
         Size::new(menu_w.saturating_sub(4), item_h as u32),
@@ -424,6 +459,7 @@ fn draw_menu_item(
 }
 
 struct PageState {
+    payloads: PayloadsPageState,
     system: SystemPageState,
     logs: LogsPageState,
 }
@@ -431,12 +467,14 @@ struct PageState {
 impl PageState {
     fn new() -> Self {
         Self {
+            payloads: PayloadsPageState::new(),
             system: SystemPageState::new(),
             logs: LogsPageState::new(),
         }
     }
 
     fn reset(&mut self) {
+        self.payloads.reset();
         self.system.reset();
         self.logs.reset();
     }
@@ -538,8 +576,8 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
     let mut page_state = PageState::new();
     let mut menu_selected: usize = default_menu_index();
     let mut prev_menu_selected = usize::MAX;
-    let mut menu_open = true;
-    let mut prev_menu_open = true;
+    let mut menu_open = false;
+    let mut prev_menu_open = false;
     let mut nav_block = false;
     let mut ticker = Ticker::every(Duration::from_millis(50));
     let mut display_state_logged = false;
@@ -547,6 +585,7 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
     let mut prev_page = menu_page(menu_selected);
     let mut last_layout: Option<Layout> = None;
     let config = DisplayConfig::default();
+    let palette = config.palette;
     let start_instant = Instant::now();
     let mut last_uptime_secs: u64 = 0;
     let flash_total = crate::device_config::FLASH_CAPACITY;
@@ -602,7 +641,8 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
             }
         }
 
-        if y_pressed && !prev_y {
+        let y_released = !y_pressed && prev_y;
+        if y_released && !matches!(menu_page(menu_selected), Page::Payloads) {
             color_idx = (color_idx + 1) % LED_COLORS.len();
             log::info!("Y press -> LED color {}", LED_COLORS[color_idx].name);
         }
@@ -633,6 +673,9 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
                 page_state.logs.last_gen
             };
             let log_changed = matches!(page, Page::Logs) && log_gen != page_state.logs.last_gen;
+            let a_released = !a_pressed && prev_a;
+            let b_released = !b_pressed && prev_b;
+            let x_released = !x_pressed && prev_x;
             let mut dirty = Dirty::default();
             if !bg_drawn {
                 dirty = Dirty {
@@ -665,8 +708,41 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
                     last_uptime_secs = uptime_secs;
                 }
             }
+            let mut payload_dirty = false;
+            if matches!(page, Page::Payloads)
+                && y_released
+                && !menu_open
+                && !nav_block
+                && !nav_block_cleared
+            {
+                payload_dirty |= page_state.payloads.toggle_details();
+            }
+            if matches!(page, Page::Payloads)
+                && !nav_block
+                && !nav_block_cleared
+                && !page_state.payloads.details_open
+            {
+                if !menu_open && a_released {
+                    payload_dirty |= page_state.payloads.select_prev();
+                }
+                if !menu_open && b_released {
+                    payload_dirty |= page_state.payloads.select_next();
+                }
+                if x_released {
+                    payload_dirty |= page_state.payloads.run_selected(&palette, palette.black);
+                }
+            }
+            if matches!(page, Page::Payloads) {
+                if page_state.payloads.tick(&palette, palette.black) {
+                    dirty.page = true;
+                }
+            }
+            if payload_dirty {
+                dirty.page = true;
+            }
             if dirty.any() {
-                let bg_color = Rgb565::BLACK;
+                let bg_color = palette.black;
+                let menu_bg = palette.black;
                 let layout = Layout::compute(disp.bounding_box().size, &config, menu_open);
                 let screen_h = layout.content_rect.size.height.max(layout.menu_rect.size.height);
                 let title_style = MonoTextStyleBuilder::new()
@@ -676,7 +752,7 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
                     .build();
                 let body_style = MonoTextStyleBuilder::new()
                     .font(&FONT_6X9)
-                    .text_color(Rgb565::WHITE)
+                    .text_color(palette.white)
                     .background_color(bg_color)
                     .build();
 
@@ -697,11 +773,11 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
                     if menu_open {
                         let _ = layout
                             .menu_clear_rect
-                            .into_styled(PrimitiveStyle::with_fill(bg_color))
+                            .into_styled(PrimitiveStyle::with_fill(menu_bg))
                             .draw(disp);
                         if let Some(divider) = layout.divider_rect {
                             let _ = divider
-                                .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                                .into_styled(PrimitiveStyle::with_fill(palette.white))
                                 .draw(disp);
                         }
                         let menu_base_y = 20;
@@ -716,14 +792,15 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
                                 idx,
                                 item,
                                 idx == menu_selected,
-                                bg_color,
+                                menu_bg,
+                                &palette,
                             );
                         }
                     }
                 } else if dirty.divider {
                     if let Some(divider) = layout.divider_rect {
                         let _ = divider
-                            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+                            .into_styled(PrimitiveStyle::with_fill(palette.white))
                             .draw(disp);
                     }
                 } else if menu_changed && menu_open && bg_drawn {
@@ -739,7 +816,8 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
                             prev_menu_selected,
                             MENU_ITEMS[prev_menu_selected].1,
                             false,
-                            bg_color,
+                            menu_bg,
+                            &palette,
                         );
                         draw_menu_item(
                             disp,
@@ -750,7 +828,8 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
                             menu_selected,
                             MENU_ITEMS[menu_selected].1,
                             true,
-                            bg_color,
+                            menu_bg,
+                            &palette,
                         );
                     }
                 }
@@ -846,19 +925,21 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
                             );
                         }
                     }
-                    Page::Item1 => {
+                    Page::Payloads => {
                         if dirty.page || dirty.content {
-                            page_item1::render(disp, line_x, y_pos, &title_style, &body_style);
-                        }
-                    }
-                    Page::Item2 => {
-                        if dirty.page || dirty.content {
-                            page_item2::render(disp, line_x, y_pos, &title_style, &body_style);
-                        }
-                    }
-                    Page::Item3 => {
-                        if dirty.page || dirty.content {
-                            page_item3::render(disp, line_x, y_pos, &title_style, &body_style);
+                            page_payloads::render(
+                                disp,
+                                line_x,
+                                y_pos,
+                                clear_w,
+                                layout.content_width,
+                                layout.content_rect.size.height,
+                                bg_color,
+                                &config,
+                                &title_style,
+                                &body_style,
+                                &mut page_state.payloads,
+                            );
                         }
                     }
                     Page::Logs => {

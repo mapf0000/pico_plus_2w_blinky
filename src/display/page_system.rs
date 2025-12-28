@@ -5,7 +5,7 @@ use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::Text;
 use heapless::String;
 
-use super::page_common::{build_text_line, update_line};
+use super::page_common::{build_text_line, update_line, TEXT_PAD};
 use super::DisplayConfig;
 
 pub struct SystemMetrics<'a> {
@@ -76,7 +76,11 @@ pub fn render(
     )
     .into_styled(PrimitiveStyle::with_fill(config.header_bg))
     .draw(disp);
-    let _ = Text::new("System / Pico Plus 2", Point::new(line_x, y_pos), *title_style)
+    let _ = Text::new(
+        "System / Pico Plus 2",
+        Point::new(line_x + TEXT_PAD, y_pos),
+        *title_style,
+    )
         .draw(disp);
 
     y_pos += 18;

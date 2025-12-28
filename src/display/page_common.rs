@@ -8,6 +8,8 @@ use embedded_graphics::text::Text;
 use embassy_time::Duration;
 use heapless::String;
 
+pub const TEXT_PAD: i32 = 6;
+
 pub fn build_text_line<const N: usize>(prefix: &str, value: &str) -> String<N> {
     let mut line: String<N> = String::new();
     let _ = write!(line, "{}{}", prefix, value);
@@ -29,23 +31,10 @@ pub fn update_line<const N: usize>(
         let _ = Rectangle::new(Point::new(x, y - 11), Size::new(w, h))
             .into_styled(PrimitiveStyle::with_fill(bg))
             .draw(disp);
-        let _ = Text::new(text, Point::new(x, y), *style).draw(disp);
+        let _ = Text::new(text, Point::new(x + TEXT_PAD, y), *style).draw(disp);
         prev.clear();
         let _ = prev.push_str(text);
     }
-}
-
-pub fn draw_placeholder_page(
-    disp: &mut impl DrawTarget<Color = Rgb565>,
-    x: i32,
-    y: i32,
-    title: &str,
-    body: &str,
-    title_style: &MonoTextStyle<Rgb565>,
-    body_style: &MonoTextStyle<Rgb565>,
-) {
-    let _ = Text::new(title, Point::new(x, y), *title_style).draw(disp);
-    let _ = Text::new(body, Point::new(x, y + 18), *body_style).draw(disp);
 }
 
 pub fn format_hms(duration: Duration) -> String<20> {

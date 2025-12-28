@@ -7,7 +7,7 @@ use heapless::{String, Vec};
 
 use crate::log_buffer;
 
-use super::page_common::update_line;
+use super::page_common::{update_line, TEXT_PAD};
 use super::DisplayConfig;
 
 pub struct LogsPageState {
@@ -55,7 +55,7 @@ pub fn render(
     )
     .into_styled(PrimitiveStyle::with_fill(config.header_bg))
     .draw(disp);
-    let _ = Text::new("Logs", Point::new(line_x, y_pos), *title_style).draw(disp);
+    let _ = Text::new("Logs", Point::new(line_x + TEXT_PAD, y_pos), *title_style).draw(disp);
     y_pos += 18;
 
     let line_h: i32 = 12;

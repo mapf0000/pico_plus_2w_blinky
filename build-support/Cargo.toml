@@ -7,3 +7,6 @@ edition = "2024"
 anyhow = "1"
 which  = "8.0.0"
 blake3 = "1"
+dsl-core = { path = "../dsl/dsl-core" }
+builtin-scripts = { path = "../builtin-scripts" }
+bytecode-constants = { path = "../bytecode-constants" }
