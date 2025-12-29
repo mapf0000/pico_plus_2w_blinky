@@ -1,0 +1,16 @@
+[package]
+name = "agentd"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+agent-proto = { path = "../../crates/agent-proto" }
+clap = { version = "4.5", features = ["derive"] }
+gethostname = "0.4"
+serialport = { version = "4.3", features = ["usbportinfo-interface"] }
+thiserror = "1"
+tokio = { version = "1.37", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio-serial = "5.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

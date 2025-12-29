@@ -4,8 +4,10 @@ use picoserve::futures::Either;
 
 use crate::host::{self, HostOs};
 use crate::http::util::{escape_json_str, percent_decode_str};
+use crate::usb::agent::{AgentCommand, AGENT_CHAN};
 use crate::usb::hid::{HID_CHAN, HidCommand, MAX_BYTECODE, USB_READY};
 use crate::usb::usb_supervisor;
+use agent_proto::MAX_PAYLOAD;
 use heapless::Vec;
 
 pub(crate) async fn ws_handler(
@@ -162,6 +164,19 @@ async fn handle_command<W: embedded_io_async::Write>(
                 Err(_) => tx.send_text("{\"error\":\"busy\"}").await,
             },
             Err(_) => tx.send_text("{\"error\":\"bad bytecode\"}").await,
+        }
+    } else if let Some(rest) = cmd.strip_prefix("HOST_EXEC ") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return tx.send_text("{\"error\":\"empty command\"}").await;
+        }
+        let mut command: Vec<u8, { MAX_PAYLOAD }> = Vec::new();
+        if command.extend_from_slice(rest.as_bytes()).is_err() {
+            return tx.send_text("{\"error\":\"command too long\"}").await;
+        }
+        match AGENT_CHAN.try_send(AgentCommand::Execute { command }) {
+            Ok(()) => tx.send_text("{\"ok\":true,\"queued\":true}").await,
+            Err(_) => tx.send_text("{\"error\":\"busy\"}").await,
         }
     } else {
         // Unknown command

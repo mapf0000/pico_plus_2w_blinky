@@ -1,7 +1,7 @@
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
-use embassy_futures::join::join3;
+use embassy_futures::join::join4;
 use embassy_futures::select::{Either, select};
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::peripherals::USB;
@@ -108,8 +108,9 @@ pub async fn usb_task(
         let mut msos_descriptor = [0u8; USB_DESC_BUF_LEN];
         let mut control_buf = [0u8; USB_CTRL_BUF_LEN];
 
-        // Class states (logger CDC + HID)
+        // Class states (logger CDC + agent CDC + HID)
         let mut log_cdc_state = UsbCdcState::new();
+        let mut agent_cdc_state = UsbCdcState::new();
         let mut hid_state = UsbHidState::new();
 
         // Build USB device + classes
@@ -126,6 +127,13 @@ pub async fn usb_task(
         let logger_class = UsbCdcAcmClass::new(
             &mut builder,
             &mut log_cdc_state,
+            embassy_usb_logger::MAX_PACKET_SIZE as u16,
+        );
+
+        // CDC-ACM class used by the host agent protocol
+        let agent_class = UsbCdcAcmClass::new(
+            &mut builder,
+            &mut agent_cdc_state,
             embassy_usb_logger::MAX_PACKET_SIZE as u16,
         );
 
@@ -151,11 +159,12 @@ pub async fn usb_task(
             usb_log_style
         );
         let hid_fut = crate::usb::hid::run_hid(hid_writer, run_mac_assistant);
+        let agent_fut = crate::usb::agent::run_agent(agent_class);
 
-        // Run device, logger and HID concurrently, but exit early on cancel.
-        let trio = join3(usb_fut, log_fut, hid_fut);
+        // Run device, logger, HID and agent concurrently, but exit early on cancel.
+        let quartet = join4(usb_fut, log_fut, hid_fut, agent_fut);
         let mut detach_delay_ms: Option<u64> = None;
-        match select(cancel.wait(), trio).await {
+        match select(cancel.wait(), quartet).await {
             Either::First(delay) => {
                 if delay > 0 {
                     log::info!("usb: cancel received; delaying detach by {} ms", delay);
@@ -165,7 +174,7 @@ pub async fn usb_task(
                 }
             }
             Either::Second(_) => {
-                log::warn!("usb: unexpected completion of trio");
+                log::warn!("usb: unexpected completion of USB tasks");
             }
         }
 

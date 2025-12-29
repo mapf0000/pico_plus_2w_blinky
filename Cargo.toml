@@ -69,6 +69,7 @@ leasehund = { version = "0.2", optional = true }
 picoserve = { version = "0.17.1", features = ["embassy", "ws"] }
 firmware-exec = { path = "dsl/firmware-exec" }
 bytecode-constants = { path = "bytecode-constants" }
+agent-proto = { path = "crates/agent-proto" }
 
 
 [features]
@@ -97,6 +98,8 @@ members = [
   "build-support",
   "bytecode-constants",
   "builtin-scripts",
+  "crates/agent-proto",
+  "tools/agentd",
   #"dsl",
 ]
 

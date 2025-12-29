@@ -40,6 +40,18 @@ The build is wired so a single `cargo run --release` builds both parts, flashes 
   - `build-support/src/lib.rs` orchestrates linker script setup and the Trunk pipeline
 - Custom runner: `scripts/pico-run`
 
+## Host Agent (macOS)
+- Build (use your host target, e.g. `aarch64-apple-darwin`):
+  - `cargo build -p agentd --target aarch64-apple-darwin`
+- Run (VID/PID auto-discovery):
+  - `./target/aarch64-apple-darwin/debug/agentd vid=cafe pid=403f`
+- Run (manual port):
+  - `./target/aarch64-apple-darwin/debug/agentd --port /dev/cu.usbmodem*`
+- Notes:
+  - The agent speaks TLV over a dedicated USB CDC interface and responds to `RequestAgentStatus`.
+  - Command execution can be triggered via the device WebSocket with `HOST_EXEC <cmd>`.
+  - Mic data (if enabled) is appended to `mic.pcm` in the agent working directory.
+
 ## Build: One‑shot
 - Flash + run with logs:
   - `cargo run --release`
