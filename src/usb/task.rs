@@ -1,7 +1,7 @@
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
-use embassy_futures::join::join3;
+use embassy_futures::join::join4;
 use embassy_futures::select::{Either, select};
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::peripherals::USB;
@@ -19,8 +19,8 @@ use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 // ===== USB-local constants =====
 
 const USB_CFG_MAX_POWER_MA: u16 = 100; // UsbConfig::max_power expects u16 (mA)
-const USB_CTRL_BUF_LEN: usize = 64;
-const USB_DESC_BUF_LEN: usize = 256;
+const USB_CTRL_BUF_LEN: usize = 128;
+const USB_DESC_BUF_LEN: usize = 512;
 const USB_MAX_PACKET_SIZE_0: u8 = 64;
 const HID_POLL_MS: u8 = 10;
 const USB_LOGGER_BUF: usize = 1024;
@@ -96,6 +96,7 @@ pub async fn usb_task(
 
         crate::usb::usb_supervisor::notify_started();
         crate::usb::hid::USB_READY.store(false, Ordering::SeqCst);
+        crate::usb::ctrl::CTRL_READY.store(false, Ordering::SeqCst);
 
         let mut rng = RoscRng;
         let cfg = build_usb_config(&mut rng).await;
@@ -108,8 +109,9 @@ pub async fn usb_task(
         let mut msos_descriptor = [0u8; USB_DESC_BUF_LEN];
         let mut control_buf = [0u8; USB_CTRL_BUF_LEN];
 
-        // Class states (logger CDC + HID)
+        // Class states (logger CDC + control CDC + HID)
         let mut log_cdc_state = UsbCdcState::new();
+        let mut ctrl_cdc_state = UsbCdcState::new();
         let mut hid_state = UsbHidState::new();
 
         // Build USB device + classes
@@ -126,6 +128,11 @@ pub async fn usb_task(
         let logger_class = UsbCdcAcmClass::new(
             &mut builder,
             &mut log_cdc_state,
+            embassy_usb_logger::MAX_PACKET_SIZE as u16,
+        );
+        let ctrl_class = UsbCdcAcmClass::new(
+            &mut builder,
+            &mut ctrl_cdc_state,
             embassy_usb_logger::MAX_PACKET_SIZE as u16,
         );
 
@@ -151,11 +158,12 @@ pub async fn usb_task(
             usb_log_style
         );
         let hid_fut = crate::usb::hid::run_hid(hid_writer, run_mac_assistant);
+        let ctrl_fut = crate::usb::ctrl::run_ctrl(ctrl_class);
 
-        // Run device, logger and HID concurrently, but exit early on cancel.
-        let trio = join3(usb_fut, log_fut, hid_fut);
+        // Run device, logger, HID, and control CDC concurrently, but exit early on cancel.
+        let quartet = join4(usb_fut, log_fut, hid_fut, ctrl_fut);
         let mut detach_delay_ms: Option<u64> = None;
-        match select(cancel.wait(), trio).await {
+        match select(cancel.wait(), quartet).await {
             Either::First(delay) => {
                 if delay > 0 {
                     log::info!("usb: cancel received; delaying detach by {} ms", delay);
@@ -174,6 +182,7 @@ pub async fn usb_task(
         }
         usb.disable().await;
         crate::usb::hid::USB_READY.store(false, Ordering::SeqCst);
+        crate::usb::ctrl::CTRL_READY.store(false, Ordering::SeqCst);
         crate::usb::usb_supervisor::notify_stopped();
     }
 }

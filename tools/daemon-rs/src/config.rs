@@ -1,0 +1,125 @@
+use anyhow::{Context, Result};
+use clap::Parser;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub vid: Option<u16>,
+    pub pid: Option<u16>,
+    pub port: Option<String>,
+    pub cwd: Option<PathBuf>,
+    pub probe_timeout_ms: u64,
+    pub debug_log: Option<PathBuf>,
+    pub raw: bool,
+    pub debug: bool,
+}
+
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+struct Args {
+    #[arg(long)]
+    vid: Option<String>,
+    #[arg(long)]
+    pid: Option<String>,
+    #[arg(long)]
+    port: Option<String>,
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    #[arg(long, default_value_t = 400)]
+    probe_timeout_ms: u64,
+    #[arg(long)]
+    debug_log: Option<PathBuf>,
+    #[arg(long)]
+    raw: bool,
+    #[arg(long)]
+    debug: bool,
+}
+
+impl Config {
+    pub fn from_env() -> Result<Self> {
+        let raw_args: Vec<String> = std::env::args().collect();
+        let normalized = normalize_args(raw_args);
+        let args = Args::parse_from(normalized);
+
+        let vid = match args.vid.as_deref() {
+            Some(value) => Some(parse_u16(value).with_context(|| format!("invalid vid: {value}"))?),
+            None => None,
+        };
+        let pid = match args.pid.as_deref() {
+            Some(value) => Some(parse_u16(value).with_context(|| format!("invalid pid: {value}"))?),
+            None => None,
+        };
+
+        Ok(Self {
+            vid,
+            pid,
+            port: args.port,
+            cwd: args.cwd,
+            probe_timeout_ms: args.probe_timeout_ms,
+            debug_log: args.debug_log,
+            raw: args.raw,
+            debug: args.debug,
+        })
+    }
+}
+
+pub fn init_logging(debug: bool) -> Result<()> {
+    let level = if debug { "debug" } else { "info" };
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+    Ok(())
+}
+
+fn normalize_args(args: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::with_capacity(args.len());
+    for arg in args {
+        if let Some((key, value)) = arg.split_once('=') {
+            if matches!(key, "vid" | "pid" | "cwd" | "probe_timeout_ms" | "debug_log") {
+                normalized.push(format!("--{key}"));
+                normalized.push(value.to_string());
+                continue;
+            }
+        }
+        normalized.push(arg);
+    }
+    normalized
+}
+
+fn parse_u16(input: &str) -> Result<u16> {
+    let value = input.trim();
+    let (radix, digits) = if let Some(stripped) = value.strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        (16, stripped)
+    } else if value
+        .chars()
+        .any(|c| matches!(c, 'a'..='f' | 'A'..='F'))
+    {
+        (16, value)
+    } else {
+        (10, value)
+    };
+
+    Ok(u16::from_str_radix(digits, radix)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_u16;
+
+    #[test]
+    fn parse_hex_prefix() {
+        assert_eq!(parse_u16("0x1234").unwrap(), 0x1234);
+    }
+
+    #[test]
+    fn parse_hex_without_prefix() {
+        assert_eq!(parse_u16("abcd").unwrap(), 0xABCD);
+    }
+
+    #[test]
+    fn parse_decimal() {
+        assert_eq!(parse_u16("4660").unwrap(), 4660);
+    }
+}

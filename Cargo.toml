@@ -97,6 +97,7 @@ members = [
   "build-support",
   "bytecode-constants",
   "builtin-scripts",
+  "tools/daemon-rs",
   #"dsl",
 ]
 

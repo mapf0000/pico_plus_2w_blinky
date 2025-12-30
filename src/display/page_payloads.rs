@@ -330,7 +330,7 @@ pub fn render(
 
     let line_h: i32 = 16;
     let status_text = if state.status.is_empty() {
-        "Press X to run."
+        "A/B: Up/Down, X: Run, A+X: Menu"
     } else {
         state.status.as_str()
     };

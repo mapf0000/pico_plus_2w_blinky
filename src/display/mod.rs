@@ -37,11 +37,13 @@ use static_cell::StaticCell;
 use crate::log_buffer;
 
 mod page_common;
+mod page_daemon;
 mod page_payloads;
 mod page_logs;
 mod page_system;
 
 use page_common::{build_text_line, format_hms};
+use page_daemon::DaemonPageState;
 use page_payloads::PayloadsPageState;
 use page_logs::LogsPageState;
 use page_system::SystemPageState;
@@ -102,6 +104,7 @@ impl Default for DisplayPalette {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Payloads,
+    Daemon,
     System,
     Logs,
 }
@@ -294,8 +297,9 @@ fn flash_status_line(total: usize, free: usize) -> String<48> {
     line
 }
 
-const MENU_ITEMS: [(Page, &str); 3] = [
+const MENU_ITEMS: [(Page, &str); 4] = [
     (Page::Payloads, "Payloads"),
+    (Page::Daemon, "Host Agent"),
     (Page::System, "System"),
     (Page::Logs, "Logs"),
 ];
@@ -460,6 +464,7 @@ fn draw_menu_item(
 
 struct PageState {
     payloads: PayloadsPageState,
+    daemon: DaemonPageState,
     system: SystemPageState,
     logs: LogsPageState,
 }
@@ -468,6 +473,7 @@ impl PageState {
     fn new() -> Self {
         Self {
             payloads: PayloadsPageState::new(),
+            daemon: DaemonPageState::new(),
             system: SystemPageState::new(),
             logs: LogsPageState::new(),
         }
@@ -475,6 +481,7 @@ impl PageState {
 
     fn reset(&mut self) {
         self.payloads.reset();
+        self.daemon.reset();
         self.system.reset();
         self.logs.reset();
     }
@@ -601,19 +608,6 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
         let x_pressed = debounce_button(btn_x.is_low(), &mut x_db, &mut x_db_count);
         let y_pressed = debounce_button(btn_y.is_low(), &mut y_db, &mut y_db_count);
 
-        if a_pressed != prev_a {
-            log::info!("button A state -> {}", if a_pressed { "LOW" } else { "HIGH" });
-        }
-        if b_pressed != prev_b {
-            log::info!("button B state -> {}", if b_pressed { "LOW" } else { "HIGH" });
-        }
-        if x_pressed != prev_x {
-            log::info!("button X state -> {}", if x_pressed { "LOW" } else { "HIGH" });
-        }
-        if y_pressed != prev_y {
-            log::info!("button Y state -> {}", if y_pressed { "LOW" } else { "HIGH" });
-        }
-
         let nav_block_cleared = nav_block && !a_pressed && !b_pressed;
         if nav_block_cleared {
             nav_block = false;
@@ -622,7 +616,6 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
         let mut menu_toggled = false;
         if a_pressed && x_pressed && !prev_x {
             menu_open = !menu_open;
-            log::info!("menu {}", if menu_open { "open" } else { "closed" });
             menu_toggled = true;
             nav_block = true;
         }
@@ -738,6 +731,25 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
                 }
             }
             if payload_dirty {
+                dirty.page = true;
+            }
+            let mut daemon_dirty = false;
+            if matches!(page, Page::Daemon)
+                && !nav_block
+                && !nav_block_cleared
+                && !menu_open
+            {
+                if a_released {
+                    daemon_dirty |= page_state.daemon.select_prev();
+                }
+                if b_released {
+                    daemon_dirty |= page_state.daemon.select_next();
+                }
+                if x_released {
+                    daemon_dirty |= page_state.daemon.run_selected(&palette, palette.black);
+                }
+            }
+            if daemon_dirty {
                 dirty.page = true;
             }
             if dirty.any() {
@@ -939,6 +951,23 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
                                 &title_style,
                                 &body_style,
                                 &mut page_state.payloads,
+                            );
+                        }
+                    }
+                    Page::Daemon => {
+                        if dirty.page || dirty.content {
+                            page_daemon::render(
+                                disp,
+                                line_x,
+                                y_pos,
+                                clear_w,
+                                layout.content_width,
+                                layout.content_rect.size.height,
+                                bg_color,
+                                &config,
+                                &title_style,
+                                &body_style,
+                                &mut page_state.daemon,
                             );
                         }
                     }
