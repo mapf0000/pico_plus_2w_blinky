@@ -8,6 +8,7 @@ use heapless::{String, Vec};
 use crate::log_buffer;
 
 use super::page_common::{update_line, TEXT_PAD};
+use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
 use super::DisplayConfig;
 
 pub struct LogsPageState {
@@ -25,6 +26,45 @@ impl LogsPageState {
 
     pub fn reset(&mut self) {
         self.prev_lines.clear();
+    }
+}
+
+impl Page for LogsPageState {
+    fn on_reset(&mut self) {
+        LogsPageState::reset(self);
+    }
+
+    fn handle_input(&mut self, _input: &PageInput, _ctx: &PageContext) -> bool {
+        false
+    }
+
+    fn render<D: DrawTarget<Color = Rgb565>>(
+        &mut self,
+        args: PageRenderArgs<'_, D>,
+        data: PageRenderData<'_>,
+    ) {
+        let log_gen = match data {
+            PageRenderData::Logs { log_gen } => log_gen,
+            _ => {
+                debug_assert!(false, "logs page render missing generation");
+                return;
+            }
+        };
+
+        render(
+            args.disp,
+            args.line_x,
+            args.y_pos,
+            args.clear_w,
+            args.content_width,
+            args.content_height,
+            args.config,
+            log_gen,
+            args.bg_color,
+            args.title_style,
+            args.body_style,
+            self,
+        );
     }
 }
 

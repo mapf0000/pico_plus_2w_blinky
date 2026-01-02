@@ -11,6 +11,7 @@ use heapless::{String, Vec};
 use crate::usb::hid::{HID_CHAN, HidCommand, MAX_BYTECODE, USB_READY};
 
 use super::page_common::{update_line, TEXT_PAD};
+use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
 use super::{DisplayConfig, DisplayPalette};
 
 const EXEC_TICKS: u8 = 6;
@@ -199,6 +200,55 @@ impl PayloadsPageState {
                 false
             }
         }
+    }
+}
+
+impl Page for PayloadsPageState {
+    fn on_reset(&mut self) {
+        PayloadsPageState::reset(self);
+    }
+
+    fn handle_input(&mut self, input: &PageInput, ctx: &PageContext) -> bool {
+        let mut dirty = false;
+        if input.y_released && !input.menu_open && input.actions_allowed() {
+            dirty |= self.toggle_details();
+        }
+        if input.actions_allowed() && !self.details_open {
+            if !input.menu_open && input.a_released {
+                dirty |= self.select_prev();
+            }
+            if !input.menu_open && input.b_released {
+                dirty |= self.select_next();
+            }
+            if input.x_released {
+                dirty |= self.run_selected(ctx.palette, ctx.idle_bg);
+            }
+        }
+        dirty
+    }
+
+    fn on_tick(&mut self, ctx: &PageContext) -> bool {
+        self.tick(ctx.palette, ctx.idle_bg)
+    }
+
+    fn render<D: DrawTarget<Color = Rgb565>>(
+        &mut self,
+        args: PageRenderArgs<'_, D>,
+        _data: PageRenderData<'_>,
+    ) {
+        render(
+            args.disp,
+            args.line_x,
+            args.y_pos,
+            args.clear_w,
+            args.content_width,
+            args.content_height,
+            args.bg_color,
+            args.config,
+            args.title_style,
+            args.body_style,
+            self,
+        );
     }
 }
 

@@ -52,7 +52,7 @@ log = "0.4"
 embassy-sync = "0.7"
 embassy-futures = "0.1"
 heapless = "0.9"
-portable-atomic = { version = "1", features = ["critical-section"] }
+portable-atomic = { version = "1.13.0", features = ["critical-section"] }
 embedded-graphics = "0.8"
 embedded-hal-bus = { version = "0.3", default-features = false }
 embedded-hal = "1"

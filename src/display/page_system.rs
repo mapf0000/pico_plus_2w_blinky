@@ -6,6 +6,7 @@ use embedded_graphics::text::Text;
 use heapless::String;
 
 use super::page_common::{build_text_line, update_line, TEXT_PAD};
+use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
 use super::DisplayConfig;
 
 pub struct SystemMetrics<'a> {
@@ -52,6 +53,45 @@ impl SystemPageState {
         self.prev_stack_line.clear();
         self.prev_psram_line.clear();
         self.prev_flash_line.clear();
+    }
+}
+
+impl Page for SystemPageState {
+    fn on_reset(&mut self) {
+        SystemPageState::reset(self);
+    }
+
+    fn handle_input(&mut self, _input: &PageInput, _ctx: &PageContext) -> bool {
+        false
+    }
+
+    fn render<D: DrawTarget<Color = Rgb565>>(
+        &mut self,
+        args: PageRenderArgs<'_, D>,
+        data: PageRenderData<'_>,
+    ) {
+        let (ap_ssid, metrics) = match data {
+            PageRenderData::System { ap_ssid, metrics } => (ap_ssid, metrics),
+            _ => {
+                debug_assert!(false, "system page render missing metrics");
+                return;
+            }
+        };
+
+        render(
+            args.disp,
+            args.line_x,
+            args.y_pos,
+            args.content_width,
+            args.clear_w,
+            args.bg_color,
+            args.config,
+            ap_ssid,
+            metrics,
+            args.title_style,
+            args.body_style,
+            self,
+        );
     }
 }
 
