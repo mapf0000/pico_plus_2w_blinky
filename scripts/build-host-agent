@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+target="${1:-aarch64-apple-darwin}"
+bin="host-agent"
+if [[ "$target" == *windows* ]]; then
+  bin="host-agent.exe"
+fi
+
+artifact_dir="tools/host-agent/artifacts/${target}"
+
+cargo build -p host-agent --release --target "$target"
+mkdir -p "$artifact_dir"
+cp "target/${target}/release/${bin}" "${artifact_dir}/${bin}"
+
+echo "host-agent copied to ${artifact_dir}/${bin}"

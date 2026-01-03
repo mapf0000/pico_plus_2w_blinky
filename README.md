@@ -55,6 +55,21 @@ The build is wired so a single `cargo run --release` builds both parts, flashes 
 - Frontend only (release build):
   - `cd frontend && trunk build --release` (outputs to `frontend/dist/`)
 
+## Host agent USB mass storage image
+- Build the macOS host agent:
+  - `cargo build -p host-agent --release --target aarch64-apple-darwin`
+  - Or run `scripts/build-host-agent` (copies into the artifacts folder).
+- Place binaries under `tools/host-agent/artifacts/<target>/`:
+  - macOS: `tools/host-agent/artifacts/aarch64-apple-darwin/host-agent`
+  - Windows (optional): `tools/host-agent/artifacts/x86_64-pc-windows-msvc/host-agent.exe`
+  - Linux (optional): `tools/host-agent/artifacts/x86_64-unknown-linux-gnu/host-agent`
+- Firmware builds embed a read-only 8 MiB FAT16 image at `OUT_DIR/host-agent.img`.
+- The device exposes a USB drive (label `PICO_AGENT` by default) with:
+  - `/MAC/HOSTAGNT`
+  - `/WIN/HOSTAGNT.EXE` (if provided)
+  - `/LINUX/HOSTAGNT` (if provided)
+- Set `PICO_MSC_LABEL` to override the volume label (11 ASCII chars max).
+
 ## Testing
 - Host-only unit tests (skip embedded dependencies):
   - `cargo test --no-default-features --features "" --target aarch64-apple-darwin`

@@ -23,4 +23,5 @@ runner = "wasm-bindgen-test-runner"
 [env]
 # defmt log level for firmware
 DEFMT_LOG = "debug"
-EMBASSY_USB_MAX_INTERFACE_COUNT = "6"
+EMBASSY_USB_MAX_INTERFACE_COUNT = "8"
+EMBASSY_USB_MAX_HANDLER_COUNT = "6"

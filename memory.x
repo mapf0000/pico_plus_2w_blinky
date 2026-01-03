@@ -5,9 +5,13 @@ MEMORY {
      * (Board also includes 8 MiB PSRAM that firmware uses when the
      * `psram` feature is enabled.)
      */
-    /* Reserve 8 KiB at the end of flash for persistent config */
-    FLASH : ORIGIN = 0x10000000, LENGTH = 16376K
-    PERSIST : ORIGIN = 0x10000000 + 16376K, LENGTH = 8K
+    /*
+     * Reserve 8 MiB for the read-only USB MSC image and 8 KiB at the end of
+     * flash for persistent config.
+     */
+    FLASH : ORIGIN = 0x10000000, LENGTH = 8184K
+    MSC : ORIGIN = 0x10000000 + 8184K, LENGTH = 8192K
+    PERSIST : ORIGIN = 0x10000000 + 8184K + 8192K, LENGTH = 8K
     /*
      * RAM consists of 8 banks, SRAM0-SRAM7, with a striped mapping.
      * This is usually good for performance, as it distributes load on
@@ -62,6 +66,19 @@ SECTIONS {
 } INSERT AFTER .text;
 
 SECTIONS {
+    /* ### USB MSC image
+     *
+     * Read-only FAT image exposed over USB mass storage.
+     */
+    .msc_image : ALIGN(4)
+    {
+        __msc_image_start = .;
+        KEEP(*(.msc_image));
+        __msc_image_end = .;
+    } > MSC
+} INSERT AFTER .text;
+
+SECTIONS {
     /* ### Boot ROM extra info
      *
      * Goes after everything in our program, so it can contain a signature.
@@ -76,5 +93,7 @@ SECTIONS {
 
 PROVIDE(start_to_end = __end_block_addr - __start_block_addr);
 PROVIDE(end_to_start = __start_block_addr - __end_block_addr);
+PROVIDE(__msc_start = ORIGIN(MSC));
+PROVIDE(__msc_end = ORIGIN(MSC) + LENGTH(MSC));
 PROVIDE(__persist_start = ORIGIN(PERSIST));
 PROVIDE(__persist_end = ORIGIN(PERSIST) + LENGTH(PERSIST));

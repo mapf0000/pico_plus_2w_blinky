@@ -1,13 +1,13 @@
-# Rust Agent Implementation Plan
+# Rust Host-Agent Implementation Plan
 
-This plan targets a Rust-based host daemon that replaces the current .NET serial agent. It will run on a victim/host machine, talk to the USB Army Knife device over the USB CDC serial interface, and provide the same features: agent status polling, remote command execution, VNC screen streaming, and debug log capture. The goal is wire‑compatible behavior with improved performance, robustness, and maintainability. This document is intentionally self‑contained so it can be copied into a separate repo without access to the original source.
+This plan targets a Rust-based host agent that replaces the current .NET serial agent. It will run on a host machine, talk to the USB Army Knife device over the USB CDC serial interface, and provide the same features: agent status polling, remote command execution, VNC screen streaming, and debug log capture. The goal is wire-compatible behavior with improved performance, robustness, and maintainability. This document is intentionally self-contained so it can be copied into a separate repo without access to the original source.
 
 ## Goal
-- Implement a Rust replacement for the Windows .NET serial agent that speaks the same USB CDC TLV protocol and feature set (command execution, VNC proxy, debug logs, agent status).
+- Implement a Rust replacement for the .NET serial agent that speaks the same USB CDC TLV protocol and feature set (command execution, VNC proxy, debug logs, agent status).
 
 ## Scope and assumptions
-- Scope is host/daemon only; the device firmware and USB mode switching remain unchanged.
-- Windows-first implementation to match current behavior (`cmd.exe`, VID/PID discovery).
+- Scope is host-agent only; the device firmware and USB mode switching remain unchanged.
+- macOS-first implementation (`--target aarch64-apple-darwin`) with a clear platform abstraction for later Windows/Linux support.
 - Wire compatibility must match the TLV framing and command IDs below.
 - Serial transport is USB CDC ACM at 115200/8N1.
   - The device only listens on serial when it is in USB Serial mode.
@@ -41,39 +41,40 @@ This plan targets a Rust-based host daemon that replaces the current .NET serial
 
 ## Required behavior (self-contained)
 - **Agent status**: device periodically sends `RequestAgentStatus`; agent responds with `AgentStatus` containing machine name and treats that as “connected.”
-- **Command execution**: on `Execute`, run `cmd.exe /c <command>`, capture stdout+stderr, cap to 8KB, send in 2KB `ExecuteResult` TLVs with pacing.
+- **Command execution**: on `Execute`, run `/bin/sh -lc <command>` on macOS, capture stdout+stderr, cap to 8KB, send in 2KB `ExecuteResult` TLVs with pacing. (Windows/Linux variants live behind a platform abstraction.)
 - **VNC proxy**: device’s web UI tunnels VNC over `WSCONNECT/WSDATA/WSDISCONNECT`; agent must run a local VNC server and bridge stream I/O to TLV frames via `WSDATARECV`.
 - **Debug logs**: device emits `DebugMsg` frames; agent prints/stores them.
 - **Mic capture**: when `MicPcmData` frames arrive, append payloads to `mic.pcm`.
-- **Delivery/automation context**: the agent binary is typically delivered on a USB mass-storage image and can be launched via HID/DuckyScript keystrokes (e.g., when the host is unlocked). The Rust agent should keep the same invocation style (`vid=`, `pid=`, optional `cwd=`) so existing scripts can launch it without changes.
+- **Delivery/automation context**: the agent binary is typically delivered on a USB mass-storage image and can be launched via HID/DuckyScript keystrokes (e.g., when the host is unlocked). The Rust host-agent should keep the same invocation style (`vid=`, `pid=`, optional `cwd=`) so existing scripts can launch it without changes.
 
-## Delivery considerations (TBD)
-- Decide how the Rust binary is packaged and launched (USB mass-storage image, HID automation, persistence strategy).
+## Delivery considerations
+- Package a read-only, 8 MiB USB mass-storage image with per-OS subfolders (start with macOS; add Windows/Linux later).
+- Launch via HID scripts that copy the correct binary locally and run it with `vid=`, `pid=`, optional `cwd=`.
 
 ## Proposed architecture
 - `core::tlv`: incremental parser and writer for the 1+4+N format, length validation, resync logic, and tests.
 - `transport::serial`: async serial read/write tasks, bounded outbound queue, reconnect loop.
-- `transport::discovery`: VID/PID matching using SetupAPI (fallback to WMI), optional `--port` override.
+- `transport::discovery`: macOS port discovery using IOKit/IORegistry (or serialport listing) with VID/PID matching, optional `--port` override. Keep a platform shim for Windows/Linux later.
 - `runtime`: state machine (Disconnected -> Connecting -> Ready), event routing, pacing control.
-- `handlers::exec`: `cmd.exe /c <command>`, cap output to 8KB, chunk to 2KB, schedule delays.
+- `handlers::exec`: `/bin/sh -lc <command>` on macOS, cap output to 8KB, chunk to 2KB, schedule delays.
 - `handlers::vnc`: VNC server + stream bridge that maps VNC I/O to `WSDATA` / `WSDATARECV`.
 - `handlers::mic`: append `MicPcmData` to `mic.pcm`, flushing in batches.
 - `cli`: parse `vid=`, `pid=`, optional `cwd=`, `--raw`, `--debug`, `--port`.
 
 ## Implementation plan
 1. **Project bootstrap**
-   - Create a new Rust binary crate under `tools/agent-rs` (or top-level `agent-rs`).
+   - Use the existing Rust binary crate under `tools/host-agent`.
    - Select async runtime (`tokio`) and crates: `tokio-serial`, `bytes`, `clap`, `thiserror`, `tracing`.
-   - Add Windows integration crate for device discovery (`windows` or `wmi`) and optional `serde` for WMI results.
+   - Add macOS discovery support (IOKit/IORegistry or serialport listing), and isolate platform-specific code for future Windows/Linux ports.
 2. **TLV codec**
    - Implement incremental decode over a `BytesMut` buffer with resync on invalid tag/length.
    - Implement `write_frame` with length checks and optional chunking helper.
    - Add unit tests for endianness, empty payloads, max length, and resync behavior.
 3. **Serial discovery and connection**
-   - Implement VID/PID matching via SetupAPI device enumeration (fallback to WMI).
-   - Add device-change notifications to avoid constant polling.
+   - Implement VID/PID matching via macOS IOKit/IORegistry (fallback to serialport listing).
+   - Add device-change notifications if available; otherwise use polling with backoff.
    - Retry loop with exponential backoff and cached last-known port.
-   - Optional manual override: `--port COMx` bypasses discovery.
+   - Optional manual override: `--port /dev/tty.*` bypasses discovery.
 4. **Command dispatcher**
    - Parse tags into an enum mirroring `HostCommand`.
    - Route frames to handlers via a registry; keep handler work off the read loop.
@@ -82,11 +83,11 @@ This plan targets a Rust-based host daemon that replaces the current .NET serial
    - On `DebugMsg` print to console/log.
    - Add `--raw` mode to print non-TLV data for debugging.
 6. **Execute command flow**
-   - On `Execute`, run `cmd.exe /c <command>`, capture stdout+stderr.
+   - On `Execute`, run `/bin/sh -lc <command>` on macOS, capture stdout+stderr.
    - Cap output to 8KB and send in 2KB `ExecuteResult` TLVs.
    - Implement pacing via token-bucket or adaptive delay based on write queue depth.
 7. **VNC bridging (phase 2, deferred)**
-   - Reference behavior (current repo): a no-auth VNC server runs locally, screen capture is DXGI-backed, and VNC I/O is tunneled over serial using `WSDATA` and `WSDATARECV`. Frames are JPEG-compressed at a low update rate to fit serial bandwidth.
+   - Reference behavior (current repo): a no-auth VNC server runs locally, screen capture is platform-specific, and VNC I/O is tunneled over serial using `WSDATA` and `WSDATARECV`. Frames are JPEG-compressed at a low update rate to fit serial bandwidth.
    - Implement a `TransportStream` equivalent:
      - `WSDATA` feeds bytes into a read queue for the VNC server.
      - VNC output is chunked into `WSDATARECV` frames (2KB chunks).
@@ -96,7 +97,7 @@ This plan targets a Rust-based host daemon that replaces the current .NET serial
 9. **CLI + packaging**
    - Accept `vid=`, `pid=`, and optional `cwd=` for parity with `Program.cs`.
    - Build instructions and usage examples in a README.
-   - Provide a “portable” build target and a sample invocation like: `agent-rs vid=cafe pid=403f`.
+   - Provide a macOS build target (`--target aarch64-apple-darwin`) and a sample invocation like: `host-agent vid=cafe pid=403f`.
 10. **Integration testing**
    - Unit tests: TLV encode/decode, chunking logic, max payload enforcement.
    - Property-based tests for TLV fuzz/resync.
@@ -107,11 +108,11 @@ This plan targets a Rust-based host daemon that replaces the current .NET serial
 
 ## Risks / open questions
 - VNC server availability in Rust: may need a custom RFB layer if crates are incomplete.
-- Device discovery: SetupAPI complexity vs WMI reliability on locked-down hosts.
+- Device discovery: macOS IOKit/IORegistry availability vs serialport listing reliability.
 - Throughput: serial bandwidth is low; pacing and backpressure need tuning to avoid timeouts.
 - Delivery: packaging and launch method for the agent binary on the target host.
 
 ## Deliverables
-- Rust agent binary with protocol parity.
+- Rust host-agent binary with protocol parity.
 - Minimal README + build steps.
 - Basic test coverage for TLV framing and chunking.

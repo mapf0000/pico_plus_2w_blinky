@@ -17,6 +17,17 @@ const OPEN_TERMINAL_DSL: &str = concat!(
     "modtap(\"LGUI+N\")\n",
 );
 
+const MACOS_HOST_AGENT_DSL: &str = concat!(
+    "modtap(\"LCTRL+SPACE\")\n",
+    "delay(200)\n",
+    "call open_terminal\n",
+    "delay(1200)\n",
+    "text(\"chmod +x /Volumes/PICO_AGENT/MAC/HOSTAGNT\")\n",
+    "tap(\"ENTER\")\n",
+    "text(\"/Volumes/PICO_AGENT/MAC/HOSTAGNT vid=0x1209 pid=0x0001\")\n",
+    "tap(\"ENTER\")\n",
+);
+
 const MAC_ASSISTANT_ONCE_DSL: &str = concat!(
     "delay(1200)\n",
     "tap(\"ENTER\")\n",
@@ -42,6 +53,12 @@ const BUILTIN_SCRIPTS: &[BuiltinScript] = &[
         name: "Open macOS Terminal",
         description: "Spotlight -> type 'Terminal' -> Enter -> New Window",
         dsl: OPEN_TERMINAL_DSL,
+    },
+    BuiltinScript {
+        id: "macos_host_agent",
+        name: "macOS: Launch host-agent (manual run)",
+        description: "Runs /Volumes/PICO_AGENT/MAC/HOSTAGNT with VID/PID (assumes US input source on macOS)",
+        dsl: MACOS_HOST_AGENT_DSL,
     },
     BuiltinScript {
         id: "assistant_once",

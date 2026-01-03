@@ -1,7 +1,7 @@
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
-use embassy_futures::join::join4;
+use embassy_futures::join::join5;
 use embassy_futures::select::{Either, select};
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::peripherals::USB;
@@ -20,7 +20,7 @@ use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 
 const USB_CFG_MAX_POWER_MA: u16 = 100; // UsbConfig::max_power expects u16 (mA)
 const USB_CTRL_BUF_LEN: usize = 128;
-const USB_DESC_BUF_LEN: usize = 512;
+const USB_DESC_BUF_LEN: usize = 1024;
 const USB_MAX_PACKET_SIZE_0: u8 = 64;
 const HID_POLL_MS: u8 = 10;
 const USB_LOGGER_BUF: usize = 1024;
@@ -109,10 +109,11 @@ pub async fn usb_task(
         let mut msos_descriptor = [0u8; USB_DESC_BUF_LEN];
         let mut control_buf = [0u8; USB_CTRL_BUF_LEN];
 
-        // Class states (logger CDC + control CDC + HID)
+        // Class states (logger CDC + control CDC + HID + MSC)
         let mut log_cdc_state = UsbCdcState::new();
         let mut ctrl_cdc_state = UsbCdcState::new();
         let mut hid_state = UsbHidState::new();
+        let mut msc_state = crate::usb::msc::State::new();
 
         // Build USB device + classes
         let mut builder = UsbBuilder::new(
@@ -146,6 +147,8 @@ pub async fn usb_task(
         let hid_writer: UsbHidWriter<'_, _, 8> =
             UsbHidWriter::new(&mut builder, &mut hid_state, hid_cfg);
 
+        let mut msc_class = crate::usb::msc::MscClass::new(&mut builder, &mut msc_state, 64);
+
         // Finalize device
         let mut usb = builder.build();
 
@@ -159,9 +162,10 @@ pub async fn usb_task(
         );
         let hid_fut = crate::usb::hid::run_hid(hid_writer, run_mac_assistant);
         let ctrl_fut = crate::usb::ctrl::run_ctrl(ctrl_class);
+        let msc_fut = msc_class.run(crate::usb::msc::image());
 
-        // Run device, logger, HID, and control CDC concurrently, but exit early on cancel.
-        let quartet = join4(usb_fut, log_fut, hid_fut, ctrl_fut);
+        // Run device, logger, HID, control CDC, and MSC concurrently, but exit early on cancel.
+        let quartet = join5(usb_fut, log_fut, hid_fut, ctrl_fut, msc_fut);
         let mut detach_delay_ms: Option<u64> = None;
         match select(cancel.wait(), quartet).await {
             Either::First(delay) => {
@@ -173,7 +177,7 @@ pub async fn usb_task(
                 }
             }
             Either::Second(_) => {
-                log::warn!("usb: unexpected completion of trio");
+                log::warn!("usb: unexpected completion of task group");
             }
         }
 
