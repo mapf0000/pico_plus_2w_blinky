@@ -24,7 +24,7 @@ Extend the DSL to improve expressiveness and developer experience while **preser
 
 - **Phase 1 – Syntax & Ergonomics (non-breaking)**: `repeat`, `let`, richer diagnostics/lints. Output remains KBD1 (TAP/DELAY/END only).
 - **Phase 2 – Bytecode & Executor (stateful input)**: Introduce `KEYDOWN`/`KEYUP` with KBD2 (or required feature flag). Firmware tracks pressed keys (6KRO), auto-release on END/error.
-- **Phase 3 – Future features (deferred)**: Optional layouts and parametric scripts, compile-time only.
+- **Phase 3 – Future features (deferred)**: Parametric scripts, compile-time only. (Layouts are now implemented as `layout("ID")` + feature-gated tables.)
 - **Phase 4 – Hardening**: Tests, fuzzing, docs/specs, safety audits.
 
 ---
@@ -123,7 +123,7 @@ Extend the DSL to improve expressiveness and developer experience while **preser
 
 ## Phase 3: Deferred Features (After Phase 2)
 
-- **Layouts**: `layout <ID>` affects compile-time `text` lowering using mapping tables (US default). Bytecode stays layout-agnostic; optional header metadata for layout ID.
+- **Layouts (implemented)**: `layout("ID")` affects compile-time `text` lowering using mapping tables (US default). Bytecode stays layout-agnostic; optional header metadata for layout ID remains future work.
 - **Parametric Scripts**: `call_with <id>(args…)` → compile-time substitution; types: string/number. Caps on expansion; no recursion.
 - **Libraries/Includes**: Namespaces and includes with deterministic linking order.
 

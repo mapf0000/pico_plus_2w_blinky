@@ -28,6 +28,7 @@ fn app() -> Html {
     let scripts: UseStateHandle<Option<Vec<api::ScriptMeta>>> = use_state(|| None);
     let dsl_text = use_state(|| String::new());
     let selected_os = use_state(|| String::from("mac"));
+    let selected_layout = use_state(|| dsl_core::DEFAULT_LAYOUT_ID.to_string());
     let busy_count = use_state(|| 0u32);
     let log_lines = use_state(|| Vec::<String>::new());
     let ws_connected = use_state(|| false);
@@ -175,11 +176,13 @@ fn app() -> Html {
     let on_usb_start =
         {
             let selected_os = selected_os.clone();
+            let selected_layout = selected_layout.clone();
             let set_busy = set_busy.clone();
             let push_log = push_log.clone();
             let toast_cb = show_toast.clone();
             Callback::from(move |assistant: bool| {
                 let selected_os = (*selected_os).clone();
+                let layout_id = (*selected_layout).clone();
                 let set_busy = set_busy.clone();
                 let push_log = push_log.clone();
                 let show_toast = toast_cb.clone();
@@ -196,7 +199,7 @@ fn app() -> Html {
                             show_toast.emit(("USB enabling…".into(), true));
                             if assistant {
                                 match scripts::lookup("assistant_once") {
-                                    Some(script_dsl) => match dsl::compile(script_dsl) {
+                                    Some(script_dsl) => match dsl::compile(script_dsl, &layout_id) {
                                         Ok(bytecode) => match api::run_script(&bytecode).await {
                                             Ok(()) => push_log
                                                 .emit("macOS assistant script queued".into()),
@@ -227,11 +230,13 @@ fn app() -> Html {
 
     let on_run_dsl = {
         let dsl_text = dsl_text.clone();
+        let selected_layout = selected_layout.clone();
         let set_busy = set_busy.clone();
         let push_log = push_log.clone();
         let toast_cb = show_toast.clone();
         Callback::from(move |_| {
             let txt = (*dsl_text).clone();
+            let layout_id = (*selected_layout).clone();
             if txt.trim().is_empty() {
                 push_log.emit("empty script".to_string());
                 return;
@@ -240,7 +245,7 @@ fn app() -> Html {
             let push_log = push_log.clone();
             let show_toast = toast_cb.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let bytecode = match dsl::compile(&txt) {
+                let bytecode = match dsl::compile(&txt, &layout_id) {
                     Ok(bytes) => bytes,
                     Err(err) => {
                         push_log.emit(format!("compile error: {}", err.message));
@@ -318,6 +323,11 @@ fn app() -> Html {
                     on_change={
                         let dsl_text = dsl_text.clone();
                         Callback::from(move |s: String| dsl_text.set(s))
+                    }
+                    selected_layout={(*selected_layout).clone()}
+                    on_select_layout={
+                        let selected_layout = selected_layout.clone();
+                        Callback::from(move |layout: String| selected_layout.set(layout))
                     }
                     scripts={scr.clone()}
                     on_run={on_run_dsl.clone()} />
@@ -509,6 +519,8 @@ fn usb_card(props: &UsbProps) -> Html {
 struct ScriptProps {
     pub dsl_text: String,
     pub on_change: Callback<String>,
+    pub selected_layout: String,
+    pub on_select_layout: Callback<String>,
     pub scripts: Option<Vec<api::ScriptMeta>>,
     pub on_run: Callback<()>,
 }
@@ -521,6 +533,16 @@ fn scripting_card(props: &ScriptProps) -> Html {
                 e.target_unchecked_into::<web_sys::HtmlTextAreaElement>()
                     .value(),
             )
+        })
+    };
+
+    let on_layout = {
+        let cb = props.on_select_layout.clone();
+        Callback::from(move |e: Event| {
+            cb.emit(
+                e.target_unchecked_into::<web_sys::HtmlSelectElement>()
+                    .value(),
+            );
         })
     };
 
@@ -541,15 +563,24 @@ fn scripting_card(props: &ScriptProps) -> Html {
         }
     };
 
+    let layouts = dsl_core::available_layouts();
+
     html! {
       <div class="card full">
         <h2>{"Scripting"}</h2>
         <div class="row column gap-2 mb-1">
           <textarea id="scriptDsl" rows="6" cols="60" placeholder={"tap(\"ENTER\")\nmodtap(\"LGUI+SPACE\")\ndelay(400)\ntext(\"Terminal\", 10)"}
             value={props.dsl_text.clone()} oninput={on_text} onkeydown={on_keydown} />
+          <div class="row gap-2 items-center">
+            <label class="hint" for="scriptLayout">{"Layout"}</label>
+            <select id="scriptLayout" value={props.selected_layout.clone()} onchange={on_layout}>
+              { for layouts.iter().map(|id| html!{ <option value={id.to_string()}>{ *id }</option> }) }
+            </select>
+            <span class="hint">{"Default for text(); layout(\"...\") overrides."}</span>
+          </div>
           <div class="row">
             <button id="btnRunDsl" class="btn-accent" onclick={{ let cb=props.on_run.clone(); Callback::from(move |_| cb.emit(())) }}>{"Run Script"}</button>
-            <span class="hint">{"Commands: "}<code>{"tap(\"KEY\")"}</code>{"; "}<code>{"modtap(\"MOD+KEY\")"}</code>{"; "}<code>{"delay(MS)"}</code>{"; "}<code>{"text(\"STRING\", [DELAY])"}</code>{" — Press Ctrl/⌘+Enter to run."}</span>
+            <span class="hint">{"Commands: "}<code>{"tap(\"KEY\")"}</code>{"; "}<code>{"modtap(\"MOD+KEY\")"}</code>{"; "}<code>{"delay(MS)"}</code>{"; "}<code>{"text(\"STRING\", [DELAY])"}</code>{"; "}<code>{"layout(\"ID\")"}</code>{" — Press Ctrl/⌘+Enter to run."}</span>
             {{
               let lines = props.dsl_text.lines().count();
               let style = if lines > MAX_DSL_LINES { "color: var(--bad)".to_string() } else { String::new() };

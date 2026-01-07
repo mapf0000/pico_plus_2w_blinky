@@ -18,6 +18,7 @@ futures-channel = "0.3"
 web-sys = { version = "0.3", features = [
   "HtmlInputElement",
   "HtmlTextAreaElement",
+  "HtmlSelectElement",
   "HtmlElement",
   "WebSocket",
   "MessageEvent",
@@ -30,3 +31,12 @@ builtin-scripts = { path = "../builtin-scripts" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+
+[features]
+default = []
+layout_win_en_gb = ["dsl-core/layout_win_en_gb"]
+layout_win_pt_br = ["dsl-core/layout_win_pt_br"]
+layout_win_de_de = ["dsl-core/layout_win_de_de"]
+layout_mac_en_gb = ["dsl-core/layout_mac_en_gb"]
+layout_mac_pt_br = ["dsl-core/layout_mac_pt_br"]
+layout_mac_de_de = ["dsl-core/layout_mac_de_de"]

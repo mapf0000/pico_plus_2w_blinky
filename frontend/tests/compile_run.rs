@@ -8,7 +8,7 @@ wasm_bindgen_test_configure!(run_in_browser);
 #[wasm_bindgen_test]
 fn builtins_compile_and_roundtrip() {
     for script in scripts::all() {
-        let bytecode = dsl::compile(script.dsl)
+        let bytecode = dsl::compile(script.dsl, dsl_core::DEFAULT_LAYOUT_ID)
             .unwrap_or_else(|err| panic!("compile builtin {} failed: {}", script.id, err.message));
         assert!(
             !bytecode.is_empty(),
@@ -33,7 +33,7 @@ fn builtins_compile_and_roundtrip() {
 
 #[wasm_bindgen_test]
 fn invalid_script_fails() {
-    match dsl::compile("call missing_script") {
+    match dsl::compile("call missing_script", dsl_core::DEFAULT_LAYOUT_ID) {
         Ok(_) => panic!("expected compile failure"),
         Err(err) => assert!(
             err.message.to_ascii_lowercase().contains("unknown"),

@@ -1,5 +1,6 @@
 use dsl_core::{self as core, DslError, DslErrorAt, PreError};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::str::FromStr;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -24,6 +25,8 @@ fn diag(err: DslErrorAt) -> JsValue {
         DslError::ParseMod => "ParseMod",
         DslError::ParseDelay => "ParseDelay",
         DslError::TextEmpty => "TextEmpty",
+        DslError::UnknownLayout => "UnknownLayout",
+        DslError::LayoutNotEnabled => "LayoutNotEnabled",
         DslError::UnknownScript => "UnknownScript",
         DslError::RecursionTooDeep => "RecursionTooDeep",
     }
@@ -60,6 +63,16 @@ fn diag_pre(err: PreError) -> JsValue {
 /// - `scripts_json`: a JSON object like {"hello":"text ...", "foo":"..."}
 #[wasm_bindgen]
 pub fn compile_to_bytecode(entry_dsl: &str, scripts_json: &str) -> Result<Box<[u8]>, JsValue> {
+    compile_to_bytecode_with_layout(entry_dsl, scripts_json, core::DEFAULT_LAYOUT_ID)
+}
+
+/// Same as compile_to_bytecode, but uses a caller-provided default layout id.
+#[wasm_bindgen]
+pub fn compile_to_bytecode_with_layout(
+    entry_dsl: &str,
+    scripts_json: &str,
+    default_layout: &str,
+) -> Result<Box<[u8]>, JsValue> {
     let scripts: HashMap<String, String> =
         serde_json::from_str(scripts_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -68,8 +81,16 @@ pub fn compile_to_bytecode(entry_dsl: &str, scripts_json: &str) -> Result<Box<[u
     // 1) compile + link (inline calls)
     let owned = core::compile_and_link(entry_dsl, &provider).map_err(diag)?;
 
-    // 2) lower to US flat ops
-    let flat = core::lower_to_flat_us(&owned).map_err(diag)?;
+    let layout = core::LayoutId::from_str(default_layout).map_err(|err| {
+        let msg = match err {
+            core::LayoutParseError::Unknown => "unknown default layout",
+            core::LayoutParseError::NotEnabled => "default layout not enabled",
+        };
+        JsValue::from_str(&format!("{msg}: {default_layout}"))
+    })?;
+
+    // 2) lower to flat ops using layout
+    let flat = core::lower_to_flat_with_layout(&owned, layout).map_err(diag)?;
 
     // 3) encode to bytecode
     let bytes = core::bytecode::encode(&flat);
@@ -210,6 +231,8 @@ pub fn lint_dsl_all(entry_dsl: &str, scripts_json: &str) -> Result<JsValue, JsVa
                     DslError::ParseMod => "ParseMod".into(),
                     DslError::ParseDelay => "ParseDelay".into(),
                     DslError::TextEmpty => "TextEmpty".into(),
+                    DslError::UnknownLayout => "UnknownLayout".into(),
+                    DslError::LayoutNotEnabled => "LayoutNotEnabled".into(),
                     DslError::UnknownScript => "UnknownScript".into(),
                     DslError::RecursionTooDeep => "RecursionTooDeep".into(),
                 },
@@ -239,6 +262,8 @@ pub fn lint_dsl_all(entry_dsl: &str, scripts_json: &str) -> Result<JsValue, JsVa
                     DslError::ParseMod => "ParseMod".into(),
                     DslError::ParseDelay => "ParseDelay".into(),
                     DslError::TextEmpty => "TextEmpty".into(),
+                    DslError::UnknownLayout => "UnknownLayout".into(),
+                    DslError::LayoutNotEnabled => "LayoutNotEnabled".into(),
                     DslError::UnknownScript => "UnknownScript".into(),
                     DslError::RecursionTooDeep => "RecursionTooDeep".into(),
                 },
@@ -265,6 +290,8 @@ pub fn lint_dsl_all(entry_dsl: &str, scripts_json: &str) -> Result<JsValue, JsVa
                 DslError::ParseMod => "ParseMod".into(),
                 DslError::ParseDelay => "ParseDelay".into(),
                 DslError::TextEmpty => "TextEmpty".into(),
+                DslError::UnknownLayout => "UnknownLayout".into(),
+                DslError::LayoutNotEnabled => "LayoutNotEnabled".into(),
                 DslError::UnknownScript => "UnknownScript".into(),
                 DslError::RecursionTooDeep => "RecursionTooDeep".into(),
             },

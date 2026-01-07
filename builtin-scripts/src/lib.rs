@@ -18,6 +18,7 @@ const OPEN_TERMINAL_DSL: &str = concat!(
 );
 
 const MACOS_HOST_AGENT_DSL: &str = concat!(
+    "layout(\"mac_de-DE\")\n",
     "modtap(\"LCTRL+SPACE\")\n",
     "delay(200)\n",
     "call open_terminal\n",
@@ -57,7 +58,7 @@ const BUILTIN_SCRIPTS: &[BuiltinScript] = &[
     BuiltinScript {
         id: "macos_host_agent",
         name: "macOS: Launch host-agent (manual run)",
-        description: "Runs /Volumes/PICO_AGENT/MAC/HOSTAGNT with VID/PID (assumes US input source on macOS)",
+        description: "Runs /Volumes/PICO_AGENT/MAC/HOSTAGNT with VID/PID (assumes German input source on macOS)",
         dsl: MACOS_HOST_AGENT_DSL,
     },
     BuiltinScript {

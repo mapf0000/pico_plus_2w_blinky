@@ -8,7 +8,7 @@ A tiny, portable DSL for authoring keyboard macros that compile in the browser (
 
 - **Web-first authoring**: Validate and compile programs entirely in the frontend via `wasm-bindgen`.
 - **Device-slim execution**: The Pico executes a tiny, versioned bytecode over USB HID—no recursion, no dynamic string handling.
-- **Deterministic & safe**: Fixed caps (lines, delays, ops), CRC-checked transport, and OS/layout stability (US ANSI).
+- **Deterministic & safe**: Fixed caps (lines, delays, ops), CRC-checked transport, and OS/layout stability (default US ANSI; optional compile-time layouts).
 
 ---
 
@@ -20,7 +20,7 @@ A tiny, portable DSL for authoring keyboard macros that compile in the browser (
 
 ---
 
-## DSL Overview (US ANSI)
+## DSL Overview (default US ANSI)
 
 **Commands (case-insensitive):**
 - `tap("KEY")` — press & release a key (legacy `tap KEY` still works).  
@@ -32,6 +32,8 @@ A tiny, portable DSL for authoring keyboard macros that compile in the browser (
   Example: `delay(150)`
 - `text("STRING", per_char_delay_ms)` — types a string via US ANSI mapping; optional per-char delay (default 10ms, clamped to `<=5000`).  
   Example: `text("Hello, world!", 20)`
+- `layout("ID")` — sets the active layout for subsequent `text(...)` lowering (compile-time only).  
+  Example: `layout("win_en-GB")`
 - `call <script_id>` — inline another script by id. Resolved at **compile/link** time in the frontend.
 - `fn <name>[ (PARAM, ...) ] { ... }` — define a reusable block at the top level; bodies may include any commands, `repeat`, and `let`. Parameters must be `NAME` constants.
 - `<name>([args...])` — call a previously defined function. Arguments can be string/number literals or previously defined `let` constants.
@@ -39,6 +41,14 @@ A tiny, portable DSL for authoring keyboard macros that compile in the browser (
 **Misc:**
 - Blank lines and lines starting with `#` are ignored.
 - Limits: `MAX_DSL_LINES=256`, `MAX_DSL_DELAY_MS=5000`. After lowering, a global safety cap limits total ops.
+- Default layout: `win_en-US`. `tap`/`modtap` always use raw keycodes and bypass layout mapping.
+
+**Layouts (compile-time):**
+- Enable layouts via cargo features in `dsl-core` and downstream crates:
+  - `layout_win_en_gb`, `layout_win_pt_br`, `layout_win_de_de`
+  - `layout_mac_en_gb`, `layout_mac_pt_br`, `layout_mac_de_de`
+- Layout IDs: `win_en-US`, `win_en-GB`, `win_pt-BR`, `win_de-DE`, `mac_en-GB`, `mac_pt-BR`, `mac_de-DE`
+- Use `layout("ID")` to switch layouts mid-script; affects `text(...)` only.
 
 **Key names (subset):**
 - Letters `A..Z`, number row `0..9`, function keys `F1..F12`

@@ -13,6 +13,11 @@ use alloc::{
     borrow::ToOwned, collections::BTreeMap, format, string::String, string::ToString, vec::Vec,
 };
 
+use core::str::FromStr;
+
+mod layouts;
+pub use layouts::{available_layouts, LayoutId, LayoutParseError, DEFAULT_LAYOUT_ID};
+
 //
 // -------- Public Limits --------
 //
@@ -36,6 +41,8 @@ pub enum DslError {
     ParseMod,
     ParseDelay,
     TextEmpty,
+    UnknownLayout,
+    LayoutNotEnabled,
     UnknownScript,
     RecursionTooDeep,
 }
@@ -146,6 +153,7 @@ pub enum Op<'a> {
     Tap(KeyTap),
     DelayMs(u32),
     Text { s: &'a str, delay_ms: u16 },
+    Layout(LayoutId),
     Call { id: &'a str },
 }
 
@@ -168,6 +176,7 @@ pub enum OpOwned {
     Tap(KeyTap),
     DelayMs(u32),
     Text { s: String, delay_ms: u16 }, // owned
+    Layout(LayoutId),
                                        // Calls are fully inlined during linking; not present in OpOwned
 }
 
@@ -303,6 +312,42 @@ pub fn compile_dsl_with_diag<'a>(
             if !text.is_empty() {
                 prog.ops.push(Op::Text { s: text, delay_ms });
             }
+        } else if eq_ci(cmd, "layout") {
+            let raw = rest.trim();
+            if raw.is_empty() {
+                return Err(DslErrorAt {
+                    kind: DslError::InvalidLine,
+                    line: line_no,
+                });
+            }
+            let id = if raw.starts_with('"') {
+                if raw.ends_with('"') && raw.len() >= 2 {
+                    &raw[1..raw.len() - 1]
+                } else {
+                    return Err(DslErrorAt {
+                        kind: DslError::InvalidLine,
+                        line: line_no,
+                    });
+                }
+            } else {
+                raw
+            };
+            let layout = match LayoutId::from_str(id) {
+                Ok(layout) => layout,
+                Err(LayoutParseError::NotEnabled) => {
+                    return Err(DslErrorAt {
+                        kind: DslError::LayoutNotEnabled,
+                        line: line_no,
+                    })
+                }
+                Err(LayoutParseError::Unknown) => {
+                    return Err(DslErrorAt {
+                        kind: DslError::UnknownLayout,
+                        line: line_no,
+                    })
+                }
+            };
+            prog.ops.push(Op::Layout(layout));
         } else if eq_ci(cmd, "call") {
             let id = rest.trim();
             if id.is_empty() {
@@ -577,6 +622,7 @@ fn inline_into_owned(
                 s: (*s).to_owned(),
                 delay_ms: *delay_ms,
             }),
+            Op::Layout(layout) => out.ops.push(OpOwned::Layout(*layout)),
             Op::Call { id } => {
                 // cycle detection
                 if stack.iter().any(|s| s == id) {
@@ -1006,6 +1052,7 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
             Ok(Some(call)) => {
                 if call.name.eq_ignore_ascii_case("delay")
                     || call.name.eq_ignore_ascii_case("text")
+                    || call.name.eq_ignore_ascii_case("layout")
                     || call.name.eq_ignore_ascii_case("modtap")
                     || call.name.eq_ignore_ascii_case("tap")
                 {
@@ -1282,6 +1329,7 @@ fn preprocess_block(
             Ok(Some(call)) => {
                 if call.name.eq_ignore_ascii_case("delay")
                     || call.name.eq_ignore_ascii_case("text")
+                    || call.name.eq_ignore_ascii_case("layout")
                     || call.name.eq_ignore_ascii_case("modtap")
                     || call.name.eq_ignore_ascii_case("tap")
                 {
@@ -2110,6 +2158,31 @@ fn substitute_and_emit(
                 hints,
                 false,
             );
+        } else if call.name.eq_ignore_ascii_case("layout") {
+            let args = parse_call_args(call.args, env).map_err(|(code, msg)| (code, msg))?;
+            if args.len() != 1 {
+                return Err(("LayoutArgCount", "layout() expects exactly one argument".into()));
+            }
+            let layout_val = match &args[0] {
+                ConstVal::Str(s) => s.clone(),
+                ConstVal::Num(_) => {
+                    return Err((
+                        "LayoutArgNotString",
+                        "layout() expects a string argument".into(),
+                    ));
+                }
+            };
+            let normalized = format!("layout {}", layout_val);
+            return substitute_and_emit(
+                &normalized,
+                orig_line,
+                env,
+                out_lines,
+                sm,
+                diags,
+                hints,
+                false,
+            );
         } else if call.name.eq_ignore_ascii_case("modtap") {
             let arg_string = match parse_call_args(call.args, env) {
                 Ok(args) => {
@@ -2288,6 +2361,30 @@ fn substitute_and_emit(
         return Ok(());
     }
 
+    if let Some(rest) = starts_with_ci(trimmed, "layout") {
+        let tok = rest.trim();
+        if tok.is_empty() {
+            return Err(("LayoutEmpty", "layout expects an id".into()));
+        }
+        let val = if is_upper_name(tok) {
+            match env.get(tok) {
+                Some(ConstVal::Str(s)) => s.clone(),
+                Some(ConstVal::Num(_)) => {
+                    return Err(("LetTypeMismatch", "layout expects a string".into()));
+                }
+                None => return Err(("LetUndefined", format!("undefined constant '{}'", tok))),
+            }
+        } else {
+            tok.to_string()
+        };
+        out_lines.push(format!("layout {}", val));
+        sm.push(OrigLoc {
+            line: orig_line,
+            col: 1,
+        });
+        return Ok(());
+    }
+
     if let Some(rest) = starts_with_ci(trimmed, "text") {
         let rest = rest.trim();
         if rest.is_empty() {
@@ -2439,11 +2536,15 @@ fn split2(s: &str) -> Option<(&str, &str)> {
     Some((a, b))
 }
 
-/// Lower an owned, call-free program into a US-only FlatProgram.
+/// Lower an owned, call-free program into a FlatProgram using a default layout.
 /// - Expands `Text` to Tap+Delay
 /// - Coalesces adjacent delays
-pub fn lower_to_flat_us(p: &ProgramOwned) -> Result<FlatProgram, DslErrorAt> {
+pub fn lower_to_flat_with_layout(
+    p: &ProgramOwned,
+    default_layout: LayoutId,
+) -> Result<FlatProgram, DslErrorAt> {
     let mut out = FlatProgram::new();
+    let mut current_layout = default_layout;
     for (idx, op) in p.ops.iter().enumerate() {
         match op {
             OpOwned::Tap(KeyTap { usage, mods }) => out.ops.push(FlatOp::Tap {
@@ -2453,7 +2554,7 @@ pub fn lower_to_flat_us(p: &ProgramOwned) -> Result<FlatProgram, DslErrorAt> {
             OpOwned::DelayMs(ms) => push_delay(&mut out, *ms),
             OpOwned::Text { s, delay_ms } => {
                 for ch in s.chars() {
-                    let (u, m) = char_to_key_us(ch).ok_or(DslErrorAt {
+                    let (u, m) = current_layout.map_char(ch).ok_or(DslErrorAt {
                         kind: DslError::ParseKey,
                         line: (idx as u16) + 1,
                     })?;
@@ -2462,6 +2563,9 @@ pub fn lower_to_flat_us(p: &ProgramOwned) -> Result<FlatProgram, DslErrorAt> {
                         push_delay(&mut out, *delay_ms as u32);
                     }
                 }
+            }
+            OpOwned::Layout(layout) => {
+                current_layout = *layout;
             }
         }
         if out.ops.len() > MAX_TOTAL_FLAT_OPS {
@@ -2472,6 +2576,11 @@ pub fn lower_to_flat_us(p: &ProgramOwned) -> Result<FlatProgram, DslErrorAt> {
         }
     }
     Ok(out)
+}
+
+/// Lower an owned, call-free program into a US-only FlatProgram.
+pub fn lower_to_flat_us(p: &ProgramOwned) -> Result<FlatProgram, DslErrorAt> {
+    lower_to_flat_with_layout(p, LayoutId::Us)
 }
 
 fn push_delay(out: &mut FlatProgram, ms: u32) {
@@ -2957,5 +3066,67 @@ mod tests {
                 .iter()
                 .any(|d| d.code == "FnUnused" && matches!(d.severity, Severity::Warning))
         );
+    }
+
+    #[test]
+    fn unknown_layout_errors() {
+        let entry = "layout(\"win_xx-YY\")\ntext(\"a\")";
+        let _ = preprocess(entry, &PreprocessOptions::default())
+            .unwrap_or_else(|e| panic!("preprocess: {:?}", e));
+        let err = compile_and_link(entry, &empty_provider).unwrap_err();
+        assert_eq!(err.line, 1);
+        assert!(
+            matches!(err.kind, DslError::UnknownLayout),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "layout_win_de_de")]
+    fn layout_switches_text_lowering() {
+        let entry = "text(\"y\", 0)\nlayout(\"win_de-DE\")\ntext(\"y\", 0)";
+        let _ = preprocess(entry, &PreprocessOptions::default())
+            .unwrap_or_else(|e| panic!("preprocess: {:?}", e));
+        let owned = compile_and_link(entry, &empty_provider)
+            .unwrap_or_else(|e| panic!("compile_and_link: {:?}", e));
+        let flat =
+            lower_to_flat_with_layout(&owned, LayoutId::Us).expect("lower_to_flat_with_layout");
+        let taps: Vec<u8> = flat
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                FlatOp::Tap { usage, .. } => Some(*usage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(taps.len(), 2);
+        let key_y = KEY_A + (b'Y' - b'A');
+        let key_z = KEY_A + (b'Z' - b'A');
+        assert_eq!(taps[0], key_y);
+        assert_eq!(taps[1], key_z);
+    }
+
+    #[test]
+    #[cfg(feature = "layout_mac_de_de")]
+    fn layout_switches_text_lowering_mac_de() {
+        let entry = "layout(\"mac_de-DE\")\ntext(\"@\", 0)";
+        let _ = preprocess(entry, &PreprocessOptions::default())
+            .unwrap_or_else(|e| panic!("preprocess: {:?}", e));
+        let owned = compile_and_link(entry, &empty_provider)
+            .unwrap_or_else(|e| panic!("compile_and_link: {:?}", e));
+        let flat =
+            lower_to_flat_with_layout(&owned, LayoutId::Us).expect("lower_to_flat_with_layout");
+        let tap = flat
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                FlatOp::Tap { usage, mods } => Some((*usage, *mods)),
+                _ => None,
+            })
+            .expect("expected tap");
+        let key_q = KEY_A + (b'Q' - b'A');
+        assert_eq!(tap.0, key_q);
+        assert_eq!(tap.1, MOD_LALT);
     }
 }
