@@ -1,88 +1,162 @@
-use crate::DslError;
-
 // -------- HID constants (subset) --------
 // (stable per HID Usage Tables, page 0x07)
-pub const KEY_A: u8 = 0x04;
-pub const KEY_1: u8 = 0x1e;
-pub const KEY_2: u8 = 0x1f;
-pub const KEY_3: u8 = 0x20;
-pub const KEY_4: u8 = 0x21;
-pub const KEY_5: u8 = 0x22;
-pub const KEY_6: u8 = 0x23;
-pub const KEY_7: u8 = 0x24;
-pub const KEY_8: u8 = 0x25;
-pub const KEY_9: u8 = 0x26;
-pub const KEY_0: u8 = 0x27;
-pub const KEY_ENTER: u8 = 0x28;
-pub const KEY_ESC: u8 = 0x29;
-pub const KEY_BACKSPACE: u8 = 0x2a;
-pub const KEY_TAB: u8 = 0x2b;
-pub const KEY_SPACE: u8 = 0x2c;
-pub const KEY_MINUS: u8 = 0x2d;
-pub const KEY_EQUAL: u8 = 0x2e;
-pub const KEY_LEFT_BRACKET: u8 = 0x2f;
-pub const KEY_RIGHT_BRACKET: u8 = 0x30;
-pub const KEY_BACKSLASH: u8 = 0x31;
-pub const KEY_NON_US_HASH: u8 = 0x32;
-pub const KEY_SEMICOLON: u8 = 0x33;
-pub const KEY_APOSTROPHE: u8 = 0x34;
-pub const KEY_GRAVE: u8 = 0x35;
-pub const KEY_COMMA: u8 = 0x36;
-pub const KEY_DOT: u8 = 0x37;
-pub const KEY_SLASH: u8 = 0x38;
-pub const KEY_CAPS_LOCK: u8 = 0x39;
-pub const KEY_F1: u8 = 0x3a;
-pub const KEY_F2: u8 = 0x3b;
-pub const KEY_F3: u8 = 0x3c;
-pub const KEY_F4: u8 = 0x3d;
-pub const KEY_F5: u8 = 0x3e;
-pub const KEY_F6: u8 = 0x3f;
-pub const KEY_F7: u8 = 0x40;
-pub const KEY_F8: u8 = 0x41;
-pub const KEY_F9: u8 = 0x42;
-pub const KEY_F10: u8 = 0x43;
-pub const KEY_F11: u8 = 0x44;
-pub const KEY_F12: u8 = 0x45;
-pub const KEY_PRINT_SCREEN: u8 = 0x46;
-pub const KEY_SCROLL_LOCK: u8 = 0x47;
-pub const KEY_PAUSE: u8 = 0x48;
-pub const KEY_INSERT: u8 = 0x49;
-pub const KEY_HOME: u8 = 0x4a;
-pub const KEY_PAGE_UP: u8 = 0x4b;
-pub const KEY_DELETE: u8 = 0x4c;
-pub const KEY_END: u8 = 0x4d;
-pub const KEY_PAGE_DOWN: u8 = 0x4e;
-pub const KEY_RIGHT: u8 = 0x4f;
-pub const KEY_LEFT: u8 = 0x50;
-pub const KEY_DOWN: u8 = 0x51;
-pub const KEY_UP: u8 = 0x52;
-pub const KEY_NUM_LOCK: u8 = 0x53;
-pub const KEY_KP_SLASH: u8 = 0x54;
-pub const KEY_KP_ASTERISK: u8 = 0x55;
-pub const KEY_KP_MINUS: u8 = 0x56;
-pub const KEY_KP_PLUS: u8 = 0x57;
-pub const KEY_KP_ENTER: u8 = 0x58;
-pub const KEY_KP_1: u8 = 0x59;
-pub const KEY_KP_2: u8 = 0x5a;
-pub const KEY_KP_3: u8 = 0x5b;
-pub const KEY_KP_4: u8 = 0x5c;
-pub const KEY_KP_5: u8 = 0x5d;
-pub const KEY_KP_6: u8 = 0x5e;
-pub const KEY_KP_7: u8 = 0x5f;
-pub const KEY_KP_8: u8 = 0x60;
-pub const KEY_KP_9: u8 = 0x61;
-pub const KEY_KP_0: u8 = 0x62;
-pub const KEY_KP_DOT: u8 = 0x63;
-pub const KEY_NON_US_BACKSLASH: u8 = 0x64;
 
-pub const MOD_LCTRL: u8 = 0x01;
-pub const MOD_LSHIFT: u8 = 0x02;
-pub const MOD_LALT: u8 = 0x04;
-pub const MOD_LGUI: u8 = 0x08;
-pub const MOD_RCTRL: u8 = 0x10;
-pub const MOD_RSHIFT: u8 = 0x20;
-pub const MOD_RALT: u8 = 0x40;
-pub const MOD_RGUI: u8 = 0x80;
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Usage(u8);
+
+impl Usage {
+    pub const fn from_u8(value: u8) -> Self {
+        Self(value)
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub const fn add(self, offset: u8) -> Self {
+        Self(self.0 + offset)
+    }
+}
+
+impl From<Usage> for u8 {
+    fn from(value: Usage) -> Self {
+        value.0
+    }
+}
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Mods(u8);
+
+impl Mods {
+    pub const fn from_u8(value: u8) -> Self {
+        Self(value)
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn or(self, other: Mods) -> Mods {
+        Mods(self.0 | other.0)
+    }
+}
+
+impl Default for Mods {
+    fn default() -> Self {
+        Mods::empty()
+    }
+}
+
+impl From<Mods> for u8 {
+    fn from(value: Mods) -> Self {
+        value.0
+    }
+}
+
+impl core::ops::BitOr for Mods {
+    type Output = Mods;
+
+    fn bitor(self, rhs: Mods) -> Self::Output {
+        Mods(self.0 | rhs.0)
+    }
+}
+
+impl core::ops::BitOrAssign for Mods {
+    fn bitor_assign(&mut self, rhs: Mods) {
+        self.0 |= rhs.0;
+    }
+}
+pub const KEY_A: Usage = Usage(0x04);
+pub const KEY_1: Usage = Usage(0x1e);
+pub const KEY_2: Usage = Usage(0x1f);
+pub const KEY_3: Usage = Usage(0x20);
+pub const KEY_4: Usage = Usage(0x21);
+pub const KEY_5: Usage = Usage(0x22);
+pub const KEY_6: Usage = Usage(0x23);
+pub const KEY_7: Usage = Usage(0x24);
+pub const KEY_8: Usage = Usage(0x25);
+pub const KEY_9: Usage = Usage(0x26);
+pub const KEY_0: Usage = Usage(0x27);
+pub const KEY_ENTER: Usage = Usage(0x28);
+pub const KEY_ESC: Usage = Usage(0x29);
+pub const KEY_BACKSPACE: Usage = Usage(0x2a);
+pub const KEY_TAB: Usage = Usage(0x2b);
+pub const KEY_SPACE: Usage = Usage(0x2c);
+pub const KEY_MINUS: Usage = Usage(0x2d);
+pub const KEY_EQUAL: Usage = Usage(0x2e);
+pub const KEY_LEFT_BRACKET: Usage = Usage(0x2f);
+pub const KEY_RIGHT_BRACKET: Usage = Usage(0x30);
+pub const KEY_BACKSLASH: Usage = Usage(0x31);
+pub const KEY_NON_US_HASH: Usage = Usage(0x32);
+pub const KEY_SEMICOLON: Usage = Usage(0x33);
+pub const KEY_APOSTROPHE: Usage = Usage(0x34);
+pub const KEY_GRAVE: Usage = Usage(0x35);
+pub const KEY_COMMA: Usage = Usage(0x36);
+pub const KEY_DOT: Usage = Usage(0x37);
+pub const KEY_SLASH: Usage = Usage(0x38);
+pub const KEY_CAPS_LOCK: Usage = Usage(0x39);
+pub const KEY_F1: Usage = Usage(0x3a);
+pub const KEY_F2: Usage = Usage(0x3b);
+pub const KEY_F3: Usage = Usage(0x3c);
+pub const KEY_F4: Usage = Usage(0x3d);
+pub const KEY_F5: Usage = Usage(0x3e);
+pub const KEY_F6: Usage = Usage(0x3f);
+pub const KEY_F7: Usage = Usage(0x40);
+pub const KEY_F8: Usage = Usage(0x41);
+pub const KEY_F9: Usage = Usage(0x42);
+pub const KEY_F10: Usage = Usage(0x43);
+pub const KEY_F11: Usage = Usage(0x44);
+pub const KEY_F12: Usage = Usage(0x45);
+pub const KEY_PRINT_SCREEN: Usage = Usage(0x46);
+pub const KEY_SCROLL_LOCK: Usage = Usage(0x47);
+pub const KEY_PAUSE: Usage = Usage(0x48);
+pub const KEY_INSERT: Usage = Usage(0x49);
+pub const KEY_HOME: Usage = Usage(0x4a);
+pub const KEY_PAGE_UP: Usage = Usage(0x4b);
+pub const KEY_DELETE: Usage = Usage(0x4c);
+pub const KEY_END: Usage = Usage(0x4d);
+pub const KEY_PAGE_DOWN: Usage = Usage(0x4e);
+pub const KEY_RIGHT: Usage = Usage(0x4f);
+pub const KEY_LEFT: Usage = Usage(0x50);
+pub const KEY_DOWN: Usage = Usage(0x51);
+pub const KEY_UP: Usage = Usage(0x52);
+pub const KEY_NUM_LOCK: Usage = Usage(0x53);
+pub const KEY_KP_SLASH: Usage = Usage(0x54);
+pub const KEY_KP_ASTERISK: Usage = Usage(0x55);
+pub const KEY_KP_MINUS: Usage = Usage(0x56);
+pub const KEY_KP_PLUS: Usage = Usage(0x57);
+pub const KEY_KP_ENTER: Usage = Usage(0x58);
+pub const KEY_KP_1: Usage = Usage(0x59);
+pub const KEY_KP_2: Usage = Usage(0x5a);
+pub const KEY_KP_3: Usage = Usage(0x5b);
+pub const KEY_KP_4: Usage = Usage(0x5c);
+pub const KEY_KP_5: Usage = Usage(0x5d);
+pub const KEY_KP_6: Usage = Usage(0x5e);
+pub const KEY_KP_7: Usage = Usage(0x5f);
+pub const KEY_KP_8: Usage = Usage(0x60);
+pub const KEY_KP_9: Usage = Usage(0x61);
+pub const KEY_KP_0: Usage = Usage(0x62);
+pub const KEY_KP_DOT: Usage = Usage(0x63);
+pub const KEY_NON_US_BACKSLASH: Usage = Usage(0x64);
+
+pub const MOD_LCTRL: Mods = Mods(0x01);
+pub const MOD_LSHIFT: Mods = Mods(0x02);
+pub const MOD_LALT: Mods = Mods(0x04);
+pub const MOD_LGUI: Mods = Mods(0x08);
+pub const MOD_RCTRL: Mods = Mods(0x10);
+pub const MOD_RSHIFT: Mods = Mods(0x20);
+pub const MOD_RALT: Mods = Mods(0x40);
+pub const MOD_RGUI: Mods = Mods(0x80);
 
 fn upper_ascii<const N: usize>(s: &str) -> ArrayString<N> {
     let mut out: ArrayString<N> = ArrayString::new();
@@ -93,31 +167,27 @@ fn upper_ascii<const N: usize>(s: &str) -> ArrayString<N> {
     out
 }
 
-pub(crate) fn parse_modtap(s: &str) -> Result<(u8, u8), DslError> {
-    let mut mods: u8 = 0;
+pub(crate) fn parse_modtap(s: &str) -> Result<(Mods, Usage), &'static str> {
+    let mut mods = Mods::empty();
     let mut parts = s.split('+').peekable();
-    let mut last_is_key = false;
-    let mut usage: u8 = 0;
+    let mut usage: Option<Usage> = None;
     while let Some(p) = parts.next() {
         let t = p.trim();
         if t.is_empty() {
-            return Err(DslError::InvalidLine);
+            return Err("InvalidLine");
         }
         if parts.peek().is_none() {
-            usage = parse_key(t).ok_or(DslError::ParseKey)?;
-            last_is_key = true;
+            usage = Some(parse_key(t).ok_or("ParseKey")?);
         } else {
-            let m = parse_mod(t).ok_or(DslError::ParseMod)?;
+            let m = parse_mod(t).ok_or("ParseMod")?;
             mods |= m;
         }
     }
-    if !last_is_key {
-        return Err(DslError::ParseKey);
-    }
+    let usage = usage.ok_or("ParseKey")?;
     Ok((mods, usage))
 }
 
-fn parse_mod(s: &str) -> Option<u8> {
+fn parse_mod(s: &str) -> Option<Mods> {
     let up = upper_ascii::<16>(s);
     let u = up.as_str();
     Some(match u {
@@ -133,14 +203,14 @@ fn parse_mod(s: &str) -> Option<u8> {
     })
 }
 
-pub(crate) fn parse_key(s: &str) -> Option<u8> {
+pub(crate) fn parse_key(s: &str) -> Option<Usage> {
     let up = upper_ascii::<32>(s);
     let u = up.as_str();
 
     if u.len() == 1 {
         let b = u.as_bytes()[0];
         if b'A' <= b && b <= b'Z' {
-            return Some(KEY_A + (b - b'A'));
+            return Some(KEY_A.add(b - b'A'));
         }
     }
     if let Some(rest) = u.strip_prefix('F') {
@@ -186,7 +256,7 @@ pub(crate) fn parse_key(s: &str) -> Option<u8> {
     if u.len() == 1 {
         let b = u.as_bytes()[0];
         if b'1' <= b && b <= b'9' {
-            return Some(KEY_1 + (b - b'1'));
+            return Some(KEY_1.add(b - b'1'));
         }
         if b == b'0' {
             return Some(KEY_0);
@@ -262,29 +332,29 @@ impl<const N: usize> ArrayString<N> {
 
 // -------- US ANSI text lowering --------
 
-pub fn char_to_key_us(c: char) -> Option<(u8, u8)> {
+pub fn char_to_key_us(c: char) -> Option<(Usage, Mods)> {
     match c {
-        '\n' | '\r' => Some((KEY_ENTER, 0)),
-        '\t' => Some((KEY_TAB, 0)),
-        ' ' => Some((KEY_SPACE, 0)),
+        '\n' | '\r' => Some((KEY_ENTER, Mods::empty())),
+        '\t' => Some((KEY_TAB, Mods::empty())),
+        ' ' => Some((KEY_SPACE, Mods::empty())),
         'a'..='z' => {
             let i = (c as u8) - b'a';
-            Some((KEY_A + i, 0))
+            Some((KEY_A.add(i), Mods::empty()))
         }
         'A'..='Z' => {
             let i = (c as u8) - b'A';
-            Some((KEY_A + i, MOD_LSHIFT))
+            Some((KEY_A.add(i), MOD_LSHIFT))
         }
-        '1' => Some((KEY_1, 0)),
-        '2' => Some((KEY_2, 0)),
-        '3' => Some((KEY_3, 0)),
-        '4' => Some((KEY_4, 0)),
-        '5' => Some((KEY_5, 0)),
-        '6' => Some((KEY_6, 0)),
-        '7' => Some((KEY_7, 0)),
-        '8' => Some((KEY_8, 0)),
-        '9' => Some((KEY_9, 0)),
-        '0' => Some((KEY_0, 0)),
+        '1' => Some((KEY_1, Mods::empty())),
+        '2' => Some((KEY_2, Mods::empty())),
+        '3' => Some((KEY_3, Mods::empty())),
+        '4' => Some((KEY_4, Mods::empty())),
+        '5' => Some((KEY_5, Mods::empty())),
+        '6' => Some((KEY_6, Mods::empty())),
+        '7' => Some((KEY_7, Mods::empty())),
+        '8' => Some((KEY_8, Mods::empty())),
+        '9' => Some((KEY_9, Mods::empty())),
+        '0' => Some((KEY_0, Mods::empty())),
         '!' => Some((KEY_1, MOD_LSHIFT)),
         '@' => Some((KEY_2, MOD_LSHIFT)),
         '#' => Some((KEY_3, MOD_LSHIFT)),
@@ -295,27 +365,27 @@ pub fn char_to_key_us(c: char) -> Option<(u8, u8)> {
         '*' => Some((KEY_8, MOD_LSHIFT)),
         '(' => Some((KEY_9, MOD_LSHIFT)),
         ')' => Some((KEY_0, MOD_LSHIFT)),
-        '-' => Some((KEY_MINUS, 0)),
+        '-' => Some((KEY_MINUS, Mods::empty())),
         '_' => Some((KEY_MINUS, MOD_LSHIFT)),
-        '=' => Some((KEY_EQUAL, 0)),
+        '=' => Some((KEY_EQUAL, Mods::empty())),
         '+' => Some((KEY_EQUAL, MOD_LSHIFT)),
-        '[' => Some((KEY_LEFT_BRACKET, 0)),
+        '[' => Some((KEY_LEFT_BRACKET, Mods::empty())),
         '{' => Some((KEY_LEFT_BRACKET, MOD_LSHIFT)),
-        ']' => Some((KEY_RIGHT_BRACKET, 0)),
+        ']' => Some((KEY_RIGHT_BRACKET, Mods::empty())),
         '}' => Some((KEY_RIGHT_BRACKET, MOD_LSHIFT)),
-        '\\' => Some((KEY_BACKSLASH, 0)),
+        '\\' => Some((KEY_BACKSLASH, Mods::empty())),
         '|' => Some((KEY_BACKSLASH, MOD_LSHIFT)),
-        ';' => Some((KEY_SEMICOLON, 0)),
+        ';' => Some((KEY_SEMICOLON, Mods::empty())),
         ':' => Some((KEY_SEMICOLON, MOD_LSHIFT)),
-        '\'' => Some((KEY_APOSTROPHE, 0)),
+        '\'' => Some((KEY_APOSTROPHE, Mods::empty())),
         '"' => Some((KEY_APOSTROPHE, MOD_LSHIFT)),
-        '`' => Some((KEY_GRAVE, 0)),
+        '`' => Some((KEY_GRAVE, Mods::empty())),
         '~' => Some((KEY_GRAVE, MOD_LSHIFT)),
-        ',' => Some((KEY_COMMA, 0)),
+        ',' => Some((KEY_COMMA, Mods::empty())),
         '<' => Some((KEY_COMMA, MOD_LSHIFT)),
-        '.' => Some((KEY_DOT, 0)),
+        '.' => Some((KEY_DOT, Mods::empty())),
         '>' => Some((KEY_DOT, MOD_LSHIFT)),
-        '/' => Some((KEY_SLASH, 0)),
+        '/' => Some((KEY_SLASH, Mods::empty())),
         '?' => Some((KEY_SLASH, MOD_LSHIFT)),
         _ => None,
     }

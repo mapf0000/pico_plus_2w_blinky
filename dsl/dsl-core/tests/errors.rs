@@ -1,4 +1,4 @@
-use dsl_core::{compile_dsl_with_diag, DslError, MAX_DSL_LINES};
+use dsl_core::{compile_dsl_with_diag, MAX_DSL_LINES};
 
 fn always_exists(_: &str) -> bool {
     true
@@ -16,14 +16,14 @@ fn too_many_lines_errors() {
     }
 
     let err = compile_dsl_with_diag(&dsl, always_exists).expect_err("expected error");
-    assert_eq!(err.kind, DslError::TooManyLines);
-    assert_eq!(err.line as usize, MAX_DSL_LINES + 1);
+    assert_eq!(err.code, "TooManyLines");
+    assert_eq!(err.span.line as usize, MAX_DSL_LINES + 1);
 }
 
 #[test]
 fn call_unknown_script_errors() {
     let dsl = "call missing";
     let err = compile_dsl_with_diag(dsl, never_exists).expect_err("expected error");
-    assert_eq!(err.kind, DslError::UnknownScript);
-    assert_eq!(err.line, 1);
+    assert_eq!(err.code, "UnknownScript");
+    assert_eq!(err.span.line, 1);
 }

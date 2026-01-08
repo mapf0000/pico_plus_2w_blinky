@@ -4,8 +4,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
-use crate::limits::MAX_TOTAL_FLAT_OPS;
-use crate::{FlatOp, FlatProgram};
+use crate::{FlatOp, FlatProgram, FlatProgramError, Mods, Usage};
 
 pub const MAGIC: [u8; 4] = *b"KBD1";
 pub const OP_DELAY: u8 = 0x01;
@@ -13,12 +12,15 @@ pub const OP_TAP: u8 = 0x02;
 pub const OP_END: u8 = 0xFF;
 
 /// Encode a FlatProgram into compact, versioned bytecode with CRC32 trailer.
-pub fn encode(prog: &FlatProgram) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(4 + 1 + prog.ops.len() * 4 + 5);
+/// Normalizes and validates flat op invariants (no zero delays, no adjacent delays, ops cap).
+pub fn encode(prog: &FlatProgram) -> Result<Vec<u8>, FlatProgramError> {
+    let mut normalized = prog.clone();
+    normalized.normalize_in_place()?;
+    let mut buf = Vec::with_capacity(4 + 1 + normalized.ops.len() * 4 + 5);
     buf.extend_from_slice(&MAGIC);
     buf.push(0x00); // flags (reserved)
 
-    for op in &prog.ops {
+    for op in &normalized.ops {
         match *op {
             FlatOp::DelayMs(ms) => {
                 buf.push(OP_DELAY);
@@ -26,8 +28,8 @@ pub fn encode(prog: &FlatProgram) -> Vec<u8> {
             }
             FlatOp::Tap { usage, mods } => {
                 buf.push(OP_TAP);
-                buf.push(usage);
-                buf.push(mods);
+                buf.push(usage.bits());
+                buf.push(mods.bits());
             }
         }
     }
@@ -35,7 +37,7 @@ pub fn encode(prog: &FlatProgram) -> Vec<u8> {
 
     let crc = crc32(&buf);
     buf.extend_from_slice(&crc.to_le_bytes());
-    buf
+    Ok(buf)
 }
 
 /// Streaming reader for firmware side (no allocation required).
@@ -52,6 +54,7 @@ pub enum DecodeError {
     BadVarint,
     BadOpcode,
     BadCrc,
+    TooManyOps,
 }
 
 impl<'a> Reader<'a> {
@@ -125,20 +128,17 @@ pub fn decode_to_flat(data: &[u8]) -> Result<FlatProgram, DecodeError> {
         match op {
             OP_DELAY => {
                 let ms = rd.read_varu32()?;
-                if ms != 0 {
-                    out.ops.push(FlatOp::DelayMs(ms));
-                }
+                out.push_delay(ms)
+                    .map_err(|_| DecodeError::TooManyOps)?;
             }
             OP_TAP => {
-                let usage = rd.read_u8()?;
-                let mods = rd.read_u8()?;
-                out.ops.push(FlatOp::Tap { usage, mods });
+                let usage = Usage::from_u8(rd.read_u8()?);
+                let mods = Mods::from_u8(rd.read_u8()?);
+                out.push_tap(usage, mods)
+                    .map_err(|_| DecodeError::TooManyOps)?;
             }
             OP_END => break,
             _ => return Err(DecodeError::BadOpcode),
-        }
-        if out.ops.len() > MAX_TOTAL_FLAT_OPS {
-            return Err(DecodeError::BadOpcode);
         }
     }
     rd.verify_crc()?;

@@ -5,25 +5,9 @@ use std::{collections::BTreeMap, format, string::String, string::ToString, vec::
 use alloc::{collections::BTreeMap, format, string::String, string::ToString, vec::Vec};
 
 use crate::limits::{MAX_DSL_LINES, MAX_EXPANDED_LINES, MAX_REPEAT_N};
+use crate::{CompileError, Span};
 
 // -------- Phase 1 Preprocessor (repeat, let, limited lints) --------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Severity {
-    Warning,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Diagnostic {
-    pub severity: Severity,
-    pub code: &'static str,
-    pub message: String,
-    pub line: u16,
-    pub col: u16,
-    pub span_len: u16,
-    pub suggestion: Option<String>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrigLoc {
@@ -35,15 +19,7 @@ pub struct OrigLoc {
 pub struct PreprocessOutput {
     pub text: String,
     pub sourcemap: Vec<OrigLoc>,
-    pub diags: Vec<Diagnostic>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreError {
-    pub code: &'static str,
-    pub message: String,
-    pub line: u16,
-    pub col: u16,
+    pub diagnostics: Vec<CompileError>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -62,12 +38,32 @@ impl Default for PreprocessOptions {
     }
 }
 
-pub(crate) fn map_pre_line(pre_line: u16, sm: &[OrigLoc]) -> u16 {
-    let idx = (pre_line as usize).saturating_sub(1);
+fn pre_error(
+    code: &'static str,
+    message: impl Into<String>,
+    line: u16,
+    col: u16,
+) -> CompileError {
+    CompileError::error(code, message, Span::new(line, col, 0))
+}
+
+fn pre_warning(
+    code: &'static str,
+    message: impl Into<String>,
+    line: u16,
+    col: u16,
+    span_len: u16,
+    suggestion: Option<String>,
+) -> CompileError {
+    CompileError::warning(code, message, Span::new(line, col, span_len), suggestion)
+}
+
+pub(crate) fn map_pre_span(span: Span, sm: &[OrigLoc]) -> Span {
+    let idx = (span.line as usize).saturating_sub(1);
     if idx < sm.len() {
-        sm[idx].line
+        Span::new(sm[idx].line, span.col, span.len)
     } else {
-        pre_line
+        span
     }
 }
 
@@ -131,10 +127,10 @@ struct LegacyHintFlags {
     tap: bool,
 }
 
-pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutput, PreError> {
+pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutput, CompileError> {
     let mut out_lines: Vec<String> = Vec::new();
     let mut sm: Vec<OrigLoc> = Vec::new();
-    let mut diags: Vec<Diagnostic> = Vec::new();
+    let mut diags: Vec<CompileError> = Vec::new();
     let mut env = LetEnv::default();
     let mut hints = LegacyHintFlags::default();
 
@@ -173,32 +169,27 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
             match parse_let(rest) {
                 Ok((name, val)) => {
                     if !is_upper_name(&name) {
-                        return Err(PreError {
-                            code: "LetInvalidName",
-                            message: format!(
+                        return Err(pre_error(
+                            "LetInvalidName",
+                            format!(
                                 "invalid constant name '{}': must be [A-Z_][A-Z0-9_]*",
                                 name
                             ),
-                            line: line_no,
-                            col: 1,
-                        });
+                            line_no,
+                            1,
+                        ));
                     }
                     if env.insert(name, val).is_err() {
-                        return Err(PreError {
-                            code: "LetRedefinition",
-                            message: "constant already defined".into(),
-                            line: line_no,
-                            col: 1,
-                        });
+                        return Err(pre_error(
+                            "LetRedefinition",
+                            "constant already defined",
+                            line_no,
+                            1,
+                        ));
                     }
                 }
                 Err(pe) => {
-                    return Err(PreError {
-                        code: pe.0,
-                        message: pe.1,
-                        line: line_no,
-                        col: 1,
-                    });
+                    return Err(pre_error(pe.0, pe.1, line_no, 1));
                 }
             }
             i += 1;
@@ -212,43 +203,37 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
                 && trimmed_ws[..6].eq_ignore_ascii_case("repeat")
                 && trimmed_ws.as_bytes()[6].is_ascii_whitespace()
             {
-                diags.push(Diagnostic {
-                    severity: Severity::Warning,
-                    code: "LegacyRepeatSyntax",
-                    message: "repeat blocks support the function form repeat(N) { ... }".into(),
-                    line: line_no,
-                    col: 1,
-                    span_len: 0,
-                    suggestion: Some("Rewrite as repeat(N) { ... }".into()),
-                });
+                diags.push(pre_warning(
+                    "LegacyRepeatSyntax",
+                    "repeat blocks support the function form repeat(N) { ... }",
+                    line_no,
+                    1,
+                    0,
+                    Some("Rewrite as repeat(N) { ... }".into()),
+                ));
                 hints.repeat = true;
             }
             let (n, has_brace) = match parse_repeat_header(rest) {
                 Ok((n, b)) => (n, b),
                 Err((code, msg)) => {
-                    return Err(PreError {
-                        code,
-                        message: msg,
-                        line: line_no,
-                        col: 1,
-                    });
+                    return Err(pre_error(code, msg, line_no, 1));
                 }
             };
             if !has_brace {
-                return Err(PreError {
-                    code: "RepeatMissingBrace",
-                    message: "expected '{' after repeat N".into(),
-                    line: line_no,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "RepeatMissingBrace",
+                    "expected '{' after repeat N",
+                    line_no,
+                    1,
+                ));
             }
             if n > opts.max_repeat_n {
-                return Err(PreError {
-                    code: "RepeatNTooLarge",
-                    message: format!("repeat count {} exceeds cap {}", n, opts.max_repeat_n),
-                    line: line_no,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "RepeatNTooLarge",
+                    format!("repeat count {} exceeds cap {}", n, opts.max_repeat_n),
+                    line_no,
+                    1,
+                ));
             }
 
             let body_start = i + 1;
@@ -285,12 +270,12 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
                 j += 1;
             }
             if depth != 0 {
-                return Err(PreError {
-                    code: "RepeatMissingBrace",
-                    message: "missing closing '}' for repeat block".into(),
-                    line: line_no,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "RepeatMissingBrace",
+                    "missing closing '}' for repeat block",
+                    line_no,
+                    1,
+                ));
             }
             let body_end = j;
 
@@ -309,12 +294,12 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
             if out_lines.len() + body.lines.len().saturating_mul(n as usize)
                 > opts.max_expanded_lines
             {
-                return Err(PreError {
-                    code: "RepeatExpansionTooLarge",
-                    message: "expanded lines exceed cap".into(),
-                    line: line_no,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "RepeatExpansionTooLarge",
+                    "expanded lines exceed cap",
+                    line_no,
+                    1,
+                ));
             }
             for _ in 0..n {
                 append_block(&body, &mut out_lines, &mut sm);
@@ -335,12 +320,8 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
                     // Built-in command handled later in substitute_and_emit.
                 } else {
                     let args =
-                        parse_call_args(call.args, &env).map_err(|(code, msg)| PreError {
-                            code,
-                            message: msg,
-                            line: line_no,
-                            col: 1,
-                        })?;
+                        parse_call_args(call.args, &env)
+                            .map_err(|(code, msg)| pre_error(code, msg, line_no, 1))?;
                     expand_function(
                         call.name,
                         &args,
@@ -355,12 +336,12 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
                         &mut hints,
                     )?;
                     if out_lines.len() > opts.max_expanded_lines {
-                        return Err(PreError {
-                            code: "ExpandedLinesTooLarge",
-                            message: "expanded lines exceed cap".into(),
-                            line: line_no,
-                            col: 1,
-                        });
+                        return Err(pre_error(
+                            "ExpandedLinesTooLarge",
+                            "expanded lines exceed cap",
+                            line_no,
+                            1,
+                        ));
                     }
                     i += 1;
                     continue;
@@ -368,22 +349,17 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
             }
             Ok(None) => {}
             Err((code, msg)) => {
-                return Err(PreError {
-                    code,
-                    message: msg,
-                    line: line_no,
-                    col: 1,
-                });
+                return Err(pre_error(code, msg, line_no, 1));
             }
         }
 
         if trimmed == "}" {
-            return Err(PreError {
-                code: "UnexpectedBrace",
-                message: "unexpected '}'".into(),
-                line: line_no,
-                col: 1,
-            });
+            return Err(pre_error(
+                "UnexpectedBrace",
+                "unexpected '}'",
+                line_no,
+                1,
+            ));
         }
 
         match substitute_and_emit(
@@ -398,59 +374,52 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
         ) {
             Ok(()) => {}
             Err(pe) => {
-                return Err(PreError {
-                    code: pe.0,
-                    message: pe.1,
-                    line: line_no,
-                    col: 1,
-                });
+                return Err(pre_error(pe.0, pe.1, line_no, 1));
             }
         }
         if out_lines.len() > opts.max_expanded_lines {
-            return Err(PreError {
-                code: "ExpandedLinesTooLarge",
-                message: "expanded lines exceed cap".into(),
-                line: line_no,
-                col: 1,
-            });
+            return Err(pre_error(
+                "ExpandedLinesTooLarge",
+                "expanded lines exceed cap",
+                line_no,
+                1,
+            ));
         }
         i += 1;
     }
 
     for (name, def) in &functions {
         if !def.used {
-            diags.push(Diagnostic {
-                severity: Severity::Warning,
-                code: "FnUnused",
-                message: format!("function '{}' is defined but never called", name),
-                line: def.defined_line,
-                col: def.defined_col,
-                span_len: 0,
-                suggestion: None,
-            });
+            diags.push(pre_warning(
+                "FnUnused",
+                format!("function '{}' is defined but never called", name),
+                def.defined_line,
+                def.defined_col,
+                0,
+                None,
+            ));
         }
     }
 
     let approx_nonempty = out_lines.len();
     if approx_nonempty as f32 >= (MAX_DSL_LINES as f32 * opts.near_cap_ratio) {
-        diags.push(Diagnostic {
-            severity: Severity::Warning,
-            code: "NearCapLines",
-            message: format!(
+        diags.push(pre_warning(
+            "NearCapLines",
+            format!(
                 "lines approaching cap: {} / {}",
                 approx_nonempty, MAX_DSL_LINES
             ),
-            line: 0,
-            col: 0,
-            span_len: 0,
-            suggestion: None,
-        });
+            0,
+            0,
+            0,
+            None,
+        ));
     }
 
     Ok(PreprocessOutput {
         text: join_lines(&out_lines),
         sourcemap: sm,
-        diags,
+        diagnostics: diags,
     })
 }
 
@@ -469,10 +438,10 @@ fn preprocess_block(
     functions: &mut FunctionRegistry,
     stack: &mut Vec<String>,
     hints: &mut LegacyHintFlags,
-) -> Result<PreBlock, PreError> {
+) -> Result<PreBlock, CompileError> {
     let mut out: Vec<String> = Vec::new();
     let mut sm: Vec<OrigLoc> = Vec::new();
-    let mut diags: Vec<Diagnostic> = Vec::new();
+    let mut diags: Vec<CompileError> = Vec::new();
     let mut i = start;
     while i < end {
         let raw = lines[i];
@@ -486,32 +455,27 @@ fn preprocess_block(
             match parse_let(rest) {
                 Ok((name, val)) => {
                     if !is_upper_name(&name) {
-                        return Err(PreError {
-                            code: "LetInvalidName",
-                            message: format!(
+                        return Err(pre_error(
+                            "LetInvalidName",
+                            format!(
                                 "invalid constant name '{}': must be [A-Z_][A-Z0-9_]*",
                                 name
                             ),
-                            line: line_no,
-                            col: 1,
-                        });
+                            line_no,
+                            1,
+                        ));
                     }
                     if env.insert(name, val).is_err() {
-                        return Err(PreError {
-                            code: "LetRedefinition",
-                            message: "constant already defined".into(),
-                            line: line_no,
-                            col: 1,
-                        });
+                        return Err(pre_error(
+                            "LetRedefinition",
+                            "constant already defined",
+                            line_no,
+                            1,
+                        ));
                     }
                 }
                 Err(pe) => {
-                    return Err(PreError {
-                        code: pe.0,
-                        message: pe.1,
-                        line: line_no,
-                        col: 1,
-                    });
+                    return Err(pre_error(pe.0, pe.1, line_no, 1));
                 }
             }
             i += 1;
@@ -521,29 +485,24 @@ fn preprocess_block(
             let (n, has) = match parse_repeat_header(rest) {
                 Ok(v) => v,
                 Err((c, m)) => {
-                    return Err(PreError {
-                        code: c,
-                        message: m,
-                        line: line_no,
-                        col: 1,
-                    });
+                    return Err(pre_error(c, m, line_no, 1));
                 }
             };
             if !has {
-                return Err(PreError {
-                    code: "RepeatMissingBrace",
-                    message: "expected '{' after repeat N".into(),
-                    line: line_no,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "RepeatMissingBrace",
+                    "expected '{' after repeat N",
+                    line_no,
+                    1,
+                ));
             }
             if n > opts.max_repeat_n {
-                return Err(PreError {
-                    code: "RepeatNTooLarge",
-                    message: format!("repeat count {} exceeds cap {}", n, opts.max_repeat_n),
-                    line: line_no,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "RepeatNTooLarge",
+                    format!("repeat count {} exceeds cap {}", n, opts.max_repeat_n),
+                    line_no,
+                    1,
+                ));
             }
             // Find matching '}'
             let mut depth: i32 = 1;
@@ -570,12 +529,12 @@ fn preprocess_block(
                 j += 1;
             }
             if depth != 0 {
-                return Err(PreError {
-                    code: "RepeatMissingBrace",
-                    message: "missing closing '}' for repeat block".into(),
-                    line: line_no,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "RepeatMissingBrace",
+                    "missing closing '}' for repeat block",
+                    line_no,
+                    1,
+                ));
             }
             let body = preprocess_block(
                 lines,
@@ -588,12 +547,12 @@ fn preprocess_block(
                 hints,
             )?;
             if out.len() + body.lines.len().saturating_mul(n as usize) > opts.max_expanded_lines {
-                return Err(PreError {
-                    code: "RepeatExpansionTooLarge",
-                    message: "expanded lines exceed cap".into(),
-                    line: line_no,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "RepeatExpansionTooLarge",
+                    "expanded lines exceed cap",
+                    line_no,
+                    1,
+                ));
             }
             for _ in 0..n {
                 append_block(&body, &mut out, &mut sm);
@@ -612,23 +571,19 @@ fn preprocess_block(
                     // Built-in command handled later in substitute_and_emit.
                 } else {
                     let args =
-                        parse_call_args(call.args, &env).map_err(|(code, msg)| PreError {
-                            code,
-                            message: msg,
-                            line: line_no,
-                            col: 1,
-                        })?;
+                        parse_call_args(call.args, &env)
+                            .map_err(|(code, msg)| pre_error(code, msg, line_no, 1))?;
                     expand_function(
                         call.name, &args, line_no, lines, opts, &env, functions, stack, &mut out,
                         &mut sm, hints,
                     )?;
                     if out.len() > opts.max_expanded_lines {
-                        return Err(PreError {
-                            code: "ExpandedLinesTooLarge",
-                            message: "expanded lines exceed cap".into(),
-                            line: line_no,
-                            col: 1,
-                        });
+                        return Err(pre_error(
+                            "ExpandedLinesTooLarge",
+                            "expanded lines exceed cap",
+                            line_no,
+                            1,
+                        ));
                     }
                     i += 1;
                     continue;
@@ -636,33 +591,23 @@ fn preprocess_block(
             }
             Ok(None) => {}
             Err((code, msg)) => {
-                return Err(PreError {
-                    code,
-                    message: msg,
-                    line: line_no,
-                    col: 1,
-                });
+                return Err(pre_error(code, msg, line_no, 1));
             }
         }
         // Regular line
         match substitute_and_emit(t, line_no, &env, &mut out, &mut sm, &mut diags, hints, true) {
             Ok(()) => {}
             Err(pe) => {
-                return Err(PreError {
-                    code: pe.0,
-                    message: pe.1,
-                    line: line_no,
-                    col: 1,
-                });
+                return Err(pre_error(pe.0, pe.1, line_no, 1));
             }
         }
         if out.len() > opts.max_expanded_lines {
-            return Err(PreError {
-                code: "ExpandedLinesTooLarge",
-                message: "expanded lines exceed cap".into(),
-                line: line_no,
-                col: 1,
-            });
+            return Err(pre_error(
+                "ExpandedLinesTooLarge",
+                "expanded lines exceed cap",
+                line_no,
+                1,
+            ));
         }
         i += 1;
     }
@@ -740,7 +685,7 @@ fn repeat_rest(line: &str) -> Option<&str> {
 
 fn gather_functions(
     lines: &Vec<&str>,
-) -> Result<(FunctionRegistry, Vec<(usize, usize)>), PreError> {
+) -> Result<(FunctionRegistry, Vec<(usize, usize)>), CompileError> {
     let mut functions: FunctionRegistry = BTreeMap::new();
     let mut skips: Vec<(usize, usize)> = Vec::new();
     let mut i = 0usize;
@@ -756,12 +701,12 @@ fn gather_functions(
 
         if trimmed == "}" {
             if block_depth == 0 {
-                return Err(PreError {
-                    code: "UnexpectedBrace",
-                    message: "unexpected '}'".into(),
-                    line: (i as u16) + 1,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "UnexpectedBrace",
+                    "unexpected '}'",
+                    (i as u16) + 1,
+                    1,
+                ));
             }
             block_depth -= 1;
             block_stack.pop();
@@ -770,19 +715,15 @@ fn gather_functions(
         }
 
         if let Some(rest) = repeat_rest(trimmed) {
-            let (_n, has) = parse_repeat_header(rest).map_err(|(c, m)| PreError {
-                code: c,
-                message: m,
-                line: (i as u16) + 1,
-                col: 1,
-            })?;
+            let (_n, has) =
+                parse_repeat_header(rest).map_err(|(c, m)| pre_error(c, m, (i as u16) + 1, 1))?;
             if !has {
-                return Err(PreError {
-                    code: "RepeatMissingBrace",
-                    message: "expected '{' after repeat N".into(),
-                    line: (i as u16) + 1,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "RepeatMissingBrace",
+                    "expected '{' after repeat N",
+                    (i as u16) + 1,
+                    1,
+                ));
             }
             block_depth += 1;
             block_stack.push((i as u16) + 1);
@@ -792,34 +733,30 @@ fn gather_functions(
 
         if let Some(rest) = starts_with_ci(trimmed, "fn") {
             if block_depth != 0 {
-                return Err(PreError {
-                    code: "FnNested",
-                    message: "function definitions must appear at top level".into(),
-                    line: (i as u16) + 1,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "FnNested",
+                    "function definitions must appear at top level",
+                    (i as u16) + 1,
+                    1,
+                ));
             }
-            let (name, params, has_brace) = parse_fn_header(rest).map_err(|(c, m)| PreError {
-                code: c,
-                message: m,
-                line: (i as u16) + 1,
-                col: 1,
-            })?;
+            let (name, params, has_brace) =
+                parse_fn_header(rest).map_err(|(c, m)| pre_error(c, m, (i as u16) + 1, 1))?;
             if !has_brace {
-                return Err(PreError {
-                    code: "FnMissingBrace",
-                    message: "expected '{' after function name".into(),
-                    line: (i as u16) + 1,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "FnMissingBrace",
+                    "expected '{' after function name",
+                    (i as u16) + 1,
+                    1,
+                ));
             }
             if functions.contains_key(&name) {
-                return Err(PreError {
-                    code: "FnRedefinition",
-                    message: format!("function '{}' already defined", name),
-                    line: (i as u16) + 1,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "FnRedefinition",
+                    format!("function '{}' already defined", name),
+                    (i as u16) + 1,
+                    1,
+                ));
             }
             let mut depth: i32 = 1;
             let mut j = i + 1;
@@ -831,27 +768,23 @@ fn gather_functions(
                     continue;
                 }
                 if starts_with_ci(trimmed_body, "fn").is_some() {
-                    return Err(PreError {
-                        code: "FnNested",
-                        message: "function definitions cannot be nested".into(),
-                        line: (j as u16) + 1,
-                        col: 1,
-                    });
+                    return Err(pre_error(
+                        "FnNested",
+                        "function definitions cannot be nested",
+                        (j as u16) + 1,
+                        1,
+                    ));
                 }
                 if let Some(rest2) = repeat_rest(trimmed_body) {
-                    let (_n, has) = parse_repeat_header(rest2).map_err(|(c, m)| PreError {
-                        code: c,
-                        message: m,
-                        line: (j as u16) + 1,
-                        col: 1,
-                    })?;
+                    let (_n, has) = parse_repeat_header(rest2)
+                        .map_err(|(c, m)| pre_error(c, m, (j as u16) + 1, 1))?;
                     if !has {
-                        return Err(PreError {
-                            code: "RepeatMissingBrace",
-                            message: "expected '{' after repeat N".into(),
-                            line: (j as u16) + 1,
-                            col: 1,
-                        });
+                        return Err(pre_error(
+                            "RepeatMissingBrace",
+                            "expected '{' after repeat N",
+                            (j as u16) + 1,
+                            1,
+                        ));
                     }
                     depth += 1;
                     j += 1;
@@ -868,12 +801,12 @@ fn gather_functions(
                 j += 1;
             }
             if depth != 0 {
-                return Err(PreError {
-                    code: "FnMissingBrace",
-                    message: "missing closing '}' for function".into(),
-                    line: (i as u16) + 1,
-                    col: 1,
-                });
+                return Err(pre_error(
+                    "FnMissingBrace",
+                    "missing closing '}' for function",
+                    (i as u16) + 1,
+                    1,
+                ));
             }
             let body_start = i + 1;
             let body_end = j;
@@ -897,12 +830,12 @@ fn gather_functions(
     }
     if block_depth != 0 {
         let line = block_stack.pop().unwrap_or_else(|| lines.len() as u16);
-        return Err(PreError {
-            code: "RepeatMissingBrace",
-            message: "missing closing '}'".into(),
+        return Err(pre_error(
+            "RepeatMissingBrace",
+            "missing closing '}'",
             line,
-            col: 1,
-        });
+            1,
+        ));
     }
     Ok((functions, skips))
 }
@@ -919,40 +852,40 @@ fn expand_function(
     out_lines: &mut Vec<String>,
     sm: &mut Vec<OrigLoc>,
     hints: &mut LegacyHintFlags,
-) -> Result<(), PreError> {
+) -> Result<(), CompileError> {
     if stack.iter().any(|n| n == name) {
-        return Err(PreError {
-            code: "FnRecursion",
-            message: format!("recursive call of '{}'", name),
-            line: call_line,
-            col: 1,
-        });
+        return Err(pre_error(
+            "FnRecursion",
+            format!("recursive call of '{}'", name),
+            call_line,
+            1,
+        ));
     }
 
     let def = match functions.get(name) {
         Some(def) => def.clone(),
         None => {
-            return Err(PreError {
-                code: "FnUndefined",
-                message: format!("function '{}' not defined", name),
-                line: call_line,
-                col: 1,
-            });
+            return Err(pre_error(
+                "FnUndefined",
+                format!("function '{}' not defined", name),
+                call_line,
+                1,
+            ));
         }
     };
 
     if def.params.len() != args.len() {
-        return Err(PreError {
-            code: "FnWrongArgCount",
-            message: format!(
+        return Err(pre_error(
+            "FnWrongArgCount",
+            format!(
                 "function '{}' expects {} argument(s), got {}",
                 name,
                 def.params.len(),
                 args.len()
             ),
-            line: call_line,
-            col: 1,
-        });
+            call_line,
+            1,
+        ));
     }
 
     stack.push(name.to_string());
@@ -980,12 +913,12 @@ fn expand_function(
     stack.pop();
 
     if out_lines.len() + block.lines.len() > opts.max_expanded_lines {
-        return Err(PreError {
-            code: "ExpandedLinesTooLarge",
-            message: "expanded lines exceed cap".into(),
-            line: call_line,
-            col: 1,
-        });
+        return Err(pre_error(
+            "ExpandedLinesTooLarge",
+            "expanded lines exceed cap",
+            call_line,
+            1,
+        ));
     }
 
     append_block(&block, out_lines, sm);
@@ -1363,7 +1296,7 @@ fn substitute_and_emit(
     env: &LetEnv,
     out_lines: &mut Vec<String>,
     sm: &mut Vec<OrigLoc>,
-    diags: &mut Vec<Diagnostic>,
+    diags: &mut Vec<CompileError>,
     hints: &mut LegacyHintFlags,
     allow_hint: bool,
 ) -> Result<(), (&'static str, String)> {
@@ -1554,41 +1487,38 @@ fn substitute_and_emit(
         && !trimmed.trim_start().starts_with("modtap(")
         && !hints.modtap
     {
-        diags.push(Diagnostic {
-            severity: Severity::Warning,
-            code: "LegacyModtapSyntax",
-            message: "modtap now supports the function form modtap(\"MOD+KEY\")".into(),
-            line: orig_line,
-            col: 1,
-            span_len: 0,
-            suggestion: Some("Use modtap(\"MOD+KEY\")".into()),
-        });
+        diags.push(pre_warning(
+            "LegacyModtapSyntax",
+            "modtap now supports the function form modtap(\"MOD+KEY\")",
+            orig_line,
+            1,
+            0,
+            Some("Use modtap(\"MOD+KEY\")".into()),
+        ));
         hints.modtap = true;
     }
 
     if starts_with_ci(trimmed, "hold").is_some() || starts_with_ci(trimmed, "release").is_some() {
-        diags.push(Diagnostic {
-            severity: Severity::Warning,
-            code: "HoldReleaseNotSupported",
-            message: "hold/release require firmware update; try modtap/tap".into(),
-            line: orig_line,
-            col: 1,
-            span_len: 0,
-            suggestion: Some("Use modtap(\"MOD+KEY\") or tap(\"KEY\")".into()),
-        });
+        diags.push(pre_warning(
+            "HoldReleaseNotSupported",
+            "hold/release require firmware update; try modtap/tap",
+            orig_line,
+            1,
+            0,
+            Some("Use modtap(\"MOD+KEY\") or tap(\"KEY\")".into()),
+        ));
     }
 
     if let Some(rest) = starts_with_ci(trimmed, "delay") {
         if allow_hint && !hints.delay {
-            diags.push(Diagnostic {
-                severity: Severity::Warning,
-                code: "LegacyDelaySyntax",
-                message: "delay now supports the function form delay(ms)".into(),
-                line: orig_line,
-                col: 1,
-                span_len: 0,
-                suggestion: Some("Use delay(ms)".into()),
-            });
+            diags.push(pre_warning(
+                "LegacyDelaySyntax",
+                "delay now supports the function form delay(ms)",
+                orig_line,
+                1,
+                0,
+                Some("Use delay(ms)".into()),
+            ));
             hints.delay = true;
         }
         let tok = rest.trim();
@@ -1604,30 +1534,28 @@ fn substitute_and_emit(
             tok.to_string()
         };
         if val.trim() == "0" {
-            diags.push(Diagnostic {
-                severity: Severity::Warning,
-                code: "UselessDelayZero",
-                message: "delay 0 is a no-op".into(),
-                line: orig_line,
-                col: 1,
-                span_len: 0,
-                suggestion: Some("Remove this line".into()),
-            });
+            diags.push(pre_warning(
+                "UselessDelayZero",
+                "delay 0 is a no-op",
+                orig_line,
+                1,
+                0,
+                Some("Remove this line".into()),
+            ));
         }
         let prev_is_delay = out_lines
             .last()
             .map(|l| l.trim_start().to_ascii_lowercase().starts_with("delay "))
             .unwrap_or(false);
         if prev_is_delay {
-            diags.push(Diagnostic {
-                severity: Severity::Warning,
-                code: "AdjacentDelays",
-                message: "adjacent delays will be coalesced".into(),
-                line: orig_line,
-                col: 1,
-                span_len: 0,
-                suggestion: Some("Combine into one delay".into()),
-            });
+            diags.push(pre_warning(
+                "AdjacentDelays",
+                "adjacent delays will be coalesced",
+                orig_line,
+                1,
+                0,
+                Some("Combine into one delay".into()),
+            ));
         }
         out_lines.push(format!("delay {}", val));
         sm.push(OrigLoc {
@@ -1667,15 +1595,14 @@ fn substitute_and_emit(
             return Err(("TextEmpty", "missing text".into()));
         }
         if allow_hint && !hints.text {
-            diags.push(Diagnostic {
-                severity: Severity::Warning,
-                code: "LegacyTextSyntax",
-                message: "text now supports the function form text(\"...\", delay)".into(),
-                line: orig_line,
-                col: 1,
-                span_len: 0,
-                suggestion: Some("Use text(\"...\", delay)".into()),
-            });
+            diags.push(pre_warning(
+                "LegacyTextSyntax",
+                "text now supports the function form text(\"...\", delay)",
+                orig_line,
+                1,
+                0,
+                Some("Use text(\"...\", delay)".into()),
+            ));
             hints.text = true;
         }
         let mut text_part = rest;
@@ -1769,15 +1696,14 @@ fn substitute_and_emit(
         && !trimmed.trim_start().starts_with("modtap(")
         && !hints.modtap
     {
-        diags.push(Diagnostic {
-            severity: Severity::Warning,
-            code: "LegacyModtapSyntax",
-            message: "modtap now supports the function form modtap(\"MOD+KEY\")".into(),
-            line: orig_line,
-            col: 1,
-            span_len: 0,
-            suggestion: Some("Use modtap(\"MOD+KEY\")".into()),
-        });
+        diags.push(pre_warning(
+            "LegacyModtapSyntax",
+            "modtap now supports the function form modtap(\"MOD+KEY\")",
+            orig_line,
+            1,
+            0,
+            Some("Use modtap(\"MOD+KEY\")".into()),
+        ));
         hints.modtap = true;
     }
     if allow_hint
@@ -1785,15 +1711,14 @@ fn substitute_and_emit(
         && !trimmed.trim_start().starts_with("tap(")
         && !hints.tap
     {
-        diags.push(Diagnostic {
-            severity: Severity::Warning,
-            code: "LegacyTapSyntax",
-            message: "tap now supports the function form tap(\"KEY\")".into(),
-            line: orig_line,
-            col: 1,
-            span_len: 0,
-            suggestion: Some("Use tap(\"KEY\")".into()),
-        });
+        diags.push(pre_warning(
+            "LegacyTapSyntax",
+            "tap now supports the function form tap(\"KEY\")",
+            orig_line,
+            1,
+            0,
+            Some("Use tap(\"KEY\")".into()),
+        ));
         hints.tap = true;
     }
 
@@ -1816,7 +1741,7 @@ fn split2(s: &str) -> Option<(&str, &str)> {
 mod tests {
     use super::*;
     use crate::{
-        compile_and_link, lower_to_flat_us, DslError, FlatOp, KeyTap, OpOwned, KEY_DELETE,
+        compile_and_link, lower_to_flat_us, FlatOp, KeyTap, Mods, OpOwned, Severity, KEY_DELETE,
         KEY_ENTER, MOD_LCTRL,
     };
 
@@ -1874,16 +1799,16 @@ mod tests {
     fn repeat_missing_brace_errors() {
         let entry = "repeat(2) {\n tap(\"A\")\n"; // missing closing brace
         let err = compile_and_link(entry, &empty_provider).unwrap_err();
-        assert_eq!(err.line, 1); // header line
-        assert!(matches!(err.kind, DslError::InvalidLine));
+        assert_eq!(err.span.line, 1); // header line
+        assert_eq!(err.code, "RepeatMissingBrace");
     }
 
     #[test]
     fn let_redefinition_errors() {
         let entry = "let A = 1\nlet A = 2\n tap(\"A\")";
         let err = compile_and_link(entry, &empty_provider).unwrap_err();
-        assert_eq!(err.line, 2);
-        assert!(matches!(err.kind, DslError::InvalidLine));
+        assert_eq!(err.span.line, 2);
+        assert_eq!(err.code, "LetRedefinition");
     }
 
     #[test]
@@ -1892,8 +1817,8 @@ mod tests {
         let entry = "repeat(100) {\n  repeat(100) {\n    tap(\"A\")\n  }\n}";
         let err = compile_and_link(entry, &empty_provider).unwrap_err();
         // Error reported at the outer repeat header
-        assert_eq!(err.line, 1);
-        assert!(matches!(err.kind, DslError::InvalidLine));
+        assert_eq!(err.span.line, 1);
+        assert_eq!(err.code, "RepeatExpansionTooLarge");
     }
 
     #[test]
@@ -1902,8 +1827,8 @@ mod tests {
         // the first error to map back to original line 2.
         let entry = "repeat 2 {\n  zzz\n}";
         let err = compile_and_link(entry, &empty_provider).unwrap_err();
-        assert_eq!(err.line, 2);
-        assert!(matches!(err.kind, DslError::UnknownCommand));
+        assert_eq!(err.span.line, 2);
+        assert_eq!(err.code, "UnknownCommand");
     }
 
     #[test]
@@ -1911,8 +1836,8 @@ mod tests {
         // Error occurs inside inner repeat body at original line 3
         let entry = "repeat 2 {\n  repeat 3 {\n    zzz\n  }\n}";
         let err = compile_and_link(entry, &empty_provider).unwrap_err();
-        assert_eq!(err.line, 3);
-        assert!(matches!(err.kind, DslError::UnknownCommand));
+        assert_eq!(err.span.line, 3);
+        assert_eq!(err.code, "UnknownCommand");
     }
 
     #[test]
@@ -1920,8 +1845,8 @@ mod tests {
         let entry = "let A = \"X\"\nrepeat(2) {\n  let A = \"Y\"\n  tap(\"A\")\n}";
         let err = compile_and_link(entry, &empty_provider).unwrap_err();
         // Error should point to the nested 'let A = "Y"' at original line 3
-        assert_eq!(err.line, 3);
-        assert!(matches!(err.kind, DslError::InvalidLine));
+        assert_eq!(err.span.line, 3);
+        assert_eq!(err.code, "LetRedefinition");
     }
 
     #[test]
@@ -1955,7 +1880,7 @@ mod tests {
         let entry = "fn loop_fn {\n  loop_fn()\n}\nloop_fn()";
         let err = preprocess(entry, &PreprocessOptions::default()).unwrap_err();
         assert_eq!(err.code, "FnRecursion");
-        assert_eq!(err.line, 2);
+        assert_eq!(err.span.line, 2);
     }
 
     #[test]
@@ -1963,7 +1888,7 @@ mod tests {
         let entry = "missing()";
         let err = preprocess(entry, &PreprocessOptions::default()).unwrap_err();
         assert_eq!(err.code, "FnUndefined");
-        assert_eq!(err.line, 1);
+        assert_eq!(err.span.line, 1);
     }
 
     #[test]
@@ -1997,7 +1922,7 @@ mod tests {
         let entry = "fn greet(NAME) {\n  text NAME\n}\ngreet()";
         let err = preprocess(entry, &PreprocessOptions::default()).unwrap_err();
         assert_eq!(err.code, "FnWrongArgCount");
-        assert_eq!(err.line, 4);
+        assert_eq!(err.span.line, 4);
     }
 
     #[test]
@@ -2013,7 +1938,7 @@ mod tests {
         let owned = compile_and_link(entry, &empty_provider).expect("compile_and_link");
         match owned.ops.as_slice() {
             [OpOwned::Tap(KeyTap { usage, mods })] => {
-                assert_eq!(*mods, 0);
+                assert_eq!(*mods, Mods::empty());
                 assert_eq!(*usage, KEY_ENTER);
             }
             other => panic!("unexpected ops: {:?}", other),
@@ -2064,7 +1989,7 @@ mod tests {
         let entry = "fn helper {\n  tap(\"A\")\n}\ntap(\"B\")";
         let out = preprocess(entry, &PreprocessOptions::default()).expect("preprocess");
         assert!(
-            out.diags
+            out.diagnostics
                 .iter()
                 .any(|d| d.code == "FnUnused" && matches!(d.severity, Severity::Warning))
         );

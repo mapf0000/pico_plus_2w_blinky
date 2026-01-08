@@ -488,14 +488,20 @@ mod payloads {
             .map_err(|e| compile_err("compile", script.id, e))?;
         let flat = dsl_core::lower_to_flat_us(&program)
             .map_err(|e| compile_err("lower", script.id, e))?;
-        Ok(dsl_core::bytecode::encode(&flat))
+        let bytes = dsl_core::bytecode::encode(&flat).map_err(|_| {
+            anyhow::anyhow!(
+                "payload {} encode error: program exceeds maximum length",
+                script.id
+            )
+        })?;
+        Ok(bytes)
     }
 
-    fn compile_err(stage: &str, id: &str, err: dsl_core::DslErrorAt) -> anyhow::Error {
+    fn compile_err(stage: &str, id: &str, err: dsl_core::CompileError) -> anyhow::Error {
         anyhow::anyhow!(
-            "payload {id} {stage} error: {:?} (line {})",
-            err.kind,
-            err.line
+            "payload {id} {stage} error: {} (line {})",
+            err.code,
+            err.span.line
         )
     }
 

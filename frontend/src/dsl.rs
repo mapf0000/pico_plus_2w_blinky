@@ -1,4 +1,4 @@
-use dsl_core::{self as core, DslError, DslErrorAt, LayoutParseError};
+use dsl_core::{self as core, CompileError as CoreCompileError, LayoutParseError};
 use std::str::FromStr;
 
 struct BuiltinProvider;
@@ -29,27 +29,22 @@ pub fn compile(entry_dsl: &str, default_layout: &str) -> Result<Vec<u8>, Compile
         CompileError { message }
     })?;
     let flat = core::lower_to_flat_with_layout(&program, layout).map_err(from_compile_err)?;
-    Ok(core::bytecode::encode(&flat))
+    let bytes = core::bytecode::encode(&flat).map_err(|_| CompileError {
+        message: "Program exceeds maximum length".into(),
+    })?;
+    Ok(bytes)
 }
 
-fn from_compile_err(err: DslErrorAt) -> CompileError {
-    let base = match err.kind {
-        DslError::TooManyLines => "Program exceeds maximum length",
-        DslError::UnknownCommand => "Unknown command",
-        DslError::InvalidLine => "Invalid syntax",
-        DslError::ParseKey => "Unrecognized key name",
-        DslError::ParseMod => "Unrecognized modifier",
-        DslError::ParseDelay => "Invalid delay value",
-        DslError::TextEmpty => "text() requires a non-empty string",
-        DslError::UnknownLayout => "Unknown layout id",
-        DslError::LayoutNotEnabled => "Layout not enabled at build time",
-        DslError::UnknownScript => "call refers to unknown script",
-        DslError::RecursionTooDeep => "Recursive call detected",
-    };
-    let message = if err.line > 0 {
-        format!("{base} (line {})", err.line)
+fn from_compile_err(err: CoreCompileError) -> CompileError {
+    let base = if err.message.is_empty() {
+        err.code.to_string()
     } else {
-        base.to_string()
+        err.message
+    };
+    let message = if err.span.line > 0 {
+        format!("{base} (line {})", err.span.line)
+    } else {
+        base
     };
     CompileError { message }
 }

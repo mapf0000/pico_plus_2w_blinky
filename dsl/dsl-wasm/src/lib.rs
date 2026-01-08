@@ -1,4 +1,4 @@
-use dsl_core::{self as core, DslError, DslErrorAt, PreError};
+use dsl_core::{self as core, CompileError, Severity, Span};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use wasm_bindgen::prelude::*;
@@ -16,46 +16,39 @@ pub struct WasmDiagnostic {
     pub script: Option<String>,
 }
 
-fn diag(err: DslErrorAt) -> JsValue {
-    let code = match err.kind {
-        DslError::TooManyLines => "TooManyLines",
-        DslError::UnknownCommand => "UnknownCommand",
-        DslError::InvalidLine => "InvalidLine",
-        DslError::ParseKey => "ParseKey",
-        DslError::ParseMod => "ParseMod",
-        DslError::ParseDelay => "ParseDelay",
-        DslError::TextEmpty => "TextEmpty",
-        DslError::UnknownLayout => "UnknownLayout",
-        DslError::LayoutNotEnabled => "LayoutNotEnabled",
-        DslError::UnknownScript => "UnknownScript",
-        DslError::RecursionTooDeep => "RecursionTooDeep",
-    }
-    .to_string();
+fn diag(err: CompileError) -> JsValue {
+    let message = if err.message.is_empty() {
+        err.code.to_string()
+    } else {
+        err.message
+    };
     let wd = WasmDiagnostic {
-        severity: "error".into(),
-        line: err.line,
-        col: 0,
-        span_len: 0,
-        code: code.clone(),
-        message: format!("{} at line {}", code, err.line),
-        suggestion: None,
+        severity: severity_label(err.severity).into(),
+        line: err.span.line,
+        col: err.span.col,
+        span_len: err.span.len,
+        code: err.code.into(),
+        message,
+        suggestion: err.suggestion,
         script: None,
     };
     JsValue::from_serde(&wd).unwrap_or_else(|_| JsValue::from_str(&format!("{:?}", wd)))
 }
 
-fn diag_pre(err: PreError) -> JsValue {
-    let wd = WasmDiagnostic {
-        severity: "error".into(),
-        line: err.line,
-        col: err.col,
-        span_len: 0,
-        code: err.code.into(),
-        message: err.message,
-        suggestion: None,
-        script: None,
-    };
-    JsValue::from_serde(&wd).unwrap_or_else(|_| JsValue::from_str(&format!("{:?}", wd)))
+fn severity_label(sev: Severity) -> &'static str {
+    match sev {
+        Severity::Warning => "warning",
+        Severity::Error => "error",
+    }
+}
+
+fn remap_span(span: Span, map: &[core::OrigLoc]) -> Span {
+    let idx = (span.line as usize).saturating_sub(1);
+    if let Some(loc) = map.get(idx) {
+        Span::new(loc.line, span.col, span.len)
+    } else {
+        span
+    }
 }
 
 /// Compile a DSL entry script and a set of named scripts (by JSON id→text)
@@ -93,27 +86,22 @@ pub fn compile_to_bytecode_with_layout(
     let flat = core::lower_to_flat_with_layout(&owned, layout).map_err(diag)?;
 
     // 3) encode to bytecode
-    let bytes = core::bytecode::encode(&flat);
+    let bytes = core::bytecode::encode(&flat)
+        .map_err(|_| JsValue::from_str("program exceeds maximum length"))?;
     Ok(bytes.into_boxed_slice())
 }
 
 /// Quick syntax check of a single DSL text (no linking, no lowering).
 #[wasm_bindgen]
 pub fn lint_dsl(dsl: &str) -> Result<(), JsValue> {
-    let pre = core::preprocess(dsl, &core::PreprocessOptions::default()).map_err(diag_pre)?;
+    let pre = core::preprocess(dsl, &core::PreprocessOptions::default()).map_err(diag)?;
     let accept_all = |_| true;
     match core::compile_dsl_with_diag(&pre.text, accept_all) {
         Ok(_) => Ok(()),
         Err(e) => {
-            let mapped_line = pre
-                .sourcemap
-                .get((e.line as usize).saturating_sub(1))
-                .map(|loc| loc.line)
-                .unwrap_or(e.line);
-            Err(diag(DslErrorAt {
-                kind: e.kind,
-                line: mapped_line,
-            }))
+            let mut err = e;
+            err.span = remap_span(err.span, &pre.sourcemap);
+            Err(diag(err))
         }
     }
 }
@@ -140,15 +128,12 @@ pub fn lint_dsl_all(entry_dsl: &str, scripts_json: &str) -> Result<JsValue, JsVa
             entry_pre_text = Some(pre.text);
             entry_pre_map = Some(pre.sourcemap);
             // warnings
-            for d in pre.diags {
+            for d in pre.diagnostics {
                 out.push(WasmDiagnostic {
-                    severity: match d.severity {
-                        core::Severity::Warning => "warning".into(),
-                        core::Severity::Error => "error".into(),
-                    },
-                    line: d.line,
-                    col: d.col,
-                    span_len: d.span_len,
+                    severity: severity_label(d.severity).into(),
+                    line: d.span.line,
+                    col: d.span.col,
+                    span_len: d.span.len,
                     code: d.code.into(),
                     message: d.message,
                     suggestion: d.suggestion,
@@ -158,13 +143,13 @@ pub fn lint_dsl_all(entry_dsl: &str, scripts_json: &str) -> Result<JsValue, JsVa
         }
         Err(e) => {
             out.push(WasmDiagnostic {
-                severity: "error".into(),
-                line: e.line,
-                col: e.col,
-                span_len: 0,
+                severity: severity_label(e.severity).into(),
+                line: e.span.line,
+                col: e.span.col,
+                span_len: e.span.len,
                 code: e.code.into(),
                 message: e.message,
-                suggestion: None,
+                suggestion: e.suggestion,
                 script: None,
             });
             // If preprocess fails, still return what we have
@@ -178,15 +163,12 @@ pub fn lint_dsl_all(entry_dsl: &str, scripts_json: &str) -> Result<JsValue, JsVa
             Ok(pre) => {
                 pre_maps.insert(id.clone(), pre.sourcemap);
                 pre_scripts.insert(id.clone(), pre.text);
-                for d in pre.diags {
+                for d in pre.diagnostics {
                     out.push(WasmDiagnostic {
-                        severity: match d.severity {
-                            core::Severity::Warning => "warning".into(),
-                            core::Severity::Error => "error".into(),
-                        },
-                        line: d.line,
-                        col: d.col,
-                        span_len: d.span_len,
+                        severity: severity_label(d.severity).into(),
+                        line: d.span.line,
+                        col: d.span.col,
+                        span_len: d.span.len,
                         code: d.code.into(),
                         message: d.message,
                         suggestion: d.suggestion,
@@ -196,13 +178,13 @@ pub fn lint_dsl_all(entry_dsl: &str, scripts_json: &str) -> Result<JsValue, JsVa
             }
             Err(e) => {
                 out.push(WasmDiagnostic {
-                    severity: "error".into(),
-                    line: e.line,
-                    col: e.col,
-                    span_len: 0,
+                    severity: severity_label(e.severity).into(),
+                    line: e.span.line,
+                    col: e.span.col,
+                    span_len: e.span.len,
                     code: e.code.into(),
                     message: e.message,
-                    suggestion: None,
+                    suggestion: e.suggestion,
                     script: Some(id.clone()),
                 });
             }
@@ -213,62 +195,36 @@ pub fn lint_dsl_all(entry_dsl: &str, scripts_json: &str) -> Result<JsValue, JsVa
     if let Some(ref txt) = entry_pre_text {
         let exists = |id: &str| scripts.get(id).is_some();
         if let Err(e) = core::compile_dsl_with_diag(txt, exists) {
-            let mapped_line = entry_pre_map
-                .as_ref()
-                .and_then(|m| m.get((e.line as usize).saturating_sub(1)))
-                .map(|loc| loc.line)
-                .unwrap_or(e.line);
+            let mut err = e;
+            if let Some(map) = entry_pre_map.as_ref() {
+                err.span = remap_span(err.span, map);
+            }
             out.push(WasmDiagnostic {
-                severity: "error".into(),
-                line: mapped_line,
-                col: 0,
-                span_len: 0,
-                code: match e.kind {
-                    DslError::TooManyLines => "TooManyLines".into(),
-                    DslError::UnknownCommand => "UnknownCommand".into(),
-                    DslError::InvalidLine => "InvalidLine".into(),
-                    DslError::ParseKey => "ParseKey".into(),
-                    DslError::ParseMod => "ParseMod".into(),
-                    DslError::ParseDelay => "ParseDelay".into(),
-                    DslError::TextEmpty => "TextEmpty".into(),
-                    DslError::UnknownLayout => "UnknownLayout".into(),
-                    DslError::LayoutNotEnabled => "LayoutNotEnabled".into(),
-                    DslError::UnknownScript => "UnknownScript".into(),
-                    DslError::RecursionTooDeep => "RecursionTooDeep".into(),
-                },
-                message: format!("parse error at line {}", mapped_line),
-                suggestion: None,
+                severity: severity_label(err.severity).into(),
+                line: err.span.line,
+                col: err.span.col,
+                span_len: err.span.len,
+                code: err.code.into(),
+                message: err.message,
+                suggestion: err.suggestion,
                 script: None,
             });
         }
     }
     for (id, txt) in &pre_scripts {
         if let Err(e) = core::compile_dsl_with_diag(txt, |sid| scripts.get(sid).is_some()) {
-            let mapped_line = pre_maps
-                .get(id)
-                .and_then(|m| m.get((e.line as usize).saturating_sub(1)))
-                .map(|loc| loc.line)
-                .unwrap_or(e.line);
+            let mut err = e;
+            if let Some(map) = pre_maps.get(id) {
+                err.span = remap_span(err.span, map);
+            }
             out.push(WasmDiagnostic {
-                severity: "error".into(),
-                line: mapped_line,
-                col: 0,
-                span_len: 0,
-                code: match e.kind {
-                    DslError::TooManyLines => "TooManyLines".into(),
-                    DslError::UnknownCommand => "UnknownCommand".into(),
-                    DslError::InvalidLine => "InvalidLine".into(),
-                    DslError::ParseKey => "ParseKey".into(),
-                    DslError::ParseMod => "ParseMod".into(),
-                    DslError::ParseDelay => "ParseDelay".into(),
-                    DslError::TextEmpty => "TextEmpty".into(),
-                    DslError::UnknownLayout => "UnknownLayout".into(),
-                    DslError::LayoutNotEnabled => "LayoutNotEnabled".into(),
-                    DslError::UnknownScript => "UnknownScript".into(),
-                    DslError::RecursionTooDeep => "RecursionTooDeep".into(),
-                },
-                message: format!("parse error at line {}", mapped_line),
-                suggestion: None,
+                severity: severity_label(err.severity).into(),
+                line: err.span.line,
+                col: err.span.col,
+                span_len: err.span.len,
+                code: err.code.into(),
+                message: err.message,
+                suggestion: err.suggestion,
                 script: Some(id.clone()),
             });
         }
@@ -278,25 +234,13 @@ pub fn lint_dsl_all(entry_dsl: &str, scripts_json: &str) -> Result<JsValue, JsVa
     let provider = |id: &str| scripts.get(id).map(|s| s.as_str());
     if let Err(e) = core::compile_and_link(entry_dsl, &provider) {
         out.push(WasmDiagnostic {
-            severity: "error".into(),
-            line: e.line,
-            col: 0,
-            span_len: 0,
-            code: match e.kind {
-                DslError::TooManyLines => "TooManyLines".into(),
-                DslError::UnknownCommand => "UnknownCommand".into(),
-                DslError::InvalidLine => "InvalidLine".into(),
-                DslError::ParseKey => "ParseKey".into(),
-                DslError::ParseMod => "ParseMod".into(),
-                DslError::ParseDelay => "ParseDelay".into(),
-                DslError::TextEmpty => "TextEmpty".into(),
-                DslError::UnknownLayout => "UnknownLayout".into(),
-                DslError::LayoutNotEnabled => "LayoutNotEnabled".into(),
-                DslError::UnknownScript => "UnknownScript".into(),
-                DslError::RecursionTooDeep => "RecursionTooDeep".into(),
-            },
-            message: format!("parse/link error at line {}", e.line),
-            suggestion: None,
+            severity: severity_label(e.severity).into(),
+            line: e.span.line,
+            col: e.span.col,
+            span_len: e.span.len,
+            code: e.code.into(),
+            message: e.message,
+            suggestion: e.suggestion,
             script: None,
         });
     }

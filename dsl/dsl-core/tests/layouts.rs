@@ -2,7 +2,7 @@
 
 use dsl_core::{
     compile_and_link, lower_to_flat_with_layout, FlatOp, LayoutId, KEY_0, KEY_5, KEY_6, KEY_7,
-    KEY_A, KEY_MINUS, KEY_NON_US_BACKSLASH, KEY_SLASH, MOD_LALT, MOD_LSHIFT,
+    KEY_A, KEY_MINUS, KEY_NON_US_BACKSLASH, KEY_SLASH, MOD_LALT, MOD_LSHIFT, Mods,
 };
 
 fn empty_provider<'a>(_: &'a str) -> Option<&'a str> {
@@ -17,7 +17,7 @@ text("@[]{}\\|<>yzYZ_", 0)"#;
     let flat =
         lower_to_flat_with_layout(&owned, LayoutId::Us).expect("lower_to_flat_with_layout");
 
-    let taps: Vec<(u8, u8)> = flat
+    let taps: Vec<(dsl_core::Usage, Mods)> = flat
         .ops
         .iter()
         .map(|op| match op {
@@ -26,9 +26,9 @@ text("@[]{}\\|<>yzYZ_", 0)"#;
         })
         .collect();
 
-    let key_q = KEY_A + (b'Q' - b'A');
-    let key_y = KEY_A + (b'Y' - b'A');
-    let key_z = KEY_A + (b'Z' - b'A');
+    let key_q = KEY_A.add(b'Q' - b'A');
+    let key_y = KEY_A.add(b'Y' - b'A');
+    let key_z = KEY_A.add(b'Z' - b'A');
 
     let expected = vec![
         (key_q, MOD_LALT),               // @
@@ -38,10 +38,10 @@ text("@[]{}\\|<>yzYZ_", 0)"#;
         (KEY_0, MOD_LALT),               // }
         (KEY_MINUS, MOD_LALT),           // \
         (KEY_NON_US_BACKSLASH, MOD_LALT), // |
-        (KEY_NON_US_BACKSLASH, 0),       // <
+        (KEY_NON_US_BACKSLASH, Mods::empty()), // <
         (KEY_NON_US_BACKSLASH, MOD_LSHIFT), // >
-        (key_z, 0),                      // y
-        (key_y, 0),                      // z
+        (key_z, Mods::empty()),          // y
+        (key_y, Mods::empty()),          // z
         (key_z, MOD_LSHIFT),             // Y
         (key_y, MOD_LSHIFT),             // Z
         (KEY_SLASH, MOD_LSHIFT),         // _

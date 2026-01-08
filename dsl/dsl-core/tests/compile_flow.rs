@@ -10,7 +10,7 @@ fn compile_lower_encode_decode_roundtrip() {
     let owned = compile_and_link(entry, &empty_provider).expect("compile_and_link");
     let flat = lower_to_flat_us(&owned).expect("lower_to_flat_us");
 
-    let bytes = bytecode::encode(&flat);
+    let bytes = bytecode::encode(&flat).expect("encode");
     let decoded = bytecode::decode_to_flat(&bytes).expect("decode_to_flat");
 
     assert_eq!(decoded, flat);
@@ -19,7 +19,7 @@ fn compile_lower_encode_decode_roundtrip() {
 #[test]
 fn encode_empty_program() {
     let program = FlatProgram::new();
-    let bytes = bytecode::encode(&program);
+    let bytes = bytecode::encode(&program).expect("encode");
     let decoded = bytecode::decode_to_flat(&bytes).expect("decode_to_flat");
     assert_eq!(decoded, program);
 }
