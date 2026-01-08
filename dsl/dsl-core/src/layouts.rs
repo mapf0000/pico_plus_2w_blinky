@@ -1,11 +1,29 @@
 use core::str::FromStr;
 
+use crate::char_to_key_us;
+#[cfg(feature = "layout_win_en_gb")]
 use crate::{
-    char_to_key_us, KEY_0, KEY_2, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9, KEY_APOSTROPHE,
-    KEY_BACKSLASH, KEY_COMMA, KEY_DOT, KEY_GRAVE, KEY_LEFT_BRACKET, KEY_MINUS,
-    KEY_NON_US_BACKSLASH, KEY_RIGHT_BRACKET, KEY_SLASH, KEY_SPACE, MOD_LALT, MOD_LSHIFT,
-    MOD_RALT,
+    KEY_2, KEY_APOSTROPHE, KEY_BACKSLASH, KEY_NON_US_BACKSLASH, MOD_LSHIFT, MOD_RALT,
 };
+#[cfg(feature = "layout_win_pt_br")]
+use crate::{
+    KEY_BACKSLASH, KEY_GRAVE, KEY_NON_US_BACKSLASH, KEY_RIGHT_BRACKET, KEY_SLASH, KEY_SPACE,
+    MOD_LSHIFT, MOD_RALT,
+};
+#[cfg(feature = "layout_win_de_de")]
+use crate::{
+    KEY_0, KEY_2, KEY_6, KEY_7, KEY_8, KEY_9, KEY_BACKSLASH, KEY_COMMA, KEY_DOT, KEY_MINUS,
+    KEY_NON_US_BACKSLASH, KEY_RIGHT_BRACKET, KEY_SLASH, KEY_SPACE, MOD_LSHIFT, MOD_RALT,
+};
+#[cfg(feature = "layout_mac_en_gb")]
+use crate::{KEY_2, KEY_APOSTROPHE, KEY_BACKSLASH, KEY_NON_US_BACKSLASH, MOD_LSHIFT};
+#[cfg(feature = "layout_mac_de_de")]
+use crate::{
+    KEY_0, KEY_2, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9, KEY_BACKSLASH, KEY_COMMA, KEY_DOT,
+    KEY_MINUS, KEY_NON_US_BACKSLASH, KEY_RIGHT_BRACKET, KEY_SLASH, MOD_LALT, MOD_LSHIFT,
+};
+#[cfg(feature = "layout_mac_pt_br")]
+use crate::{KEY_LEFT_BRACKET, KEY_NON_US_BACKSLASH, KEY_RIGHT_BRACKET, MOD_LALT, MOD_LSHIFT};
 
 pub const DEFAULT_LAYOUT_ID: &str = "win_en-US";
 const LAYOUT_WIN_EN_GB_ID: &str = "win_en-GB";
@@ -200,6 +218,14 @@ fn parse_mac_de_de() -> Result<LayoutId, LayoutParseError> {
     }
 }
 
+#[cfg(any(
+    feature = "layout_win_en_gb",
+    feature = "layout_win_pt_br",
+    feature = "layout_win_de_de",
+    feature = "layout_mac_en_gb",
+    feature = "layout_mac_pt_br",
+    feature = "layout_mac_de_de"
+))]
 #[derive(Debug, Clone, Copy)]
 struct LayoutOverride {
     ch: char,
@@ -207,6 +233,14 @@ struct LayoutOverride {
     mods: u8,
 }
 
+#[cfg(any(
+    feature = "layout_win_en_gb",
+    feature = "layout_win_pt_br",
+    feature = "layout_win_de_de",
+    feature = "layout_mac_en_gb",
+    feature = "layout_mac_pt_br",
+    feature = "layout_mac_de_de"
+))]
 fn map_with_overrides(c: char, overrides: &[LayoutOverride]) -> Option<(u8, u8)> {
     for ov in overrides {
         if ov.ch == c {
@@ -216,9 +250,25 @@ fn map_with_overrides(c: char, overrides: &[LayoutOverride]) -> Option<(u8, u8)>
     char_to_key_us(c)
 }
 
+#[cfg(any(
+    feature = "layout_win_pt_br",
+    feature = "layout_win_de_de",
+    feature = "layout_mac_de_de"
+))]
 const KEY_Q: u8 = crate::KEY_A + (b'Q' - b'A');
+#[cfg(feature = "layout_win_pt_br")]
 const KEY_W: u8 = crate::KEY_A + (b'W' - b'A');
+#[cfg(any(
+    feature = "layout_win_pt_br",
+    feature = "layout_win_de_de",
+    feature = "layout_mac_de_de"
+))]
 const KEY_Y: u8 = crate::KEY_A + (b'Y' - b'A');
+#[cfg(any(
+    feature = "layout_win_pt_br",
+    feature = "layout_win_de_de",
+    feature = "layout_mac_de_de"
+))]
 const KEY_Z: u8 = crate::KEY_A + (b'Z' - b'A');
 
 #[cfg(feature = "layout_win_en_gb")]
@@ -704,3 +754,73 @@ const MAC_PT_BR_OVERRIDES: &[LayoutOverride] = &[
         mods: MOD_LSHIFT | MOD_LALT,
     },
 ];
+
+#[cfg(all(test, feature = "std", feature = "layout_win_de_de"))]
+mod tests_win_de_de {
+    use crate::{
+        compile_and_link, lower_to_flat_with_layout, preprocess, FlatOp, LayoutId,
+        PreprocessOptions, KEY_A,
+    };
+
+    fn empty_provider<'a>(_: &'a str) -> Option<&'a str> {
+        None
+    }
+
+    #[test]
+    fn layout_switches_text_lowering() {
+        let entry = "text(\"y\", 0)\nlayout(\"win_de-DE\")\ntext(\"y\", 0)";
+        let _ = preprocess(entry, &PreprocessOptions::default())
+            .unwrap_or_else(|e| panic!("preprocess: {:?}", e));
+        let owned = compile_and_link(entry, &empty_provider)
+            .unwrap_or_else(|e| panic!("compile_and_link: {:?}", e));
+        let flat =
+            lower_to_flat_with_layout(&owned, LayoutId::Us).expect("lower_to_flat_with_layout");
+        let taps: Vec<u8> = flat
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                FlatOp::Tap { usage, .. } => Some(*usage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(taps.len(), 2);
+        let key_y = KEY_A + (b'Y' - b'A');
+        let key_z = KEY_A + (b'Z' - b'A');
+        assert_eq!(taps[0], key_y);
+        assert_eq!(taps[1], key_z);
+    }
+}
+
+#[cfg(all(test, feature = "std", feature = "layout_mac_de_de"))]
+mod tests_mac_de_de {
+    use crate::{
+        compile_and_link, lower_to_flat_with_layout, preprocess, FlatOp, LayoutId,
+        PreprocessOptions, KEY_A, MOD_LALT,
+    };
+
+    fn empty_provider<'a>(_: &'a str) -> Option<&'a str> {
+        None
+    }
+
+    #[test]
+    fn layout_switches_text_lowering_mac_de() {
+        let entry = "layout(\"mac_de-DE\")\ntext(\"@\", 0)";
+        let _ = preprocess(entry, &PreprocessOptions::default())
+            .unwrap_or_else(|e| panic!("preprocess: {:?}", e));
+        let owned = compile_and_link(entry, &empty_provider)
+            .unwrap_or_else(|e| panic!("compile_and_link: {:?}", e));
+        let flat =
+            lower_to_flat_with_layout(&owned, LayoutId::Us).expect("lower_to_flat_with_layout");
+        let tap = flat
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                FlatOp::Tap { usage, mods } => Some((*usage, *mods)),
+                _ => None,
+            })
+            .expect("expected tap");
+        let key_q = KEY_A + (b'Q' - b'A');
+        assert_eq!(tap.0, key_q);
+        assert_eq!(tap.1, MOD_LALT);
+    }
+}
