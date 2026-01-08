@@ -7,6 +7,7 @@ use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::path::PathBuf;
 use std::process::Child;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 const HEADER_LEN: usize = 5;
@@ -19,6 +20,9 @@ const MAX_EXEC_OUTPUT: usize = 8 * 1024;
 const WAIT_CONNECT_MS: u64 = 1200;
 const RESPONSE_TIMEOUT_MS: u64 = 500;
 const RESPONSE_DEADLINE_MS: u64 = 5000;
+
+// Build host-agent with test-only flags once per test run.
+static HOST_AGENT_BUILD: OnceLock<Option<String>> = OnceLock::new();
 
 fn open_pty_pair() -> io::Result<(std::fs::File, std::fs::File, String)> {
     unsafe {
@@ -53,10 +57,6 @@ fn open_pty_pair() -> io::Result<(std::fs::File, std::fs::File, String)> {
 }
 
 fn host_agent_cmd() -> io::Result<std::process::Command> {
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_host-agent") {
-        return Ok(std::process::Command::new(path));
-    }
-
     let target_dir = target_dir();
     let target = host_target_triple();
     let bin_path = if target.is_empty() {
@@ -65,8 +65,12 @@ fn host_agent_cmd() -> io::Result<std::process::Command> {
         target_dir.join(target).join("debug").join("host-agent")
     };
 
-    if !bin_path.exists() {
-        build_host_agent(target, &target_dir)?;
+    let build_error =
+        HOST_AGENT_BUILD.get_or_init(|| build_host_agent(target, &target_dir).err().map(|err| {
+            err.to_string()
+        }));
+    if let Some(message) = build_error.as_ref() {
+        return Err(io::Error::new(io::ErrorKind::Other, message.clone()));
     }
 
     if !bin_path.exists() {
@@ -117,7 +121,9 @@ fn build_host_agent(target: &str, target_dir: &PathBuf) -> io::Result<()> {
     cmd.current_dir(workspace_root())
         .arg("build")
         .arg("-p")
-        .arg("host-agent");
+        .arg("host-agent")
+        .arg("--features")
+        .arg("test-port-fd");
     if !target.is_empty() {
         cmd.arg("--target").arg(target);
     }

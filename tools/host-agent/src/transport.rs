@@ -10,9 +10,9 @@ use tokio::time::{timeout, Instant};
 use tokio_serial::{DataBits, Parity, SerialPort, SerialPortBuilderExt, SerialPortType, StopBits};
 use tracing::{debug, error, info};
 
-#[cfg(unix)]
+#[cfg(all(unix, any(test, feature = "test-port-fd")))]
 use serialport::TTYPort;
-#[cfg(unix)]
+#[cfg(all(unix, any(test, feature = "test-port-fd")))]
 use std::os::unix::io::FromRawFd;
 
 const BAUD_RATE: u32 = 115_200;
@@ -119,7 +119,7 @@ pub async fn spawn(
     spawn_stream(stream, raw).await
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, any(test, feature = "test-port-fd")))]
 pub async fn spawn_fd(
     fd: i32,
     raw: bool,

@@ -7,6 +7,7 @@ pub struct Config {
     pub vid: Option<u16>,
     pub pid: Option<u16>,
     pub port: Option<String>,
+    #[cfg(any(test, feature = "test-port-fd"))]
     pub port_fd: Option<i32>,
     pub cwd: Option<PathBuf>,
     pub probe_timeout_ms: u64,
@@ -24,6 +25,7 @@ struct Args {
     pid: Option<String>,
     #[arg(long)]
     port: Option<String>,
+    #[cfg(any(test, feature = "test-port-fd"))]
     #[arg(long)]
     port_fd: Option<i32>,
     #[arg(long)]
@@ -57,6 +59,7 @@ impl Config {
             vid,
             pid,
             port: args.port,
+            #[cfg(any(test, feature = "test-port-fd"))]
             port_fd: args.port_fd,
             cwd: args.cwd,
             probe_timeout_ms: args.probe_timeout_ms,
@@ -89,6 +92,7 @@ fn normalize_args(args: Vec<String>) -> Vec<String> {
                 normalized.push(value.to_string());
                 continue;
             }
+            #[cfg(any(test, feature = "test-port-fd"))]
             if key == "port_fd" {
                 normalized.push("--port-fd".to_string());
                 normalized.push(value.to_string());

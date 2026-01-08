@@ -22,6 +22,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_daemon(config: config::Config) -> Result<()> {
+    #[cfg(any(test, feature = "test-port-fd"))]
     if let Some(fd) = config.port_fd {
         #[cfg(unix)]
         {
