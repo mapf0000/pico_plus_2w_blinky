@@ -63,7 +63,7 @@ This plan targets a Rust-based host agent that replaces the current .NET serial 
 
 ## Implementation plan
 1. **Project bootstrap**
-   - Use the existing Rust binary crate under `tools/host-agent`.
+- Use the existing Rust binary crate under `apps/host-agent`.
    - Select async runtime (`tokio`) and crates: `tokio-serial`, `bytes`, `clap`, `thiserror`, `tracing`.
    - Add macOS discovery support (IOKit/IORegistry or serialport listing), and isolate platform-specific code for future Windows/Linux ports.
 2. **TLV codec**

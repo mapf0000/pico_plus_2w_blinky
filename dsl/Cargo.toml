@@ -1,9 +1,0 @@
-[workspace]
-
-members = [
-  "dsl-core",
-  "dsl-wasm",
-  "firmware-exec",
-]
-
-resolver = "2"

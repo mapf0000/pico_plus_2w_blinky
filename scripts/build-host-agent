@@ -7,7 +7,7 @@ if [[ "$target" == *windows* ]]; then
   bin="host-agent.exe"
 fi
 
-artifact_dir="tools/host-agent/artifacts/${target}"
+artifact_dir="apps/host-agent/artifacts/${target}"
 
 cargo build -p host-agent --release --target "$target"
 mkdir -p "$artifact_dir"

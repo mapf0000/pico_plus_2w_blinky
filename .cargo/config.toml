@@ -1,9 +1,7 @@
 # .cargo/config.toml (workspace root)
 
-[build]
-# Default to the RP235x (Cortex-M33) target so `cargo run --release`
-# cross-compiles firmware and uses the custom runner.
-target = "thumbv8m.main-none-eabihf"
+# Note: no default target here so host builds/tests use the host triple.
+# The firmware crate sets its own default target in `firmware/.cargo/config.toml`.
 
 [target.thumbv8m.main-none-eabihf]
 # Custom runner that flashes the board and captures logs
@@ -25,3 +23,6 @@ runner = "wasm-bindgen-test-runner"
 DEFMT_LOG = "debug"
 EMBASSY_USB_MAX_INTERFACE_COUNT = "8"
 EMBASSY_USB_MAX_HANDLER_COUNT = "6"
+
+[alias]
+fw-deploy = "run -p pico_rust --release --target thumbv8m.main-none-eabihf"
