@@ -10,6 +10,11 @@ use tokio::time::{timeout, Instant};
 use tokio_serial::{DataBits, Parity, SerialPort, SerialPortBuilderExt, SerialPortType, StopBits};
 use tracing::{debug, error, info};
 
+#[cfg(unix)]
+use serialport::TTYPort;
+#[cfg(unix)]
+use std::os::unix::io::FromRawFd;
+
 const BAUD_RATE: u32 = 115_200;
 const READ_CHUNK: usize = 1024;
 const INBOUND_QUEUE: usize = 64;
@@ -111,6 +116,28 @@ pub async fn spawn(
     raw: bool,
 ) -> Result<(mpsc::Receiver<Event>, mpsc::Sender<tlv::Frame>)> {
     let stream = open_stream(&port).with_context(|| format!("open serial port {port}"))?;
+    spawn_stream(stream, raw).await
+}
+
+#[cfg(unix)]
+pub async fn spawn_fd(
+    fd: i32,
+    raw: bool,
+) -> Result<(mpsc::Receiver<Event>, mpsc::Sender<tlv::Frame>)> {
+    let tty = unsafe { TTYPort::from_raw_fd(fd) };
+    let mut stream = tokio_serial::SerialStream::try_from(tty)?;
+    let _ = stream.set_baud_rate(BAUD_RATE);
+    let _ = stream.set_data_bits(DataBits::Eight);
+    let _ = stream.set_parity(Parity::None);
+    let _ = stream.set_stop_bits(StopBits::One);
+    spawn_stream(stream, raw).await
+}
+
+async fn spawn_stream(
+    stream: tokio_serial::SerialStream,
+    raw: bool,
+) -> Result<(mpsc::Receiver<Event>, mpsc::Sender<tlv::Frame>)> {
+    let stream = stream;
 
     let (reader, writer) = tokio::io::split(stream);
     let (in_tx, in_rx) = mpsc::channel(INBOUND_QUEUE);

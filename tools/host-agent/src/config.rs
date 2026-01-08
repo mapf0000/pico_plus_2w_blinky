@@ -7,6 +7,7 @@ pub struct Config {
     pub vid: Option<u16>,
     pub pid: Option<u16>,
     pub port: Option<String>,
+    pub port_fd: Option<i32>,
     pub cwd: Option<PathBuf>,
     pub probe_timeout_ms: u64,
     pub debug_log: Option<PathBuf>,
@@ -23,6 +24,8 @@ struct Args {
     pid: Option<String>,
     #[arg(long)]
     port: Option<String>,
+    #[arg(long)]
+    port_fd: Option<i32>,
     #[arg(long)]
     cwd: Option<PathBuf>,
     #[arg(long, default_value_t = 400)]
@@ -54,6 +57,7 @@ impl Config {
             vid,
             pid,
             port: args.port,
+            port_fd: args.port_fd,
             cwd: args.cwd,
             probe_timeout_ms: args.probe_timeout_ms,
             debug_log: args.debug_log,
@@ -75,8 +79,18 @@ fn normalize_args(args: Vec<String>) -> Vec<String> {
     let mut normalized = Vec::with_capacity(args.len());
     for arg in args {
         if let Some((key, value)) = arg.split_once('=') {
-            if matches!(key, "vid" | "pid" | "cwd" | "probe_timeout_ms" | "debug_log") {
+            if matches!(key, "vid" | "pid" | "cwd" | "probe_timeout_ms") {
                 normalized.push(format!("--{key}"));
+                normalized.push(value.to_string());
+                continue;
+            }
+            if key == "debug_log" {
+                normalized.push("--debug-log".to_string());
+                normalized.push(value.to_string());
+                continue;
+            }
+            if key == "port_fd" {
+                normalized.push("--port-fd".to_string());
                 normalized.push(value.to_string());
                 continue;
             }

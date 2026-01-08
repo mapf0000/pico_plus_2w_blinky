@@ -48,6 +48,10 @@ pub fn decode_next(buffer: &mut BytesMut) -> Option<Frame> {
 
         let total = HEADER_LEN + len;
         if buffer.len() < total {
+            if let Some(offset) = find_resync_offset(buffer) {
+                buffer.advance(offset);
+                continue;
+            }
             return None;
         }
 
@@ -55,6 +59,26 @@ pub fn decode_next(buffer: &mut BytesMut) -> Option<Frame> {
         let payload = buffer.split_to(len).freeze();
         return Some(Frame { tag, payload });
     }
+}
+
+fn find_resync_offset(buffer: &BytesMut) -> Option<usize> {
+    let max_start = buffer.len().saturating_sub(HEADER_LEN);
+    for offset in 1..=max_start {
+        let len = u32::from_le_bytes([
+            buffer[offset + 1],
+            buffer[offset + 2],
+            buffer[offset + 3],
+            buffer[offset + 4],
+        ]) as usize;
+        if len > MAX_PAYLOAD_LEN {
+            continue;
+        }
+        let total = offset + HEADER_LEN + len;
+        if total <= buffer.len() {
+            return Some(offset);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
