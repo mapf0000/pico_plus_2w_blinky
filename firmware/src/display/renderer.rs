@@ -284,23 +284,16 @@ impl Renderer {
         }
 
         if plan.dirty.content {
-            let from_or_to_logs =
-                matches!(page, PageId::Logs) || matches!(self.state.prev_page, PageId::Logs);
-            let mut clear_rect = Rectangle::new(
+            let clear_rect = Rectangle::new(
                 Point::new(layout.content_rect.top_left.x, layout.content_rect.top_left.y),
                 Size::new(
                     disp.bounding_box()
                         .size
                         .width
                         .saturating_sub(layout.content_rect.top_left.x as u32),
-                    layout.content_rect.size.height,
+                    screen_h,
                 ),
             );
-            if from_or_to_logs || !self.state.bg_drawn {
-                clear_rect.size.height = screen_h;
-            } else {
-                clear_rect.size.height = screen_h.min(140);
-            }
             let _ = clear_rect
                 .into_styled(PrimitiveStyle::with_fill(bg_color))
                 .draw(disp);
