@@ -31,7 +31,9 @@ pub use keycodes::{
     KEY_SLASH, KEY_SPACE, KEY_TAB, KEY_UP, MOD_LALT, MOD_LCTRL, MOD_LGUI, MOD_LSHIFT, MOD_RALT,
     MOD_RCTRL, MOD_RGUI, MOD_RSHIFT,
 };
-pub use layouts::{available_layouts, LayoutId, LayoutParseError, DEFAULT_LAYOUT_ID};
+pub use layouts::{
+    available_layouts, CharMapping, LayoutId, LayoutParseError, DEFAULT_LAYOUT_ID,
+};
 pub use limits::{MAX_DSL_DELAY_MS, MAX_DSL_LINES, MAX_TOTAL_FLAT_OPS};
 pub use link::{
     compile, compile_and_link, CompileOptions, CompileOutput, ScriptProvider,

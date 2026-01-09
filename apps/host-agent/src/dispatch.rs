@@ -8,8 +8,8 @@ use std::io::Write as _;
 use std::path::Path;
 use tokio::sync::mpsc;
 use tokio::process::Command;
-use tokio::time::{sleep, Duration};
-use tracing::{debug, info};
+use tokio::time::{interval, sleep, Duration, Instant, MissedTickBehavior};
+use tracing::{debug, info, warn};
 
 const TAG_EXECUTE: u8 = 1;
 const TAG_DEBUG_MSG: u8 = 2;
@@ -21,6 +21,11 @@ const TAG_REQUEST_AGENT_STATUS: u8 = 7;
 const TAG_AGENT_STATUS: u8 = 8;
 const TAG_EXECUTE_RESULT: u8 = 9;
 const TAG_MIC_PCM_DATA: u8 = 10;
+const HANDSHAKE_PAYLOAD: &[u8] = b"handshake";
+const HANDSHAKE_OK_MSG: &str = "handshake-ok";
+const PROBE_OK_MSG: &str = "probe-ok";
+const KEEPALIVE_INTERVAL_SECS: u64 = 10;
+const KEEPALIVE_TIMEOUT_SECS: u64 = KEEPALIVE_INTERVAL_SECS + 2;
 const MAX_EXEC_OUTPUT: usize = 8 * 1024;
 const EXEC_CHUNK_DELAY_MS: u64 = 20;
 
@@ -31,16 +36,58 @@ pub async fn run(
 ) -> Result<()> {
     let mut outbound = outbound;
     let mut debug_sink = DebugSink::new(config.debug_log.as_deref())?;
+    let mut handshake_ok = false;
+    let mut last_activity_at = Instant::now();
+    let enable_keepalive = should_send_handshake(config);
+    let mut keepalive = interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECS));
+    keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    if enable_keepalive {
+        let _ = keepalive.tick().await;
+    }
 
-    while let Some(event) = inbound.recv().await {
-        match event {
-            Event::Raw(bytes) => {
-                if config.raw {
-                    info!(len = bytes.len(), raw = %format_hex(&bytes), "raw data");
+    if should_send_handshake(config) {
+        let frame = Frame::new(TAG_REQUEST_AGENT_STATUS, Bytes::from_static(HANDSHAKE_PAYLOAD));
+        if outbound.send(frame).await.is_ok() {
+            info!("handshake request sent");
+        } else {
+            warn!("handshake request failed");
+        }
+    }
+
+    loop {
+        tokio::select! {
+            event = inbound.recv() => {
+                let Some(event) = event else {
+                    break;
+                };
+                match event {
+                    Event::Raw(bytes) => {
+                        last_activity_at = Instant::now();
+                        if config.raw {
+                            info!(len = bytes.len(), raw = %format_hex(&bytes), "raw data");
+                        }
+                    }
+                    Event::Frame(frame) => {
+                        last_activity_at = Instant::now();
+                        handle_frame(frame, &mut outbound, &mut debug_sink, &mut handshake_ok).await?;
+                    }
                 }
             }
-            Event::Frame(frame) => {
-                handle_frame(frame, &mut outbound, &mut debug_sink).await?;
+            _ = keepalive.tick(), if enable_keepalive => {
+                let now = Instant::now();
+                if now.duration_since(last_activity_at) > Duration::from_secs(KEEPALIVE_TIMEOUT_SECS) {
+                    warn!("keepalive timeout; disconnecting");
+                    break;
+                }
+                let frame = Frame::new(TAG_REQUEST_AGENT_STATUS, Bytes::new());
+                if outbound.send(frame).await.is_err() {
+                    warn!("keepalive send failed");
+                    break;
+                }
+                if outbound.is_closed() {
+                    warn!("serial writer closed");
+                    break;
+                }
             }
         }
     }
@@ -52,19 +99,39 @@ async fn handle_frame(
     frame: Frame,
     outbound: &mut mpsc::Sender<Frame>,
     debug_sink: &mut DebugSink,
+    handshake_ok: &mut bool,
 ) -> Result<()> {
     match frame.tag {
         TAG_REQUEST_AGENT_STATUS => {
+            let handshake = frame.payload.as_ref() == HANDSHAKE_PAYLOAD;
+            if handshake {
+                info!("handshake request received");
+            }
             let hostname = hostname::get().unwrap_or_else(|_| "unknown".into());
             let payload = Bytes::from(hostname.to_string_lossy().into_owned());
             let response = Frame::new(TAG_AGENT_STATUS, payload);
             outbound.send(response).await?;
             info!("sent agent status");
+            if handshake {
+                info!("handshake response sent");
+                if !*handshake_ok {
+                    info!("handshake ok");
+                    *handshake_ok = true;
+                }
+            }
         }
         TAG_DEBUG_MSG => {
             let message = String::from_utf8_lossy(&frame.payload);
+            if message == PROBE_OK_MSG {
+                debug!(message = %message, "device debug");
+                return Ok(());
+            }
             info!(message = %message, "device debug");
             debug_sink.write_line(&message)?;
+            if message == HANDSHAKE_OK_MSG && !*handshake_ok {
+                info!("handshake ok");
+                *handshake_ok = true;
+            }
         }
         TAG_EXECUTE => {
             handle_execute(frame, outbound).await?;
@@ -83,6 +150,16 @@ async fn handle_frame(
     }
 
     Ok(())
+}
+
+fn should_send_handshake(config: &Config) -> bool {
+    #[cfg(any(test, feature = "test-port-fd"))]
+    {
+        if config.port_fd.is_some() {
+            return false;
+        }
+    }
+    true
 }
 
 async fn handle_execute(frame: Frame, outbound: &mut mpsc::Sender<Frame>) -> Result<()> {

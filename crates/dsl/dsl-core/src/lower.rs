@@ -1,4 +1,7 @@
-use crate::{message_for_code, CompileError, FlatProgram, KeyTap, LayoutId, OpOwned, ProgramOwned, Span};
+use crate::{
+    message_for_code, CharMapping, CompileError, FlatProgram, KeyTap, LayoutId, OpOwned,
+    ProgramOwned, Span,
+};
 
 /// Lower an owned, call-free program into a FlatProgram using a default layout.
 /// - Expands `Text` to Tap+Delay
@@ -21,13 +24,27 @@ pub fn lower_to_flat_with_layout(
             }
             OpOwned::Text { s, delay_ms } => {
                 for ch in s.chars() {
-                    let (u, m) = current_layout
+                    let mapping = current_layout
                         .map_char(ch)
                         .ok_or_else(|| lower_error("ParseKey", (idx as u16) + 1))?;
-                    out.push_tap(u, m)
-                        .map_err(|_| lower_error("TooManyLines", 0))?;
-                    out.push_delay(*delay_ms as u32)
-                        .map_err(|_| lower_error("TooManyLines", 0))?;
+                    match mapping {
+                        CharMapping::Tap { usage, mods } => {
+                            out.push_tap(usage, mods)
+                                .map_err(|_| lower_error("TooManyLines", 0))?;
+                            out.push_delay(*delay_ms as u32)
+                                .map_err(|_| lower_error("TooManyLines", 0))?;
+                        }
+                        CharMapping::Seq(seq) => {
+                            for (idx, tap) in seq.iter().enumerate() {
+                                out.push_tap(tap.usage, tap.mods)
+                                    .map_err(|_| lower_error("TooManyLines", 0))?;
+                                if idx + 1 == seq.len() {
+                                    out.push_delay(*delay_ms as u32)
+                                        .map_err(|_| lower_error("TooManyLines", 0))?;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             OpOwned::Layout(layout) => {

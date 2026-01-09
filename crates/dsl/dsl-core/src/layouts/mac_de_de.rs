@@ -1,13 +1,25 @@
-use super::LayoutOverride;
+use super::{CharMapping, LayoutOverride};
 use crate::{
-    Mods, KEY_0, KEY_2, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9, KEY_BACKSLASH, KEY_COMMA,
-    KEY_DOT, KEY_MINUS, KEY_NON_US_BACKSLASH, KEY_RIGHT_BRACKET, KEY_SLASH, MOD_LALT,
+    KeyTap, Mods, KEY_0, KEY_2, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9, KEY_BACKSLASH, KEY_COMMA,
+    KEY_DOT, KEY_MINUS, KEY_NON_US_BACKSLASH, KEY_RIGHT_BRACKET, KEY_SLASH, KEY_SPACE, MOD_LALT,
     MOD_LSHIFT,
 };
 
 const KEY_Q: crate::Usage = crate::KEY_A.add(b'Q' - b'A');
+const KEY_N: crate::Usage = crate::KEY_A.add(b'N' - b'A');
 const KEY_Y: crate::Usage = crate::KEY_A.add(b'Y' - b'A');
 const KEY_Z: crate::Usage = crate::KEY_A.add(b'Z' - b'A');
+
+const TILDE_SEQ: &[KeyTap] = &[
+    KeyTap {
+        usage: KEY_N,
+        mods: MOD_LALT,
+    },
+    KeyTap {
+        usage: KEY_SPACE,
+        mods: Mods::empty(),
+    },
+];
 
 pub(super) const OVERRIDES: &[LayoutOverride] = &[
     LayoutOverride {
@@ -151,3 +163,10 @@ pub(super) const OVERRIDES: &[LayoutOverride] = &[
         mods: MOD_LALT,
     },
 ];
+
+pub(super) fn map_char(c: char) -> Option<CharMapping> {
+    if c == '~' {
+        return Some(CharMapping::Seq(TILDE_SEQ));
+    }
+    super::map_with_overrides(c, OVERRIDES)
+}

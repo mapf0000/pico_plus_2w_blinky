@@ -43,10 +43,13 @@ pub enum Event {
 
 pub async fn select_port(config: &Config) -> Result<String> {
     if let Some(port) = &config.port {
+        info!(port = %port, "using configured serial port");
         return Ok(port.clone());
     }
 
+    debug!(vid = ?config.vid, pid = ?config.pid, "scanning serial ports");
     let ports = tokio_serial::available_ports().context("list serial ports")?;
+    debug!(count = ports.len(), "found serial ports");
     if ports.is_empty() {
         bail!("no serial ports found");
     }
@@ -56,6 +59,13 @@ pub async fn select_port(config: &Config) -> Result<String> {
         let listing = list_ports(&ports);
         bail!("no serial ports match vid/pid; available ports: {listing}");
     }
+    if config.vid.is_some() || config.pid.is_some() {
+        debug!(
+            count = filtered.len(),
+            ports = %list_ports(&filtered),
+            "filtered ports by vid/pid"
+        );
+    }
 
     let mut candidates = if config.vid.is_some() || config.pid.is_some() {
         filtered.clone()
@@ -63,21 +73,34 @@ pub async fn select_port(config: &Config) -> Result<String> {
         ports.clone()
     };
     candidates = prefer_callout_ports(&candidates);
+    debug!(
+        count = candidates.len(),
+        ports = %list_ports(&candidates),
+        "candidate ports"
+    );
 
     if let Some(cached) = load_cached_port() {
+        debug!(port = %cached, "found cached serial port");
         if let Some(info) = candidates.iter().find(|info| info.port_name == cached) {
-            if let Ok(outcome) =
-                probe_port(info, Duration::from_millis(config.probe_timeout_ms)).await
-            {
-                if matches!(outcome, ProbeOutcome::Control | ProbeOutcome::Quiet) {
-                    info!(port = %cached, "using cached serial port");
-                    return Ok(cached);
+            match probe_port(info, Duration::from_millis(config.probe_timeout_ms)).await {
+                Ok(outcome) => {
+                    debug!(port = %cached, outcome = ?outcome, "probe cached port result");
+                    if matches!(outcome, ProbeOutcome::Control | ProbeOutcome::Quiet) {
+                        info!(port = %cached, "using cached serial port");
+                        return Ok(cached);
+                    }
+                }
+                Err(err) => {
+                    debug!(port = %cached, error = %err, "probe cached port failed");
                 }
             }
+        } else {
+            debug!(port = %cached, "cached port not in candidate list");
         }
     }
 
     if candidates.len() == 1 {
+        debug!(port = %candidates[0].port_name, "single candidate port");
         return Ok(candidates[0].port_name.clone());
     }
 
@@ -86,8 +109,14 @@ pub async fn select_port(config: &Config) -> Result<String> {
         .filter(|info| matches!(info.port_type, SerialPortType::UsbPort(_)))
         .cloned()
         .collect::<Vec<_>>();
+    debug!(
+        count = usb_candidates.len(),
+        ports = %list_ports(&usb_candidates),
+        "usb candidate ports"
+    );
 
     if usb_candidates.len() == 1 {
+        debug!(port = %usb_candidates[0].port_name, "single usb candidate port");
         return Ok(usb_candidates[0].port_name.clone());
     }
 
@@ -101,6 +130,7 @@ pub async fn select_port(config: &Config) -> Result<String> {
     }
 
     if let Some(selected) = pick_port(&candidates) {
+        debug!(port = %selected, "picked port by preference");
         return Ok(selected);
     }
 
@@ -115,6 +145,7 @@ pub async fn spawn(
     port: String,
     raw: bool,
 ) -> Result<(mpsc::Receiver<Event>, mpsc::Sender<tlv::Frame>)> {
+    debug!(port = %port, raw, "opening serial port");
     let stream = open_stream(&port).with_context(|| format!("open serial port {port}"))?;
     spawn_stream(stream, raw).await
 }
@@ -138,6 +169,7 @@ async fn spawn_stream(
     raw: bool,
 ) -> Result<(mpsc::Receiver<Event>, mpsc::Sender<tlv::Frame>)> {
     let stream = stream;
+    debug!(raw, "spawning serial read/write tasks");
 
     let (reader, writer) = tokio::io::split(stream);
     let (in_tx, in_rx) = mpsc::channel(INBOUND_QUEUE);
@@ -177,6 +209,7 @@ async fn read_loop(
         if raw {
             let raw_bytes = Bytes::copy_from_slice(&temp[..count]);
             if inbound.send(Event::Raw(raw_bytes)).await.is_err() {
+                debug!("inbound channel closed; stopping read loop");
                 return Ok(());
             }
         }
@@ -184,6 +217,7 @@ async fn read_loop(
         buffer.extend_from_slice(&temp[..count]);
         while let Some(frame) = tlv::decode_next(&mut buffer) {
             if inbound.send(Event::Frame(frame)).await.is_err() {
+                debug!("inbound channel closed; stopping read loop");
                 return Ok(());
             }
         }
@@ -201,6 +235,7 @@ async fn write_loop(
         writer.write_all(&buffer).await?;
         debug!(tag = frame.tag, len = frame.payload.len(), "sent frame");
     }
+    debug!("outbound channel closed; stopping write loop");
     Ok(())
 }
 
@@ -303,6 +338,7 @@ fn is_control_response(tag: u8) -> bool {
 }
 
 fn open_stream(port: &str) -> Result<tokio_serial::SerialStream> {
+    debug!(port = %port, baud_rate = BAUD_RATE, "opening serial stream");
     let builder = tokio_serial::new(port, BAUD_RATE)
         .data_bits(DataBits::Eight)
         .parity(Parity::None)
@@ -327,6 +363,7 @@ async fn probe_control_port(
 ) -> Result<Option<String>> {
     let timeout = Duration::from_millis(timeout_ms);
     let mut quiet = Vec::new();
+    debug!(count = ports.len(), timeout_ms, "probing usb ports");
 
     for info in ports {
         match probe_port(info, timeout).await {
@@ -358,6 +395,11 @@ async fn probe_port(
     info: &tokio_serial::SerialPortInfo,
     probe_timeout: Duration,
 ) -> Result<ProbeOutcome> {
+    debug!(
+        port = %info.port_name,
+        timeout_ms = probe_timeout.as_millis(),
+        "probing serial port"
+    );
     let mut stream = open_stream(&info.port_name)?;
     let mut buf = [0u8; PROBE_READ_CHUNK];
     let mut acc = BytesMut::with_capacity(512);
@@ -443,4 +485,11 @@ fn store_cached_port(port: &str) {
         }
     }
     let _ = std::fs::write(path, port.as_bytes());
+}
+
+pub fn clear_cached_port() {
+    let Some(path) = cache_path() else {
+        return;
+    };
+    let _ = std::fs::remove_file(path);
 }

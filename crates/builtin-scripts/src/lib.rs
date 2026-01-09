@@ -23,13 +23,11 @@ const MACOS_HOST_AGENT_DSL: &str = concat!(
     "delay(200)\n",
     "call open_terminal\n",
     "delay(1200)\n",
-    "text(\"chmod +x /Volumes/PICO_AGENT/MAC/HOSTAGNT\")\n",
-    "tap(\"ENTER\")\n",
-    "text(\"/Volumes/PICO_AGENT/MAC/HOSTAGNT vid=0x1209 pid=0x0001\")\n",
+    "text(\"mkdir -p ~/pico-agent && cp /Volumes/PICO_AGENT/MAC/HOSTAGNT ~/pico-agent/ && chmod +x ~/pico-agent/HOSTAGNT && ~/pico-agent/HOSTAGNT vid=0x1209 pid=0x0001\")\n",
     "tap(\"ENTER\")\n",
 );
 
-const MAC_ASSISTANT_ONCE_DSL: &str = concat!(
+const MAC_ASSISTANT_US_DSL: &str = concat!(
     "delay(1200)\n",
     "tap(\"ENTER\")\n",
     "delay(800)\n",
@@ -38,6 +36,20 @@ const MAC_ASSISTANT_ONCE_DSL: &str = concat!(
     "tap(\"SLASH\")\n",
     "delay(800)\n",
     "tap(\"ENTER\")\n",
+    "delay(600)\n",
+);
+
+const MAC_ASSISTANT_DE_DSL: &str = concat!(
+    "layout(\"mac_de-DE\")\n",
+    "delay(1200)\n",
+    "tap(\"ENTER\")\n",
+    "delay(800)\n",
+    "text(\"<\")\n",
+    "delay(800)\n",
+    "text(\"-\")\n",
+    "delay(800)\n",
+    "tap(\"ENTER\")\n",
+    "delay(600)\n",
 );
 
 const HELLO_WORLD_DSL: &str = "text(\"Hello, world\", 20)\n";
@@ -57,15 +69,21 @@ const BUILTIN_SCRIPTS: &[BuiltinScript] = &[
     },
     BuiltinScript {
         id: "macos_host_agent",
-        name: "macOS: Launch host-agent (manual run)",
-        description: "Runs /Volumes/PICO_AGENT/MAC/HOSTAGNT with VID/PID (assumes German input source on macOS)",
+        name: "macOS: Launch host-agent (local copy)",
+        description: "Copies HOSTAGNT to ~/pico-agent and runs it with VID/PID (assumes German input source on macOS)",
         dsl: MACOS_HOST_AGENT_DSL,
     },
     BuiltinScript {
-        id: "assistant_once",
-        name: "macOS Keyboard Assistant (once)",
-        description: "Guide the Keyboard Setup Assistant with ANSI hints",
-        dsl: MAC_ASSISTANT_ONCE_DSL,
+        id: "assistant_us",
+        name: "macOS Keyboard Assistant (US)",
+        description: "Guide the Keyboard Setup Assistant for US ANSI (Z then / keys)",
+        dsl: MAC_ASSISTANT_US_DSL,
+    },
+    BuiltinScript {
+        id: "assistant_de",
+        name: "macOS Keyboard Assistant (DE)",
+        description: "Guide the Keyboard Setup Assistant for German ISO (< > | then - _ keys)",
+        dsl: MAC_ASSISTANT_DE_DSL,
     },
     BuiltinScript {
         id: "hello_world",

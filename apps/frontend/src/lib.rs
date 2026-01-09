@@ -198,7 +198,7 @@ fn app() -> Html {
                             push_log.emit("USB enabling request sent".to_string());
                             show_toast.emit(("USB enabling…".into(), true));
                             if assistant {
-                                match scripts::lookup("assistant_once") {
+                                match scripts::lookup("assistant_us") {
                                     Some(script_dsl) => match dsl::compile(script_dsl, &layout_id) {
                                         Ok(bytecode) => match api::run_script(&bytecode).await {
                                             Ok(()) => push_log

@@ -16,10 +16,12 @@ pub static CTRL_READY: AtomicBool = AtomicBool::new(false);
 const TAG_EXECUTE: u8 = 1;
 const TAG_DEBUG_MSG: u8 = 2;
 const TAG_REQUEST_AGENT_STATUS: u8 = 7;
+const TAG_AGENT_STATUS: u8 = 8;
 const TLV_HEADER_LEN: usize = 5;
 const MAX_PAYLOAD_LEN: usize = 2048;
 const LOCAL_BUF_LEN: usize = 64;
 const RX_BUF_LEN: usize = 128;
+const HANDSHAKE_PAYLOAD: &[u8] = b"handshake";
 
 pub async fn run_ctrl<'d, D>(mut class: CdcAcmClass<'d, D>) -> !
 where
@@ -153,8 +155,20 @@ async fn handle_host_frame<'d, D>(
 where
     D: Driver<'d>,
 {
-    if tag == TAG_REQUEST_AGENT_STATUS && payload.is_empty() {
-        send_tlv(class, max_packet, TAG_DEBUG_MSG, b"probe-ok").await?;
+    if tag == TAG_AGENT_STATUS {
+        let name = core::str::from_utf8(payload).unwrap_or("<invalid utf-8>");
+        log::info!("usb: host agent status: {}", name);
+        return Ok(());
+    }
+    if tag == TAG_REQUEST_AGENT_STATUS {
+        if payload == HANDSHAKE_PAYLOAD {
+            send_tlv(class, max_packet, TAG_DEBUG_MSG, b"handshake-ok").await?;
+            log::info!("usb: handshake ok");
+            return Ok(());
+        }
+        if payload.is_empty() {
+            send_tlv(class, max_packet, TAG_DEBUG_MSG, b"probe-ok").await?;
+        }
     }
     Ok(())
 }

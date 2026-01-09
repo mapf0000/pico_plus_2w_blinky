@@ -30,6 +30,12 @@ pub enum LayoutParseError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharMapping {
+    Tap { usage: crate::Usage, mods: crate::Mods },
+    Seq(&'static [crate::KeyTap]),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutId {
     Us,
     #[cfg(feature = "layout_win_en_gb")]
@@ -71,9 +77,9 @@ impl LayoutId {
         }
     }
 
-    pub fn map_char(self, c: char) -> Option<(crate::Usage, crate::Mods)> {
+    pub fn map_char(self, c: char) -> Option<CharMapping> {
         match self {
-            LayoutId::Us => char_to_key_us(c),
+            LayoutId::Us => char_to_key_us(c).map(|(usage, mods)| CharMapping::Tap { usage, mods }),
             #[cfg(feature = "layout_win_en_gb")]
             LayoutId::WinEnGb => map_with_overrides(c, win_en_gb::OVERRIDES),
             #[cfg(feature = "layout_win_pt_br")]
@@ -85,7 +91,7 @@ impl LayoutId {
             #[cfg(feature = "layout_mac_pt_br")]
             LayoutId::MacPtBr => map_with_overrides(c, mac_pt_br::OVERRIDES),
             #[cfg(feature = "layout_mac_de_de")]
-            LayoutId::MacDeDe => map_with_overrides(c, mac_de_de::OVERRIDES),
+            LayoutId::MacDeDe => mac_de_de::map_char(c),
         }
     }
 }
@@ -231,13 +237,16 @@ struct LayoutOverride {
     feature = "layout_mac_pt_br",
     feature = "layout_mac_de_de"
 ))]
-fn map_with_overrides(c: char, overrides: &[LayoutOverride]) -> Option<(crate::Usage, crate::Mods)> {
+fn map_with_overrides(c: char, overrides: &[LayoutOverride]) -> Option<CharMapping> {
     for ov in overrides {
         if ov.ch == c {
-            return Some((ov.usage, ov.mods));
+            return Some(CharMapping::Tap {
+                usage: ov.usage,
+                mods: ov.mods,
+            });
         }
     }
-    char_to_key_us(c)
+    char_to_key_us(c).map(|(usage, mods)| CharMapping::Tap { usage, mods })
 }
 
 #[cfg(all(test, feature = "std", feature = "layout_win_de_de"))]
@@ -280,7 +289,7 @@ mod tests_win_de_de {
 mod tests_mac_de_de {
     use crate::{
         compile_and_link, lower_to_flat_with_layout, preprocess, FlatOp, LayoutId,
-        PreprocessOptions, KEY_A, MOD_LALT,
+        Mods, PreprocessOptions, KEY_A, KEY_SPACE, MOD_LALT,
     };
 
     fn empty_provider<'a>(_: &'a str) -> Option<&'a str> {
@@ -307,5 +316,29 @@ mod tests_mac_de_de {
         let key_q = KEY_A.add(b'Q' - b'A');
         assert_eq!(tap.0, key_q);
         assert_eq!(tap.1, MOD_LALT);
+    }
+
+    #[test]
+    fn layout_mac_de_de_tilde_sequence() {
+        let entry = "layout(\"mac_de-DE\")\ntext(\"~\", 0)";
+        let _ = preprocess(entry, &PreprocessOptions::default())
+            .unwrap_or_else(|e| panic!("preprocess: {:?}", e));
+        let owned = compile_and_link(entry, &empty_provider)
+            .unwrap_or_else(|e| panic!("compile_and_link: {:?}", e));
+        let flat =
+            lower_to_flat_with_layout(&owned, LayoutId::Us).expect("lower_to_flat_with_layout");
+        let taps: Vec<(crate::Usage, crate::Mods)> = flat
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                FlatOp::Tap { usage, mods } => Some((*usage, *mods)),
+                _ => None,
+            })
+            .collect();
+        let key_n = KEY_A.add(b'N' - b'A');
+        assert_eq!(
+            taps,
+            vec![(key_n, MOD_LALT), (KEY_SPACE, Mods::empty())]
+        );
     }
 }
