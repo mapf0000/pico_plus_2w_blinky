@@ -31,6 +31,239 @@ if ! command -v picotool >/dev/null 2>&1; then
   exit 2
 fi
 
+print_firmware_size() {
+  local size_tool=""
+  local size_output=""
+  local size_line=""
+  local text=""
+  local data=""
+  local bss=""
+
+  format_mb() {
+    local bytes="$1"
+
+    if command -v awk >/dev/null 2>&1; then
+      awk -v b="$bytes" 'BEGIN {printf "%.1f", b/1024/1024}'
+      return 0
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+      python3 - "$bytes" <<'PY'
+import sys
+try:
+    b = float(sys.argv[1])
+except Exception:
+    b = 0.0
+print(f"{b/1024/1024:.1f}", end="")
+PY
+      return 0
+    fi
+
+    printf "%s" "$bytes"
+  }
+
+  find_size_tool() {
+    local tool=""
+
+    for tool in arm-none-eabi-size llvm-size; do
+      if command -v "$tool" >/dev/null 2>&1; then
+        echo "$tool"
+        return 0
+      fi
+    done
+
+    if command -v rustc >/dev/null 2>&1; then
+      local sysroot=""
+      local host=""
+      local candidate=""
+
+      sysroot="$(rustc --print sysroot 2>/dev/null || true)"
+      host="$(rustc -Vv 2>/dev/null | awk '/^host:/ {print $2; exit}')"
+      if [[ -n "$sysroot" && -n "$host" ]]; then
+        candidate="$sysroot/lib/rustlib/$host/bin/llvm-size"
+        if [[ -x "$candidate" ]]; then
+          echo "$candidate"
+          return 0
+        fi
+      fi
+    fi
+
+    if [[ "$(uname -s)" != "Darwin" ]] && command -v size >/dev/null 2>&1; then
+      echo "size"
+      return 0
+    fi
+
+    return 1
+  }
+
+  python_elf_size() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$ELF" <<'PY'
+import struct
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "rb") as f:
+        data = f.read()
+except OSError:
+    sys.exit(1)
+
+if len(data) < 16 or data[:4] != b"\x7fELF":
+    sys.exit(1)
+
+ei_class = data[4]
+ei_data = data[5]
+if ei_data == 1:
+    endian = "<"
+elif ei_data == 2:
+    endian = ">"
+else:
+    sys.exit(1)
+
+if ei_class == 1:
+    hdr_fmt = endian + "HHIIIIIHHHHHH"
+    sh_fmt = endian + "IIIIIIIIII"
+elif ei_class == 2:
+    hdr_fmt = endian + "HHIQQQIHHHHHH"
+    sh_fmt = endian + "IIQQQQIIQQ"
+else:
+    sys.exit(1)
+
+hdr_size = struct.calcsize(hdr_fmt)
+if len(data) < 16 + hdr_size:
+    sys.exit(1)
+
+hdr = struct.unpack_from(hdr_fmt, data, 16)
+e_shoff = hdr[5]
+e_shentsize = hdr[10]
+e_shnum = hdr[11]
+
+if e_shoff == 0 or e_shnum == 0 or e_shentsize == 0:
+    sys.exit(1)
+
+sh_size = struct.calcsize(sh_fmt)
+if e_shentsize < sh_size:
+    sys.exit(1)
+
+SHF_WRITE = 0x1
+SHF_ALLOC = 0x2
+SHT_NOBITS = 8
+
+text = 0
+data_size = 0
+bss = 0
+
+for i in range(e_shnum):
+    off = e_shoff + i * e_shentsize
+    if off + sh_size > len(data):
+        sys.exit(1)
+    sh = struct.unpack_from(sh_fmt, data, off)
+    sh_type = sh[1]
+    sh_flags = sh[2]
+    sh_size_bytes = sh[5]
+
+    if (sh_flags & SHF_ALLOC) == 0:
+        continue
+    if sh_type == SHT_NOBITS:
+        bss += sh_size_bytes
+    elif (sh_flags & SHF_WRITE) != 0:
+        data_size += sh_size_bytes
+    else:
+        text += sh_size_bytes
+
+print(f"{text} {data_size} {bss}")
+PY
+  }
+
+  print_elf_size_fallback() {
+    local reason="$1"
+    local bytes=""
+
+    if [[ -f "$ELF" ]]; then
+      if stat -f%z "$ELF" >/dev/null 2>&1; then
+        bytes="$(stat -f%z "$ELF")"
+      elif stat -c%s "$ELF" >/dev/null 2>&1; then
+        bytes="$(stat -c%s "$ELF")"
+      elif command -v wc >/dev/null 2>&1; then
+        bytes="$(wc -c < "$ELF" | tr -d '[:space:]')"
+      fi
+    fi
+
+    if [[ -n "$bytes" ]]; then
+      echo "[pico-run] Firmware size: elf=$(format_mb "$bytes")MB (file size; ${reason})"
+    else
+      echo "[pico-run] Firmware size: (${reason})"
+    fi
+  }
+
+  size_tool="$(find_size_tool || true)"
+
+  if [[ -z "$size_tool" ]]; then
+    if size_line="$(python_elf_size 2>/dev/null)"; then
+      read -r text data bss <<<"$size_line"
+      if [[ -n "$text" && -n "$data" && -n "$bss" ]]; then
+        local flash=$((text + data))
+        local ram=$((data + bss))
+        echo "[pico-run] Firmware size: flash=$(format_mb "$flash")MB (text+data), ram=$(format_mb "$ram")MB (data+bss)"
+        return 0
+      fi
+    fi
+    print_elf_size_fallback "no size tool found"
+    return 0
+  fi
+
+  if ! size_output="$("$size_tool" "$ELF" 2>/dev/null)"; then
+    if size_line="$(python_elf_size 2>/dev/null)"; then
+      read -r text data bss <<<"$size_line"
+      if [[ -n "$text" && -n "$data" && -n "$bss" ]]; then
+        local flash=$((text + data))
+        local ram=$((data + bss))
+        echo "[pico-run] Firmware size: flash=$(format_mb "$flash")MB (text+data), ram=$(format_mb "$ram")MB (data+bss)"
+        return 0
+      fi
+    fi
+    print_elf_size_fallback "failed to run ${size_tool}"
+    return 0
+  fi
+
+  size_line="$(printf '%s\n' "$size_output" | awk 'NF >= 3 && $1 ~ /^[0-9]+$/ {print $1, $2, $3; exit}')"
+  if [[ -z "$size_line" ]]; then
+    if size_line="$(python_elf_size 2>/dev/null)"; then
+      read -r text data bss <<<"$size_line"
+      if [[ -n "$text" && -n "$data" && -n "$bss" ]]; then
+        local flash=$((text + data))
+        local ram=$((data + bss))
+        echo "[pico-run] Firmware size: flash=$(format_mb "$flash")MB (text+data), ram=$(format_mb "$ram")MB (data+bss)"
+        return 0
+      fi
+    fi
+    print_elf_size_fallback "unparsed; run '${size_tool} ${ELF}' for details"
+    return 0
+  fi
+
+  read -r text data bss <<<"$size_line"
+  if [[ -z "$text" || -z "$data" || -z "$bss" ]]; then
+    if size_line="$(python_elf_size 2>/dev/null)"; then
+      read -r text data bss <<<"$size_line"
+      if [[ -n "$text" && -n "$data" && -n "$bss" ]]; then
+        local flash=$((text + data))
+        local ram=$((data + bss))
+        echo "[pico-run] Firmware size: flash=$(format_mb "$flash")MB (text+data), ram=$(format_mb "$ram")MB (data+bss)"
+        return 0
+      fi
+    fi
+    print_elf_size_fallback "unparsed; run '${size_tool} ${ELF}' for details"
+    return 0
+  fi
+
+  local flash=$((text + data))
+  local ram=$((data + bss))
+  echo "[pico-run] Firmware size: flash=$(format_mb "$flash")MB (text+data), ram=$(format_mb "$ram")MB (data+bss)"
+}
+
+print_firmware_size
+
 echo "[pico-run] Flashing: $ELF"
 picotool load -u -v -x -t elf "$ELF"
 
