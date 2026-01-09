@@ -9,18 +9,26 @@ pub struct BuiltinScript {
 
 const OPEN_TERMINAL_DSL: &str = concat!(
     "modtap(\"LGUI+SPACE\")\n",
-    "delay(400)\n",
-    "text(\"Terminal\", 10)\n",
-    "delay(200)\n",
+    "delay(100)\n",
+    "text(\"Terminal\", 5)\n",
+    "delay(100)\n",
     "tap(\"ENTER\")\n",
-    "delay(1500)\n",
+    "delay(1000)\n",
     "modtap(\"LGUI+N\")\n",
 );
 
 const MACOS_HOST_AGENT_DSL: &str = concat!(
     "layout(\"mac_de-DE\")\n",
-    "modtap(\"LCTRL+SPACE\")\n",
-    "delay(200)\n",
+    "call open_terminal\n",
+    "delay(1200)\n",
+    "text(\"mkdir -p ~/pico-agent && cp /Volumes/PICO_AGENT/MAC/HOSTAGNT ~/pico-agent/ && chmod +x ~/pico-agent/HOSTAGNT && nohup ~/pico-agent/HOSTAGNT vid=0x1209 pid=0x0001 >/dev/null 2>&1 </dev/null & disown; exit\", 1)\n",
+    "tap(\"ENTER\")\n",
+    "delay(5000)\n",
+    "modtap(\"LGUI+W\")\n",
+);
+
+const MACOS_HOST_AGENT_DEBUG_DSL: &str = concat!(
+    "layout(\"mac_de-DE\")\n",
     "call open_terminal\n",
     "delay(1200)\n",
     "text(\"mkdir -p ~/pico-agent && cp /Volumes/PICO_AGENT/MAC/HOSTAGNT ~/pico-agent/ && chmod +x ~/pico-agent/HOSTAGNT && ~/pico-agent/HOSTAGNT vid=0x1209 pid=0x0001\")\n",
@@ -72,6 +80,12 @@ const BUILTIN_SCRIPTS: &[BuiltinScript] = &[
         name: "macOS: Launch host-agent (local copy)",
         description: "Copies HOSTAGNT to ~/pico-agent and runs it with VID/PID (assumes German input source on macOS)",
         dsl: MACOS_HOST_AGENT_DSL,
+    },
+    BuiltinScript {
+        id: "macos_host_agent_debug",
+        name: "macOS: Launch host-agent (debug)",
+        description: "Foreground run with visible output (assumes German input source on macOS)",
+        dsl: MACOS_HOST_AGENT_DEBUG_DSL,
     },
     BuiltinScript {
         id: "assistant_us",

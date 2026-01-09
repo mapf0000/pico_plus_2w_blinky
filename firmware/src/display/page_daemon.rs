@@ -45,6 +45,13 @@ const ACTIONS: &[DaemonAction] = &[
             command: "hostname",
         },
     },
+    DaemonAction {
+        name: "Open google.com",
+        detail: "Open https://google.com in default browser",
+        kind: DaemonActionKind::Execute {
+            command: "open https://google.com",
+        },
+    },
 ];
 
 pub struct DaemonPageState {
