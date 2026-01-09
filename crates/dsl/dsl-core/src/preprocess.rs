@@ -38,12 +38,7 @@ impl Default for PreprocessOptions {
     }
 }
 
-fn pre_error(
-    code: &'static str,
-    message: impl Into<String>,
-    line: u16,
-    col: u16,
-) -> CompileError {
+fn pre_error(code: &'static str, message: impl Into<String>, line: u16, col: u16) -> CompileError {
     CompileError::error(code, message, Span::new(line, col, 0))
 }
 
@@ -171,10 +166,7 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
                     if !is_upper_name(&name) {
                         return Err(pre_error(
                             "LetInvalidName",
-                            format!(
-                                "invalid constant name '{}': must be [A-Z_][A-Z0-9_]*",
-                                name
-                            ),
+                            format!("invalid constant name '{}': must be [A-Z_][A-Z0-9_]*", name),
                             line_no,
                             1,
                         ));
@@ -319,9 +311,8 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
                 {
                     // Built-in command handled later in substitute_and_emit.
                 } else {
-                    let args =
-                        parse_call_args(call.args, &env)
-                            .map_err(|(code, msg)| pre_error(code, msg, line_no, 1))?;
+                    let args = parse_call_args(call.args, &env)
+                        .map_err(|(code, msg)| pre_error(code, msg, line_no, 1))?;
                     expand_function(
                         call.name,
                         &args,
@@ -354,12 +345,7 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
         }
 
         if trimmed == "}" {
-            return Err(pre_error(
-                "UnexpectedBrace",
-                "unexpected '}'",
-                line_no,
-                1,
-            ));
+            return Err(pre_error("UnexpectedBrace", "unexpected '}'", line_no, 1));
         }
 
         match substitute_and_emit(
@@ -457,10 +443,7 @@ fn preprocess_block(
                     if !is_upper_name(&name) {
                         return Err(pre_error(
                             "LetInvalidName",
-                            format!(
-                                "invalid constant name '{}': must be [A-Z_][A-Z0-9_]*",
-                                name
-                            ),
+                            format!("invalid constant name '{}': must be [A-Z_][A-Z0-9_]*", name),
                             line_no,
                             1,
                         ));
@@ -570,9 +553,8 @@ fn preprocess_block(
                 {
                     // Built-in command handled later in substitute_and_emit.
                 } else {
-                    let args =
-                        parse_call_args(call.args, &env)
-                            .map_err(|(code, msg)| pre_error(code, msg, line_no, 1))?;
+                    let args = parse_call_args(call.args, &env)
+                        .map_err(|(code, msg)| pre_error(code, msg, line_no, 1))?;
                     expand_function(
                         call.name, &args, line_no, lines, opts, &env, functions, stack, &mut out,
                         &mut sm, hints,
@@ -1370,7 +1352,10 @@ fn substitute_and_emit(
         } else if call.name.eq_ignore_ascii_case("layout") {
             let args = parse_call_args(call.args, env).map_err(|(code, msg)| (code, msg))?;
             if args.len() != 1 {
-                return Err(("LayoutArgCount", "layout() expects exactly one argument".into()));
+                return Err((
+                    "LayoutArgCount",
+                    "layout() expects exactly one argument".into(),
+                ));
             }
             let layout_val = match &args[0] {
                 ConstVal::Str(s) => s.clone(),
@@ -1741,8 +1726,8 @@ fn split2(s: &str) -> Option<(&str, &str)> {
 mod tests {
     use super::*;
     use crate::{
-        compile_and_link, lower_to_flat_us, FlatOp, KeyTap, Mods, OpOwned, Severity, KEY_DELETE,
-        KEY_ENTER, MOD_LCTRL,
+        FlatOp, KEY_DELETE, KEY_ENTER, KeyTap, MOD_LCTRL, Mods, OpOwned, Severity,
+        compile_and_link, lower_to_flat_us,
     };
 
     fn empty_provider<'a>(_: &'a str) -> Option<&'a str> {

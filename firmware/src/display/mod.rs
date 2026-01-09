@@ -1,14 +1,14 @@
 use core::fmt::Write as _;
 
 use embassy_executor::Spawner;
+use embassy_rp::Peri;
 use embassy_rp::adc::{Adc, Channel, Config as AdcConfig};
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{
-    ADC, ADC_TEMP_SENSOR, PIN_12, PIN_13, PIN_14, PIN_15, PIN_16, PIN_17, PIN_18, PIN_19,
-    PIN_20, PIN_26, PIN_27, PIN_28, SPI0,
+    ADC, ADC_TEMP_SENSOR, PIN_12, PIN_13, PIN_14, PIN_15, PIN_16, PIN_17, PIN_18, PIN_19, PIN_20,
+    PIN_26, PIN_27, PIN_28, SPI0,
 };
-use embassy_rp::Peri;
 use embassy_time::{Duration, Instant, Ticker};
 use embedded_graphics::pixelcolor::{Rgb565, Rgb888};
 use heapless::String;
@@ -32,7 +32,7 @@ use page_common::{build_text_line, format_hms};
 use page_system::SystemMetrics;
 use pages::{PageContext, PageId, PageInput, PageRegistry, PageRenderData};
 use renderer::Renderer;
-use ui::{apply_input, UiState};
+use ui::{UiState, apply_input};
 
 bind_interrupts!(struct AdcIrqs {
     ADC_IRQ_FIFO => embassy_rp::adc::InterruptHandler;
@@ -86,7 +86,6 @@ impl Default for DisplayPalette {
         Self::new()
     }
 }
-
 
 #[derive(Clone, Copy)]
 pub struct DisplayConfig {
@@ -188,10 +187,31 @@ fn firmware_size_bytes() -> usize {
     end.saturating_sub(start)
 }
 
+fn msc_reserved_bytes() -> usize {
+    unsafe extern "C" {
+        static __msc_start: u8;
+        static __msc_end: u8;
+    }
+    let start = core::ptr::addr_of!(__msc_start) as usize;
+    let end = core::ptr::addr_of!(__msc_end) as usize;
+    end.saturating_sub(start)
+}
+
+fn persist_reserved_bytes() -> usize {
+    unsafe extern "C" {
+        static __persist_start: u8;
+        static __persist_end: u8;
+    }
+    let start = core::ptr::addr_of!(__persist_start) as usize;
+    let end = core::ptr::addr_of!(__persist_end) as usize;
+    end.saturating_sub(start)
+}
+
 fn format_bytes_mb_one_decimal(bytes: usize) -> String<16> {
     const MIB: usize = 1024 * 1024;
-    let whole = bytes / MIB;
-    let tenths = ((bytes % MIB) * 10) / MIB;
+    let total_tenths = (bytes * 10 + (MIB / 2)) / MIB;
+    let whole = total_tenths / 10;
+    let tenths = total_tenths % 10;
     let mut s: String<16> = String::new();
     let _ = write!(s, "{}.{}MB", whole, tenths);
     s
@@ -199,11 +219,7 @@ fn format_bytes_mb_one_decimal(bytes: usize) -> String<16> {
 
 fn flash_status_line(total: usize, free: usize) -> String<48> {
     let used = total.saturating_sub(free);
-    let pct_free = if total > 0 {
-        (free * 100) / total
-    } else {
-        0
-    };
+    let pct_free = if total > 0 { (free * 100) / total } else { 0 };
     let total_s = format_bytes_mb_one_decimal(total);
     let used_s = format_bytes_mb_one_decimal(used);
     let free_s = format_bytes_mb_one_decimal(free);
@@ -309,7 +325,6 @@ fn apply_led(
     let _ = if color.b { b.set_low() } else { b.set_high() };
 }
 
-
 #[embassy_executor::task]
 async fn display_task(pins: DisplayPins<'static>) -> ! {
     log::info!("display task starting (buttons + basic screen)");
@@ -379,7 +394,9 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
 
     let flash_total = crate::device_config::FLASH_CAPACITY;
     let firmware_bytes = firmware_size_bytes();
-    let flash_free = flash_total.saturating_sub(firmware_bytes);
+    let reserved_bytes = msc_reserved_bytes().saturating_add(persist_reserved_bytes());
+    let flash_used = firmware_bytes.saturating_add(reserved_bytes);
+    let flash_free = flash_total.saturating_sub(flash_used);
     let mut metrics = SystemMetricsTracker::new(flash_total, flash_free);
 
     loop {
@@ -462,13 +479,7 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
 
                 let menu_items = pages.menu_items();
                 renderer.render_with_plan(
-                    disp,
-                    &ui_state,
-                    page,
-                    menu_items,
-                    &mut pages,
-                    plan,
-                    page_data,
+                    disp, &ui_state, page, menu_items, &mut pages, plan, page_data,
                 );
             }
         } else if !display_fail_logged {

@@ -1,6 +1,6 @@
 use crate::{
-    message_for_code, CharMapping, CompileError, FlatProgram, KeyTap, LayoutId, OpOwned,
-    ProgramOwned, Span,
+    CharMapping, CompileError, FlatProgram, KeyTap, LayoutId, OpOwned, ProgramOwned, Span,
+    message_for_code,
 };
 
 /// Lower an owned, call-free program into a FlatProgram using a default layout.

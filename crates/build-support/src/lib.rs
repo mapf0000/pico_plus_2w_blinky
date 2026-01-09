@@ -492,8 +492,8 @@ mod payloads {
 
         let program = dsl_core::compile_and_link(script.dsl, &Provider)
             .map_err(|e| compile_err("compile", script.id, e))?;
-        let flat = dsl_core::lower_to_flat_us(&program)
-            .map_err(|e| compile_err("lower", script.id, e))?;
+        let flat =
+            dsl_core::lower_to_flat_us(&program).map_err(|e| compile_err("lower", script.id, e))?;
         let bytes = dsl_core::bytecode::encode(&flat).map_err(|_| {
             anyhow::anyhow!(
                 "payload {} encode error: program exceeds maximum length",
@@ -542,8 +542,7 @@ mod msc_image {
     const MEDIA_DESCRIPTOR: u8 = 0xF8;
     const VOLUME_LABEL_DEFAULT: &str = "PICO_AGENT";
 
-    const ROOT_DIR_SECTORS: usize =
-        (ROOT_ENTRIES * 32 + BYTES_PER_SECTOR - 1) / BYTES_PER_SECTOR;
+    const ROOT_DIR_SECTORS: usize = (ROOT_ENTRIES * 32 + BYTES_PER_SECTOR - 1) / BYTES_PER_SECTOR;
 
     const HOST_AGENT_NAME: &str = "HOSTAGNT";
     const README_NAME: &str = "README";
@@ -707,7 +706,9 @@ mod msc_image {
                 let _ = writeln!(
                     out,
                     "- /{}/{}{}",
-                    target.volume_dir, target.file_name, if target.present { "" } else { " (missing)" }
+                    target.volume_dir,
+                    target.file_name,
+                    if target.present { "" } else { " (missing)" }
                 );
             } else {
                 let _ = writeln!(
@@ -799,8 +800,7 @@ mod msc_image {
             bail!("MSC image cluster count out of FAT16 range");
         }
 
-        let data_start_sector =
-            RESERVED_SECTORS + NUM_FATS * sectors_per_fat + ROOT_DIR_SECTORS;
+        let data_start_sector = RESERVED_SECTORS + NUM_FATS * sectors_per_fat + ROOT_DIR_SECTORS;
 
         Ok(Layout {
             total_sectors,
@@ -867,7 +867,8 @@ mod msc_image {
             &allocator.fat,
         );
 
-        let root_dir_start = (RESERVED_SECTORS + NUM_FATS * layout.sectors_per_fat) * BYTES_PER_SECTOR;
+        let root_dir_start =
+            (RESERVED_SECTORS + NUM_FATS * layout.sectors_per_fat) * BYTES_PER_SECTOR;
         let root_dir_bytes = ROOT_DIR_SECTORS * BYTES_PER_SECTOR;
         let mut root_entries = Vec::new();
         root_entries.push(DirEntry::volume_label(*label));
@@ -875,7 +876,12 @@ mod msc_image {
             root_entries.push(DirEntry::directory(dir.name, dir.cluster));
         }
         for file in &root_allocs {
-            root_entries.push(DirEntry::file(file.name, file.attr, file.cluster, file.size));
+            root_entries.push(DirEntry::file(
+                file.name,
+                file.attr,
+                file.cluster,
+                file.size,
+            ));
         }
         write_dir_entries(
             &mut image[root_dir_start..root_dir_start + root_dir_bytes],
@@ -892,7 +898,12 @@ mod msc_image {
             entries.push(DirEntry::dot(dir.cluster));
             entries.push(DirEntry::dotdot(0));
             for file in &dir.files {
-                entries.push(DirEntry::file(file.name, file.attr, file.cluster, file.size));
+                entries.push(DirEntry::file(
+                    file.name,
+                    file.attr,
+                    file.cluster,
+                    file.size,
+                ));
                 write_file_data(&mut image, data_start, file.cluster, &file.data)?;
             }
             write_dir_entries(

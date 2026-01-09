@@ -173,33 +173,33 @@ fn app() -> Html {
         })
     };
 
-    let on_usb_start =
-        {
-            let selected_os = selected_os.clone();
-            let selected_layout = selected_layout.clone();
+    let on_usb_start = {
+        let selected_os = selected_os.clone();
+        let selected_layout = selected_layout.clone();
+        let set_busy = set_busy.clone();
+        let push_log = push_log.clone();
+        let toast_cb = show_toast.clone();
+        Callback::from(move |assistant: bool| {
+            let selected_os = (*selected_os).clone();
+            let layout_id = (*selected_layout).clone();
             let set_busy = set_busy.clone();
             let push_log = push_log.clone();
-            let toast_cb = show_toast.clone();
-            Callback::from(move |assistant: bool| {
-                let selected_os = (*selected_os).clone();
-                let layout_id = (*selected_layout).clone();
-                let set_busy = set_busy.clone();
-                let push_log = push_log.clone();
-                let show_toast = toast_cb.clone();
-                wasm_bindgen_futures::spawn_local(async move {
-                    set_busy.emit(true);
-                    let os_opt = if selected_os == "unknown" {
-                        None
-                    } else {
-                        Some(selected_os.as_str())
-                    };
-                    match api::usb_register(assistant, os_opt).await {
-                        Ok(()) => {
-                            push_log.emit("USB enabling request sent".to_string());
-                            show_toast.emit(("USB enabling…".into(), true));
-                            if assistant {
-                                match scripts::lookup("assistant_us") {
-                                    Some(script_dsl) => match dsl::compile(script_dsl, &layout_id) {
+            let show_toast = toast_cb.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                set_busy.emit(true);
+                let os_opt = if selected_os == "unknown" {
+                    None
+                } else {
+                    Some(selected_os.as_str())
+                };
+                match api::usb_register(assistant, os_opt).await {
+                    Ok(()) => {
+                        push_log.emit("USB enabling request sent".to_string());
+                        show_toast.emit(("USB enabling…".into(), true));
+                        if assistant {
+                            match scripts::lookup("assistant_us") {
+                                Some(script_dsl) => {
+                                    match dsl::compile(script_dsl, &layout_id) {
                                         Ok(bytecode) => match api::run_script(&bytecode).await {
                                             Ok(()) => push_log
                                                 .emit("macOS assistant script queued".into()),
@@ -212,21 +212,23 @@ fn app() -> Html {
                                                 err.message
                                             ));
                                         }
-                                    },
-                                    None => push_log
-                                        .emit("assistant script unavailable in frontend".into()),
+                                    }
+                                }
+                                None => {
+                                    push_log.emit("assistant script unavailable in frontend".into())
                                 }
                             }
                         }
-                        Err(e) => {
-                            push_log.emit(format!("usb start error: {e}"));
-                            show_toast.emit((format!("USB start failed: {e}"), false));
-                        }
                     }
-                    set_busy.emit(false);
-                });
-            })
-        };
+                    Err(e) => {
+                        push_log.emit(format!("usb start error: {e}"));
+                        show_toast.emit((format!("USB start failed: {e}"), false));
+                    }
+                }
+                set_busy.emit(false);
+            });
+        })
+    };
 
     let on_run_dsl = {
         let dsl_text = dsl_text.clone();

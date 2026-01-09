@@ -88,7 +88,11 @@ struct Control<'a> {
 impl<'a> Handler for Control<'a> {
     fn control_out(&mut self, req: Request, data: &[u8]) -> Option<OutResponse> {
         if (req.request_type, req.recipient, req.index)
-            != (RequestType::Class, Recipient::Interface, self.iface.0 as u16)
+            != (
+                RequestType::Class,
+                Recipient::Interface,
+                self.iface.0 as u16,
+            )
         {
             return None;
         }
@@ -104,7 +108,11 @@ impl<'a> Handler for Control<'a> {
 
     fn control_in<'b>(&'b mut self, req: Request, buf: &'b mut [u8]) -> Option<InResponse<'b>> {
         if (req.request_type, req.recipient, req.index)
-            != (RequestType::Class, Recipient::Interface, self.iface.0 as u16)
+            != (
+                RequestType::Class,
+                Recipient::Interface,
+                self.iface.0 as u16,
+            )
         {
             return None;
         }
@@ -131,9 +139,17 @@ pub struct MscClass<'d, D: Driver<'d>> {
 }
 
 impl<'d, D: Driver<'d>> MscClass<'d, D> {
-    pub fn new(builder: &mut Builder<'d, D>, state: &'d mut State<'d>, max_packet_size: u16) -> Self {
+    pub fn new(
+        builder: &mut Builder<'d, D>,
+        state: &'d mut State<'d>,
+        max_packet_size: u16,
+    ) -> Self {
         let iface_string = builder.string();
-        let mut function = builder.function(USB_CLASS_MASS_STORAGE, MSC_SUBCLASS_SCSI, MSC_PROTOCOL_BULK_ONLY);
+        let mut function = builder.function(
+            USB_CLASS_MASS_STORAGE,
+            MSC_SUBCLASS_SCSI,
+            MSC_PROTOCOL_BULK_ONLY,
+        );
         let mut interface = function.interface();
         let iface_number = interface.interface_number();
         let mut alt = interface.alt_setting(
@@ -212,8 +228,10 @@ impl<'d, D: Driver<'d>> MscClass<'d, D> {
                             Some(inquiry_response())
                         };
                         if let Some(data) = data {
-                            let send_len =
-                                core::cmp::min(core::cmp::min(data.len(), alloc_len), cbw.data_len as usize);
+                            let send_len = core::cmp::min(
+                                core::cmp::min(data.len(), alloc_len),
+                                cbw.data_len as usize,
+                            );
                             if cbw.direction_in() && send_len > 0 {
                                 data_in = send_len;
                                 if let Err(err) = self.write_data(&data[..send_len]).await {
@@ -302,8 +320,10 @@ impl<'d, D: Driver<'d>> MscClass<'d, D> {
                     }
                     SCSI_READ_10 => {
                         if cbw.direction_in() {
-                            let lba = u32::from_be_bytes(cbw.cmd[2..6].try_into().unwrap()) as usize;
-                            let blocks = u16::from_be_bytes(cbw.cmd[7..9].try_into().unwrap()) as usize;
+                            let lba =
+                                u32::from_be_bytes(cbw.cmd[2..6].try_into().unwrap()) as usize;
+                            let blocks =
+                                u16::from_be_bytes(cbw.cmd[7..9].try_into().unwrap()) as usize;
                             let byte_len = blocks.saturating_mul(BLOCK_SIZE);
                             let offset = lba.saturating_mul(BLOCK_SIZE);
                             if offset + byte_len <= image.len() {
@@ -329,11 +349,13 @@ impl<'d, D: Driver<'d>> MscClass<'d, D> {
                     SCSI_READ_16 => {
                         if cbw.direction_in() {
                             let lba = u64::from_be_bytes(cbw.cmd[2..10].try_into().unwrap());
-                            let blocks = u32::from_be_bytes(cbw.cmd[10..14].try_into().unwrap()) as u64;
+                            let blocks =
+                                u32::from_be_bytes(cbw.cmd[10..14].try_into().unwrap()) as u64;
                             let byte_len = blocks.saturating_mul(BLOCK_SIZE as u64);
                             let offset = lba.saturating_mul(BLOCK_SIZE as u64);
                             if offset + byte_len <= image.len() as u64 {
-                                let send_len = core::cmp::min(byte_len, cbw.data_len as u64) as usize;
+                                let send_len =
+                                    core::cmp::min(byte_len, cbw.data_len as u64) as usize;
                                 if send_len > 0 {
                                     data_in = send_len;
                                     let start = offset as usize;
@@ -376,9 +398,7 @@ impl<'d, D: Driver<'d>> MscClass<'d, D> {
                     }
                 }
 
-                let residue = cbw
-                    .data_len
-                    .saturating_sub((data_in + data_out) as u32);
+                let residue = cbw.data_len.saturating_sub((data_in + data_out) as u32);
                 if status != CSW_STATUS_PASS || residue > 0 {
                     warn!(
                         "usb: MSC csw status=0x{:02x} residue={} sense={:02x}/{:02x}",
@@ -477,7 +497,6 @@ fn parse_cbw(buf: &[u8; CBW_LEN]) -> Option<Cbw> {
         cmd,
     })
 }
-
 
 #[derive(Clone, Copy)]
 struct Sense {

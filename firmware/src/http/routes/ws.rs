@@ -1,6 +1,6 @@
+use picoserve::futures::Either;
 use picoserve::io::embedded_io_async;
 use picoserve::response::ws; // for Read/Write trait bounds
-use picoserve::futures::Either;
 
 use crate::host::{self, HostOs};
 use crate::http::util::{escape_json_str, percent_decode_str};

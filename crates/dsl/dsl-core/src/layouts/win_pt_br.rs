@@ -1,7 +1,7 @@
 use super::LayoutOverride;
 use crate::{
-    Mods, KEY_BACKSLASH, KEY_GRAVE, KEY_NON_US_BACKSLASH, KEY_RIGHT_BRACKET, KEY_SLASH,
-    KEY_SPACE, MOD_LSHIFT, MOD_RALT,
+    KEY_BACKSLASH, KEY_GRAVE, KEY_NON_US_BACKSLASH, KEY_RIGHT_BRACKET, KEY_SLASH, KEY_SPACE,
+    MOD_LSHIFT, MOD_RALT, Mods,
 };
 
 const KEY_Q: crate::Usage = crate::KEY_A.add(b'Q' - b'A');

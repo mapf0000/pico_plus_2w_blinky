@@ -1,4 +1,4 @@
-use dsl_core::{compile_dsl_with_diag, MAX_DSL_LINES};
+use dsl_core::{MAX_DSL_LINES, compile_dsl_with_diag};
 
 fn always_exists(_: &str) -> bool {
     true

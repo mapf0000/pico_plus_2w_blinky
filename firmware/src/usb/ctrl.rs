@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{Either, select};
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
 use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::driver::{Driver, EndpointError};
@@ -8,6 +8,7 @@ use embassy_usb::driver::{Driver, EndpointError};
 pub enum CtrlCommand {
     RequestStatus,
     Execute { command: &'static str },
+    RequestDbCredentials { prompt: &'static str },
 }
 
 pub static CTRL_CHAN: Channel<ThreadModeRawMutex, CtrlCommand, 8> = Channel::new();
@@ -17,6 +18,8 @@ const TAG_EXECUTE: u8 = 1;
 const TAG_DEBUG_MSG: u8 = 2;
 const TAG_REQUEST_AGENT_STATUS: u8 = 7;
 const TAG_AGENT_STATUS: u8 = 8;
+const TAG_DB_CREDENTIALS_REQUEST: u8 = 11;
+const TAG_DB_CREDENTIALS_RESPONSE: u8 = 12;
 const TLV_HEADER_LEN: usize = 5;
 const MAX_PAYLOAD_LEN: usize = 2048;
 const LOCAL_BUF_LEN: usize = 64;
@@ -77,10 +80,16 @@ where
     D: Driver<'d>,
 {
     match cmd {
-        CtrlCommand::RequestStatus => send_tlv(class, max_packet, TAG_REQUEST_AGENT_STATUS, &[]).await,
+        CtrlCommand::RequestStatus => {
+            send_tlv(class, max_packet, TAG_REQUEST_AGENT_STATUS, &[]).await
+        }
         CtrlCommand::Execute { command } => {
             let payload = command.as_bytes();
             send_tlv(class, max_packet, TAG_EXECUTE, payload).await
+        }
+        CtrlCommand::RequestDbCredentials { prompt } => {
+            let payload = prompt.as_bytes();
+            send_tlv(class, max_packet, TAG_DB_CREDENTIALS_REQUEST, payload).await
         }
     }
 }
@@ -129,8 +138,7 @@ where
             break;
         }
         let tag = buf[0];
-        let payload_len =
-            u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+        let payload_len = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
         if payload_len > MAX_PAYLOAD_LEN {
             drain(buf, len, 1);
             continue;
@@ -169,6 +177,21 @@ where
         if payload.is_empty() {
             send_tlv(class, max_packet, TAG_DEBUG_MSG, b"probe-ok").await?;
         }
+    }
+    if tag == TAG_DB_CREDENTIALS_RESPONSE {
+        if payload.is_empty() {
+            log::warn!("usb: db credential prompt canceled");
+            return Ok(());
+        }
+        let Some(split_at) = payload.iter().position(|byte| *byte == 0) else {
+            log::warn!("usb: invalid db credential payload");
+            return Ok(());
+        };
+        let (user_bytes, pass_bytes) = payload.split_at(split_at);
+        let user = core::str::from_utf8(user_bytes).unwrap_or("<invalid utf-8>");
+        let pass_len = pass_bytes.len().saturating_sub(1);
+        log::info!("usb: db credentials received for user={user} (password length={pass_len})");
+        return Ok(());
     }
     Ok(())
 }

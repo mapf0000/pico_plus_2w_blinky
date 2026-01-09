@@ -106,14 +106,12 @@ fn normalize_args(args: Vec<String>) -> Vec<String> {
 
 fn parse_u16(input: &str) -> Result<u16> {
     let value = input.trim();
-    let (radix, digits) = if let Some(stripped) = value.strip_prefix("0x")
+    let (radix, digits) = if let Some(stripped) = value
+        .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
     {
         (16, stripped)
-    } else if value
-        .chars()
-        .any(|c| matches!(c, 'a'..='f' | 'A'..='F'))
-    {
+    } else if value.chars().any(|c| matches!(c, 'a'..='f' | 'A'..='F')) {
         (16, value)
     } else {
         (10, value)

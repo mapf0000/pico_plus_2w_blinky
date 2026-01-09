@@ -3,7 +3,7 @@ use core::str::FromStr;
 use crate::keycodes::{parse_key, parse_modtap};
 use crate::limits::{MAX_DSL_DELAY_MS, MAX_DSL_LINES};
 use crate::{
-    message_for_code, CompileError, KeyTap, LayoutId, LayoutParseError, Mods, Op, Program, Span,
+    CompileError, KeyTap, LayoutId, LayoutParseError, Mods, Op, Program, Span, message_for_code,
 };
 
 pub trait ScriptExists {
@@ -54,7 +54,10 @@ pub fn compile_dsl_with_diag<'a>(
                 return Err(parser_error("InvalidLine", line_no));
             }
             let usage = parse_key(key_name).ok_or(parser_error("ParseKey", line_no))?;
-            prog.ops.push(Op::Tap(KeyTap { usage, mods: Mods::empty() }));
+            prog.ops.push(Op::Tap(KeyTap {
+                usage,
+                mods: Mods::empty(),
+            }));
         } else if eq_ci(cmd, "modtap") {
             let arg = rest.trim();
             if arg.is_empty() {
@@ -63,7 +66,10 @@ pub fn compile_dsl_with_diag<'a>(
             let (mods, usage) = parse_modtap(arg).map_err(|k| parser_error(k, line_no))?;
             prog.ops.push(Op::Tap(KeyTap { usage, mods }));
         } else if eq_ci(cmd, "delay") {
-            let ms: u64 = rest.trim().parse::<u64>().map_err(|_| parser_error("ParseDelay", line_no))?;
+            let ms: u64 = rest
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| parser_error("ParseDelay", line_no))?;
             let ms = core::cmp::min(ms, MAX_DSL_DELAY_MS) as u32;
             if ms != 0 {
                 prog.ops.push(Op::DelayMs(ms));

@@ -1,5 +1,5 @@
-use embedded_graphics::mono_font::ascii::{FONT_6X9, FONT_8X13};
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
+use embedded_graphics::mono_font::ascii::{FONT_6X9, FONT_8X13};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
@@ -53,8 +53,7 @@ impl Layout {
         let content_w = screen_w
             .saturating_sub(content_x as u32)
             .saturating_sub(content_pad as u32);
-        let content_rect =
-            Rectangle::new(Point::new(content_x, 0), Size::new(content_w, screen_h));
+        let content_rect = Rectangle::new(Point::new(content_x, 0), Size::new(content_w, screen_h));
 
         Self {
             menu_rect,
@@ -192,7 +191,11 @@ impl Renderer {
         let bg_color = self.palette.black;
         let menu_bg = self.palette.black;
         let layout = plan.layout;
-        let screen_h = layout.content_rect.size.height.max(layout.menu_rect.size.height);
+        let screen_h = layout
+            .content_rect
+            .size
+            .height
+            .max(layout.menu_rect.size.height);
         let title_style = MonoTextStyleBuilder::new()
             .font(&FONT_8X13)
             .text_color(self.config.header_text)
@@ -285,7 +288,10 @@ impl Renderer {
 
         if plan.dirty.content {
             let clear_rect = Rectangle::new(
-                Point::new(layout.content_rect.top_left.x, layout.content_rect.top_left.y),
+                Point::new(
+                    layout.content_rect.top_left.x,
+                    layout.content_rect.top_left.y,
+                ),
                 Size::new(
                     disp.bounding_box()
                         .size
@@ -312,11 +318,7 @@ impl Renderer {
 
         let y_pos = layout.content_rect.top_left.y + 20;
         let line_x = layout.content_rect.top_left.x;
-        let clear_w = disp
-            .bounding_box()
-            .size
-            .width
-            .saturating_sub(line_x as u32);
+        let clear_w = disp.bounding_box().size.width.saturating_sub(line_x as u32);
 
         if plan.dirty.page || plan.dirty.content {
             registry.render(
@@ -359,7 +361,11 @@ fn draw_menu_item(
 ) {
     let y = base_y + (idx as i32 * item_h);
     let sel_bg = if selected { palette.white } else { menu_bg };
-    let sel_fg = if selected { palette.black } else { palette.white };
+    let sel_fg = if selected {
+        palette.black
+    } else {
+        palette.white
+    };
     let _ = Rectangle::new(
         Point::new(menu_x + 2, y - 9),
         Size::new(menu_w.saturating_sub(4), item_h as u32),

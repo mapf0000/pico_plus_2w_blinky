@@ -1,7 +1,5 @@
 use super::LayoutOverride;
-use crate::{
-    Mods, KEY_2, KEY_APOSTROPHE, KEY_BACKSLASH, KEY_NON_US_BACKSLASH, MOD_LSHIFT,
-};
+use crate::{KEY_2, KEY_APOSTROPHE, KEY_BACKSLASH, KEY_NON_US_BACKSLASH, MOD_LSHIFT, Mods};
 
 pub(super) const OVERRIDES: &[LayoutOverride] = &[
     LayoutOverride {

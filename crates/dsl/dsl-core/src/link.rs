@@ -6,8 +6,8 @@ use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
 use crate::limits::MAX_TOTAL_FLAT_OPS;
 use crate::parser::compile_dsl_with_diag;
-use crate::preprocess::{map_pre_span, preprocess, PreprocessOptions, PreprocessOutput};
-use crate::{message_for_code, CompileError, Op, OpOwned, Program, ProgramOwned, Span};
+use crate::preprocess::{PreprocessOptions, PreprocessOutput, map_pre_span, preprocess};
+use crate::{CompileError, Op, OpOwned, Program, ProgramOwned, Span, message_for_code};
 
 /// Simple provider used during linking. Returns DSL text for a script id.
 pub trait ScriptProvider {
@@ -138,7 +138,7 @@ fn link_error(code: &'static str, line: u16) -> CompileError {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
-    use crate::{preprocess, PreprocessOptions};
+    use crate::{PreprocessOptions, preprocess};
 
     struct EmptyProvider;
 
@@ -190,10 +190,6 @@ mod tests {
             .unwrap_or_else(|e| panic!("preprocess: {:?}", e));
         let err = compile_and_link(entry, &EmptyProvider).unwrap_err();
         assert_eq!(err.span.line, 1);
-        assert!(
-            err.code == "UnknownLayout",
-            "unexpected error: {:?}",
-            err
-        );
+        assert!(err.code == "UnknownLayout", "unexpected error: {:?}", err);
     }
 }

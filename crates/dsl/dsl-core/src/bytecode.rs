@@ -128,8 +128,7 @@ pub fn decode_to_flat(data: &[u8]) -> Result<FlatProgram, DecodeError> {
         match op {
             OP_DELAY => {
                 let ms = rd.read_varu32()?;
-                out.push_delay(ms)
-                    .map_err(|_| DecodeError::TooManyOps)?;
+                out.push_delay(ms).map_err(|_| DecodeError::TooManyOps)?;
             }
             OP_TAP => {
                 let usage = Usage::from_u8(rd.read_u8()?);

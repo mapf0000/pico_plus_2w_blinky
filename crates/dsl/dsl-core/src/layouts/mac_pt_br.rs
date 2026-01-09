@@ -1,6 +1,6 @@
 use super::LayoutOverride;
 use crate::{
-    Mods, KEY_LEFT_BRACKET, KEY_NON_US_BACKSLASH, KEY_RIGHT_BRACKET, MOD_LALT, MOD_LSHIFT,
+    KEY_LEFT_BRACKET, KEY_NON_US_BACKSLASH, KEY_RIGHT_BRACKET, MOD_LALT, MOD_LSHIFT, Mods,
 };
 
 pub(super) const OVERRIDES: &[LayoutOverride] = &[

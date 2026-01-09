@@ -2,18 +2,18 @@ use core::str::FromStr;
 
 use crate::char_to_key_us;
 
-#[cfg(feature = "layout_win_en_gb")]
-mod win_en_gb;
-#[cfg(feature = "layout_win_pt_br")]
-mod win_pt_br;
-#[cfg(feature = "layout_win_de_de")]
-mod win_de_de;
+#[cfg(feature = "layout_mac_de_de")]
+mod mac_de_de;
 #[cfg(feature = "layout_mac_en_gb")]
 mod mac_en_gb;
 #[cfg(feature = "layout_mac_pt_br")]
 mod mac_pt_br;
-#[cfg(feature = "layout_mac_de_de")]
-mod mac_de_de;
+#[cfg(feature = "layout_win_de_de")]
+mod win_de_de;
+#[cfg(feature = "layout_win_en_gb")]
+mod win_en_gb;
+#[cfg(feature = "layout_win_pt_br")]
+mod win_pt_br;
 
 pub const DEFAULT_LAYOUT_ID: &str = "win_en-US";
 const LAYOUT_WIN_EN_GB_ID: &str = "win_en-GB";
@@ -31,7 +31,10 @@ pub enum LayoutParseError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CharMapping {
-    Tap { usage: crate::Usage, mods: crate::Mods },
+    Tap {
+        usage: crate::Usage,
+        mods: crate::Mods,
+    },
     Seq(&'static [crate::KeyTap]),
 }
 
@@ -252,8 +255,8 @@ fn map_with_overrides(c: char, overrides: &[LayoutOverride]) -> Option<CharMappi
 #[cfg(all(test, feature = "std", feature = "layout_win_de_de"))]
 mod tests_win_de_de {
     use crate::{
-        compile_and_link, lower_to_flat_with_layout, preprocess, FlatOp, LayoutId,
-        PreprocessOptions, KEY_A,
+        FlatOp, KEY_A, LayoutId, PreprocessOptions, compile_and_link, lower_to_flat_with_layout,
+        preprocess,
     };
 
     fn empty_provider<'a>(_: &'a str) -> Option<&'a str> {
@@ -288,8 +291,8 @@ mod tests_win_de_de {
 #[cfg(all(test, feature = "std", feature = "layout_mac_de_de"))]
 mod tests_mac_de_de {
     use crate::{
-        compile_and_link, lower_to_flat_with_layout, preprocess, FlatOp, LayoutId,
-        Mods, PreprocessOptions, KEY_A, KEY_SPACE, MOD_LALT,
+        FlatOp, KEY_A, KEY_SPACE, LayoutId, MOD_LALT, Mods, PreprocessOptions, compile_and_link,
+        lower_to_flat_with_layout, preprocess,
     };
 
     fn empty_provider<'a>(_: &'a str) -> Option<&'a str> {
@@ -336,9 +339,6 @@ mod tests_mac_de_de {
             })
             .collect();
         let key_n = KEY_A.add(b'N' - b'A');
-        assert_eq!(
-            taps,
-            vec![(key_n, MOD_LALT), (KEY_SPACE, Mods::empty())]
-        );
+        assert_eq!(taps, vec![(key_n, MOD_LALT), (KEY_SPACE, Mods::empty())]);
     }
 }

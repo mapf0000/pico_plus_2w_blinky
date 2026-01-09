@@ -7,9 +7,9 @@ use heapless::{String, Vec};
 
 use crate::log_buffer;
 
-use super::page_common::{update_line, TEXT_PAD};
-use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
 use super::DisplayConfig;
+use super::page_common::{TEXT_PAD, update_line};
+use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
 
 pub struct LogsPageState {
     pub prev_lines: Vec<String<{ log_buffer::LOG_LINE_MAX }>, { log_buffer::LOG_CAPACITY }>,
@@ -82,10 +82,8 @@ pub fn render(
     body_style: &MonoTextStyle<Rgb565>,
     state: &mut LogsPageState,
 ) {
-    let mut lines: Vec<
-        String<{ log_buffer::LOG_LINE_MAX }>,
-        { log_buffer::LOG_CAPACITY },
-    > = Vec::new();
+    let mut lines: Vec<String<{ log_buffer::LOG_LINE_MAX }>, { log_buffer::LOG_CAPACITY }> =
+        Vec::new();
     log_buffer::snapshot(&mut lines);
 
     let header_height = 18;
@@ -100,8 +98,8 @@ pub fn render(
 
     let line_h: i32 = 12;
     let available_height = content_height.saturating_sub(y_pos as u32);
-    let max_lines = (available_height / (line_h as u32))
-        .min(log_buffer::LOG_CAPACITY as u32) as usize;
+    let max_lines =
+        (available_height / (line_h as u32)).min(log_buffer::LOG_CAPACITY as u32) as usize;
     let start_idx = lines.len().saturating_sub(max_lines);
     let display_slice = &lines[start_idx..];
 

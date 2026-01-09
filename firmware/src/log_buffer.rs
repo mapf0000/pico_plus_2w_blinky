@@ -2,8 +2,8 @@ use core::cell::RefCell;
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use heapless::{Deque, String, Vec};
 use log::Record;
 

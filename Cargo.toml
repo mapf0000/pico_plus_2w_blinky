@@ -17,5 +17,10 @@ resolver = "2"
 opt-level = "z"
 codegen-units = 1
 
+[profile.release.package.host-agent]
+strip = true
+opt-level = "z"
+codegen-units = 1
+
 [patch.crates-io]
 picoserve = { path = "crates/vendor/picoserve" }

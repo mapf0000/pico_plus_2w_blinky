@@ -16,6 +16,8 @@ const TAG_DEBUG_MSG: u8 = 2;
 const TAG_REQUEST_AGENT_STATUS: u8 = 7;
 const TAG_AGENT_STATUS: u8 = 8;
 const TAG_EXECUTE_RESULT: u8 = 9;
+const TAG_DB_CREDENTIALS_REQUEST: u8 = 11;
+const TAG_DB_CREDENTIALS_RESPONSE: u8 = 12;
 const MAX_EXEC_OUTPUT: usize = 8 * 1024;
 const WAIT_CONNECT_MS: u64 = 1200;
 const RESPONSE_TIMEOUT_MS: u64 = 500;
@@ -65,10 +67,11 @@ fn host_agent_cmd() -> io::Result<std::process::Command> {
         target_dir.join(target).join("debug").join("host-agent")
     };
 
-    let build_error =
-        HOST_AGENT_BUILD.get_or_init(|| build_host_agent(target, &target_dir).err().map(|err| {
-            err.to_string()
-        }));
+    let build_error = HOST_AGENT_BUILD.get_or_init(|| {
+        build_host_agent(target, &target_dir)
+            .err()
+            .map(|err| err.to_string())
+    });
     if let Some(message) = build_error.as_ref() {
         return Err(io::Error::new(io::ErrorKind::Other, message.clone()));
     }
@@ -255,12 +258,13 @@ fn request_agent_status_with_timeout(
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
-        match read_frame(master.as_raw_fd(), Duration::from_millis(RESPONSE_TIMEOUT_MS)) {
+        match read_frame(
+            master.as_raw_fd(),
+            Duration::from_millis(RESPONSE_TIMEOUT_MS),
+        ) {
             Ok(frame) => return Ok(frame),
             Err(err) => {
-                if err.raw_os_error() == Some(libc::EIO)
-                    || err.kind() == io::ErrorKind::TimedOut
-                {
+                if err.raw_os_error() == Some(libc::EIO) || err.kind() == io::ErrorKind::TimedOut {
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }
@@ -344,7 +348,10 @@ fn read_execute_results(
             };
             return Err(io::Error::new(io::ErrorKind::Other, message));
         }
-        match read_frame(master.as_raw_fd(), Duration::from_millis(RESPONSE_TIMEOUT_MS)) {
+        match read_frame(
+            master.as_raw_fd(),
+            Duration::from_millis(RESPONSE_TIMEOUT_MS),
+        ) {
             Ok((tag, payload)) => {
                 if tag != TAG_EXECUTE_RESULT {
                     return Err(io::Error::new(
@@ -356,9 +363,7 @@ fn read_execute_results(
                 chunks.push(payload);
             }
             Err(err) => {
-                if err.raw_os_error() == Some(libc::EIO)
-                    || err.kind() == io::ErrorKind::TimedOut
-                {
+                if err.raw_os_error() == Some(libc::EIO) || err.kind() == io::ErrorKind::TimedOut {
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }
@@ -382,9 +387,14 @@ fn read_execute_results(
     Ok(chunks)
 }
 
-fn spawn_agent(
+fn spawn_agent(slave_fd: RawFd, debug_log: Option<&PathBuf>) -> io::Result<(Child, PathBuf)> {
+    spawn_agent_with_env(slave_fd, debug_log, &[])
+}
+
+fn spawn_agent_with_env(
     slave_fd: RawFd,
     debug_log: Option<&PathBuf>,
+    envs: &[(&str, &str)],
 ) -> io::Result<(Child, PathBuf)> {
     let mut cmd = host_agent_cmd()?;
     let log_path = temp_log_path();
@@ -395,6 +405,9 @@ fn spawn_agent(
         .arg("--debug")
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_file_err));
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
     if let Some(path) = debug_log {
         cmd.arg("--debug-log").arg(path);
     }
@@ -518,6 +531,48 @@ fn e2e_execute_truncation() -> io::Result<()> {
 }
 
 #[test]
+fn e2e_db_credentials_roundtrip() -> io::Result<()> {
+    let (master, slave, _slave_path) = open_pty_pair()?;
+    let mut master = master;
+    let slave_fd = slave.as_raw_fd();
+
+    let envs = [
+        ("HOST_AGENT_DB_USER", "dbuser"),
+        ("HOST_AGENT_DB_PASSWORD", "dbpass"),
+    ];
+    let (mut child, log_path) = spawn_agent_with_env(slave_fd, None, &envs)?;
+    drop(slave);
+
+    std::thread::sleep(Duration::from_millis(WAIT_CONNECT_MS));
+    send_frame_with_retry(
+        &mut master,
+        &mut child,
+        &log_path,
+        TAG_DB_CREDENTIALS_REQUEST,
+        b"analytics-db",
+    )?;
+    let (tag, payload) = read_frame(
+        master.as_raw_fd(),
+        Duration::from_millis(RESPONSE_DEADLINE_MS),
+    )?;
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert_eq!(tag, TAG_DB_CREDENTIALS_RESPONSE);
+    let Some(split_at) = payload.iter().position(|byte| *byte == 0) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "credential payload missing separator",
+        ));
+    };
+    let (user_bytes, pass_bytes) = payload.split_at(split_at);
+    assert_eq!(user_bytes, b"dbuser");
+    assert_eq!(&pass_bytes[1..], b"dbpass");
+    Ok(())
+}
+
+#[test]
 fn e2e_debug_msg_logging() -> io::Result<()> {
     let (master, slave, _slave_path) = open_pty_pair()?;
     let mut master = master;
@@ -553,9 +608,7 @@ fn read_exact_deadline(fd: RawFd, buf: &mut [u8], deadline: Instant) -> io::Resu
                 "timeout waiting for data",
             ));
         }
-        let timeout_ms = (deadline - now)
-            .as_millis()
-            .min(i32::MAX as u128) as i32;
+        let timeout_ms = (deadline - now).as_millis().min(i32::MAX as u128) as i32;
         let mut pfd = libc::pollfd {
             fd,
             events: libc::POLLIN,
@@ -599,10 +652,7 @@ fn read_exact_deadline(fd: RawFd, buf: &mut [u8], deadline: Instant) -> io::Resu
             return Err(err);
         }
         if read_len == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "pty closed",
-            ));
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "pty closed"));
         }
         offset += read_len as usize;
     }

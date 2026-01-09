@@ -1,11 +1,11 @@
 use core::fmt::Write as _;
 
+use embassy_time::Duration;
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::Text;
-use embassy_time::Duration;
 use heapless::String;
 
 pub const TEXT_PAD: i32 = 6;
@@ -46,7 +46,14 @@ pub fn format_hms(duration: Duration) -> String<20> {
     let mut out: String<20> = String::new();
     if hours >= 24 {
         let days = hours / 24;
-        let _ = write!(out, "{}d {:02}:{:02}:{:02}", days, hours % 24, minutes, seconds);
+        let _ = write!(
+            out,
+            "{}d {:02}:{:02}:{:02}",
+            days,
+            hours % 24,
+            minutes,
+            seconds
+        );
     } else {
         let _ = write!(out, "{:02}:{:02}:{:02}", hours, minutes, seconds);
     }

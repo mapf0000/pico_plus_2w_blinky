@@ -5,9 +5,9 @@ use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::Text;
 use heapless::String;
 
-use super::page_common::{build_text_line, update_line, TEXT_PAD};
-use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
 use super::DisplayConfig;
+use super::page_common::{TEXT_PAD, build_text_line, update_line};
+use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
 
 pub struct SystemMetrics<'a> {
     pub uptime: &'a str,
@@ -121,7 +121,7 @@ pub fn render(
         Point::new(line_x + TEXT_PAD, y_pos),
         *title_style,
     )
-        .draw(disp);
+    .draw(disp);
 
     y_pos += 18;
     let ap_line: String<32> = build_text_line("AP: ", ap_ssid);

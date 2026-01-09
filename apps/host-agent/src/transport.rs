@@ -1,12 +1,12 @@
 use crate::config::Config;
 use crate::tlv;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bytes::{Bytes, BytesMut};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
-use tokio::time::{timeout, Instant};
+use tokio::time::{Instant, timeout};
 use tokio_serial::{DataBits, Parity, SerialPort, SerialPortBuilderExt, SerialPortType, StopBits};
 use tracing::{debug, error, info};
 
@@ -31,6 +31,8 @@ const TAG_REQUEST_AGENT_STATUS: u8 = 7;
 const TAG_AGENT_STATUS: u8 = 8;
 const TAG_EXECUTE_RESULT: u8 = 9;
 const TAG_MIC_PCM_DATA: u8 = 10;
+const TAG_DB_CREDENTIALS_REQUEST: u8 = 11;
+const TAG_DB_CREDENTIALS_RESPONSE: u8 = 12;
 
 const CACHE_DIR_NAME: &str = "host-agent";
 const CACHE_FILE_NAME: &str = "port";
@@ -121,8 +123,7 @@ pub async fn select_port(config: &Config) -> Result<String> {
     }
 
     if usb_candidates.len() > 1 {
-        if let Some(selected) =
-            probe_control_port(&usb_candidates, config.probe_timeout_ms).await?
+        if let Some(selected) = probe_control_port(&usb_candidates, config.probe_timeout_ms).await?
         {
             store_cached_port(&selected);
             return Ok(selected);
@@ -302,7 +303,9 @@ fn list_ports(ports: &[tokio_serial::SerialPortInfo]) -> String {
     names.join(", ")
 }
 
-fn prefer_callout_ports(ports: &[tokio_serial::SerialPortInfo]) -> Vec<tokio_serial::SerialPortInfo> {
+fn prefer_callout_ports(
+    ports: &[tokio_serial::SerialPortInfo],
+) -> Vec<tokio_serial::SerialPortInfo> {
     #[cfg(target_os = "macos")]
     {
         let cu_ports: Vec<_> = ports
@@ -330,6 +333,8 @@ fn is_known_tag(tag: u8) -> bool {
             | TAG_AGENT_STATUS
             | TAG_EXECUTE_RESULT
             | TAG_MIC_PCM_DATA
+            | TAG_DB_CREDENTIALS_REQUEST
+            | TAG_DB_CREDENTIALS_RESPONSE
     )
 }
 

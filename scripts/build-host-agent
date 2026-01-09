@@ -9,7 +9,8 @@ fi
 
 artifact_dir="apps/host-agent/artifacts/${target}"
 
-cargo build -p host-agent --release --target "$target"
+RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C panic=abort -C lto=fat -C embed-bitcode=yes" \
+  cargo build -p host-agent --release --target "$target"
 mkdir -p "$artifact_dir"
 cp "target/${target}/release/${bin}" "${artifact_dir}/${bin}"
 

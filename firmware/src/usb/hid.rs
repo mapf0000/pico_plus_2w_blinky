@@ -1,10 +1,10 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
+pub use bytecode_constants::MAX_BYTECODE;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
 use embassy_usb::class::hid::HidWriter as UsbHidWriter;
 use firmware_exec::{self, ExecError};
 use heapless::Vec;
-pub use bytecode_constants::MAX_BYTECODE;
 
 // Command channel and state
 pub enum HidCommand {

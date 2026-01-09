@@ -10,7 +10,7 @@ use heapless::{String, Vec};
 
 use crate::usb::hid::{HID_CHAN, HidCommand, MAX_BYTECODE, USB_READY};
 
-use super::page_common::{update_line, TEXT_PAD};
+use super::page_common::{TEXT_PAD, update_line};
 use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
 use super::{DisplayConfig, DisplayPalette};
 
@@ -130,12 +130,7 @@ impl PayloadsPageState {
         true
     }
 
-    fn start_payload(
-        &mut self,
-        idx: usize,
-        palette: &DisplayPalette,
-        idle_bg: Rgb565,
-    ) -> bool {
+    fn start_payload(&mut self, idx: usize, palette: &DisplayPalette, idle_bg: Rgb565) -> bool {
         let payload = match PAYLOADS.get(idx) {
             Some(p) => p,
             None => return false,
@@ -265,9 +260,12 @@ fn render_details(
     // Clear detail area first.
     let header_gap = 4u32;
     let detail_height = content_height.saturating_sub((y_pos as u32).saturating_sub(header_gap));
-    let _ = Rectangle::new(Point::new(line_x, y_pos - 11), Size::new(clear_w, detail_height))
-        .into_styled(PrimitiveStyle::with_fill(bg_color))
-        .draw(disp);
+    let _ = Rectangle::new(
+        Point::new(line_x, y_pos - 11),
+        Size::new(clear_w, detail_height),
+    )
+    .into_styled(PrimitiveStyle::with_fill(bg_color))
+    .draw(disp);
 
     let mut lines: Vec<String<64>, 16> = Vec::new();
     let payload = match PAYLOADS.get(state.detail_idx) {
@@ -347,7 +345,11 @@ pub fn render(
     )
     .into_styled(PrimitiveStyle::with_fill(config.header_bg))
     .draw(disp);
-    let title = if state.details_open { "Payload Details" } else { "Payloads" };
+    let title = if state.details_open {
+        "Payload Details"
+    } else {
+        "Payloads"
+    };
     let _ = Text::new(title, Point::new(line_x + TEXT_PAD, y_pos), *title_style).draw(disp);
 
     y_pos += header_height;
@@ -356,9 +358,12 @@ pub fn render(
         // Clear everything below the header to remove detail text remnants.
         let clear_start_y = y_pos - 11;
         let clear_h = content_height.saturating_sub(clear_start_y as u32);
-        let _ = Rectangle::new(Point::new(line_x, clear_start_y), Size::new(clear_w, clear_h))
-            .into_styled(PrimitiveStyle::with_fill(bg_color))
-            .draw(disp);
+        let _ = Rectangle::new(
+            Point::new(line_x, clear_start_y),
+            Size::new(clear_w, clear_h),
+        )
+        .into_styled(PrimitiveStyle::with_fill(bg_color))
+        .draw(disp);
         state.detail_prev_lines.clear();
         state.prev_status.clear();
         state.prev_status_bg = Rgb565::BLACK;
@@ -427,17 +432,29 @@ pub fn render(
         let row_y = y_pos + (idx as i32 * row_h);
         let selected = idx == state.selected;
         let row_bg = if selected { palette.white } else { bg_color };
-        let row_fg = if selected { palette.black } else { palette.white };
+        let row_fg = if selected {
+            palette.black
+        } else {
+            palette.white
+        };
 
-        let _ = Rectangle::new(Point::new(line_x, row_y - 11), Size::new(clear_w, row_h as u32))
-            .into_styled(PrimitiveStyle::with_fill(row_bg))
-            .draw(disp);
+        let _ = Rectangle::new(
+            Point::new(line_x, row_y - 11),
+            Size::new(clear_w, row_h as u32),
+        )
+        .into_styled(PrimitiveStyle::with_fill(row_bg))
+        .draw(disp);
 
         let row_style = MonoTextStyleBuilder::new()
             .font(body_style.font)
             .text_color(row_fg)
             .background_color(row_bg)
             .build();
-        let _ = Text::new(payload.name, Point::new(line_x + TEXT_PAD, row_y), row_style).draw(disp);
+        let _ = Text::new(
+            payload.name,
+            Point::new(line_x + TEXT_PAD, row_y),
+            row_style,
+        )
+        .draw(disp);
     }
 }

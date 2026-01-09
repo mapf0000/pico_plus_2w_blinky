@@ -1,11 +1,12 @@
+use embassy_rp::Peri;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{PIN_16, PIN_17, PIN_18, PIN_19, SPI0};
 use embassy_rp::spi::{Blocking, Phase, Polarity, Spi};
-use embassy_rp::Peri;
 use embassy_time::Delay;
 use embedded_graphics::geometry::Dimensions;
 use embedded_hal::delay::DelayNs;
 use embedded_hal_bus::spi::ExclusiveDevice;
+use mipidsi::Builder;
 use mipidsi::dcs::{
     BitsPerPixel, EnterNormalMode, ExitSleepMode, PixelFormat, SetAddressMode, SetDisplayOn,
     SetPixelFormat,
@@ -17,7 +18,6 @@ use mipidsi::options::{
     ColorOrder, HorizontalRefreshOrder, ModelOptions, Orientation, RefreshOrder, Rotation,
     VerticalRefreshOrder,
 };
-use mipidsi::Builder;
 use static_cell::StaticCell;
 
 use embedded_graphics::pixelcolor::Rgb565;
@@ -72,15 +72,13 @@ impl Model for St7789Pico28 {
         di.send_command(
             0xE0,
             &[
-                0xD0, 0x08, 0x11, 0x08, 0x0C, 0x15, 0x39, 0x33, 0x50, 0x36, 0x13, 0x14,
-                0x29, 0x2D,
+                0xD0, 0x08, 0x11, 0x08, 0x0C, 0x15, 0x39, 0x33, 0x50, 0x36, 0x13, 0x14, 0x29, 0x2D,
             ],
         )?; // GMCTRP1 (positive gamma)
         di.send_command(
             0xE1,
             &[
-                0xD0, 0x08, 0x10, 0x08, 0x06, 0x06, 0x39, 0x44, 0x51, 0x0B, 0x16, 0x14,
-                0x2F, 0x31,
+                0xD0, 0x08, 0x10, 0x08, 0x06, 0x06, 0x39, 0x44, 0x51, 0x0B, 0x16, 0x14, 0x2F, 0x31,
             ],
         )?; // GMCTRN1 (negative gamma)
 

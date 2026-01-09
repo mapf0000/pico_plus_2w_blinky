@@ -174,39 +174,39 @@ pub fn lint_dsl_all(entry_dsl: &str, scripts_json: &str) -> Result<JsValue, JsVa
 
     let (entry_pre_text, entry_pre_map) =
         match core::preprocess(entry_dsl, &core::PreprocessOptions::default()) {
-        Ok(pre) => {
-            let entry_pre_text = Some(pre.text);
-            let entry_pre_map = Some(pre.sourcemap);
-            // warnings
-            for d in pre.diagnostics {
+            Ok(pre) => {
+                let entry_pre_text = Some(pre.text);
+                let entry_pre_map = Some(pre.sourcemap);
+                // warnings
+                for d in pre.diagnostics {
+                    out.push(WasmDiagnostic {
+                        severity: severity_label(d.severity).into(),
+                        line: d.span.line,
+                        col: d.span.col,
+                        span_len: d.span.len,
+                        code: d.code.into(),
+                        message: d.message,
+                        suggestion: d.suggestion,
+                        script: None,
+                    });
+                }
+                (entry_pre_text, entry_pre_map)
+            }
+            Err(e) => {
                 out.push(WasmDiagnostic {
-                    severity: severity_label(d.severity).into(),
-                    line: d.span.line,
-                    col: d.span.col,
-                    span_len: d.span.len,
-                    code: d.code.into(),
-                    message: d.message,
-                    suggestion: d.suggestion,
+                    severity: severity_label(e.severity).into(),
+                    line: e.span.line,
+                    col: e.span.col,
+                    span_len: e.span.len,
+                    code: e.code.into(),
+                    message: e.message,
+                    suggestion: e.suggestion,
                     script: None,
                 });
+                // If preprocess fails, still return what we have
+                return to_value(&out).map_err(|e| JsValue::from_str(&e.to_string()));
             }
-            (entry_pre_text, entry_pre_map)
-        }
-        Err(e) => {
-            out.push(WasmDiagnostic {
-                severity: severity_label(e.severity).into(),
-                line: e.span.line,
-                col: e.span.col,
-                span_len: e.span.len,
-                code: e.code.into(),
-                message: e.message,
-                suggestion: e.suggestion,
-                script: None,
-            });
-            // If preprocess fails, still return what we have
-            return to_value(&out).map_err(|e| JsValue::from_str(&e.to_string()));
-        }
-    };
+        };
 
     // 2) Preprocess all scripts for warnings
     for (id, text) in scripts.iter() {

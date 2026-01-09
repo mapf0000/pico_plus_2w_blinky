@@ -4,7 +4,7 @@ mod tlv;
 mod transport;
 
 use anyhow::Result;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 
 #[tokio::main]
@@ -53,7 +53,11 @@ async fn run_daemon(config: config::Config) -> Result<()> {
 
     loop {
         attempt = attempt.saturating_add(1);
-        info!(attempt, backoff_ms = backoff.as_millis(), "starting connection attempt");
+        info!(
+            attempt,
+            backoff_ms = backoff.as_millis(),
+            "starting connection attempt"
+        );
         match transport::select_port(&config).await {
             Ok(port) => {
                 info!(attempt, port = %port, "connecting to device");
@@ -78,7 +82,11 @@ async fn run_daemon(config: config::Config) -> Result<()> {
             }
         }
 
-        info!(attempt, backoff_ms = backoff.as_millis(), "waiting before reconnect");
+        info!(
+            attempt,
+            backoff_ms = backoff.as_millis(),
+            "waiting before reconnect"
+        );
         sleep(backoff).await;
         let next_backoff = std::cmp::min(backoff * 2, max_backoff);
         debug!(

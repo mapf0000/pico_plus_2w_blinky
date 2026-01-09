@@ -1,8 +1,8 @@
 #![cfg(feature = "layout_mac_de_de")]
 
 use dsl_core::{
-    compile_and_link, lower_to_flat_with_layout, FlatOp, LayoutId, KEY_0, KEY_5, KEY_6, KEY_7,
-    KEY_A, KEY_MINUS, KEY_NON_US_BACKSLASH, KEY_SLASH, MOD_LALT, MOD_LSHIFT, Mods,
+    FlatOp, KEY_0, KEY_5, KEY_6, KEY_7, KEY_A, KEY_MINUS, KEY_NON_US_BACKSLASH, KEY_SLASH,
+    LayoutId, MOD_LALT, MOD_LSHIFT, Mods, compile_and_link, lower_to_flat_with_layout,
 };
 
 fn empty_provider<'a>(_: &'a str) -> Option<&'a str> {
@@ -14,8 +14,7 @@ fn mac_de_layout_override_mappings() {
     let entry = r#"layout("mac_de-DE")
 text("@[]{}\\|<>yzYZ_", 0)"#;
     let owned = compile_and_link(entry, &empty_provider).expect("compile_and_link");
-    let flat =
-        lower_to_flat_with_layout(&owned, LayoutId::Us).expect("lower_to_flat_with_layout");
+    let flat = lower_to_flat_with_layout(&owned, LayoutId::Us).expect("lower_to_flat_with_layout");
 
     let taps: Vec<(dsl_core::Usage, Mods)> = flat
         .ops
@@ -31,20 +30,20 @@ text("@[]{}\\|<>yzYZ_", 0)"#;
     let key_z = KEY_A.add(b'Z' - b'A');
 
     let expected = vec![
-        (key_q, MOD_LALT),               // @
-        (KEY_5, MOD_LALT),               // [
-        (KEY_6, MOD_LALT),               // ]
-        (KEY_7, MOD_LALT),               // {
-        (KEY_0, MOD_LALT),               // }
-        (KEY_MINUS, MOD_LALT),           // \
-        (KEY_NON_US_BACKSLASH, MOD_LALT), // |
+        (key_q, MOD_LALT),                     // @
+        (KEY_5, MOD_LALT),                     // [
+        (KEY_6, MOD_LALT),                     // ]
+        (KEY_7, MOD_LALT),                     // {
+        (KEY_0, MOD_LALT),                     // }
+        (KEY_MINUS, MOD_LALT),                 // \
+        (KEY_NON_US_BACKSLASH, MOD_LALT),      // |
         (KEY_NON_US_BACKSLASH, Mods::empty()), // <
-        (KEY_NON_US_BACKSLASH, MOD_LSHIFT), // >
-        (key_z, Mods::empty()),          // y
-        (key_y, Mods::empty()),          // z
-        (key_z, MOD_LSHIFT),             // Y
-        (key_y, MOD_LSHIFT),             // Z
-        (KEY_SLASH, MOD_LSHIFT),         // _
+        (KEY_NON_US_BACKSLASH, MOD_LSHIFT),    // >
+        (key_z, Mods::empty()),                // y
+        (key_y, Mods::empty()),                // z
+        (key_z, MOD_LSHIFT),                   // Y
+        (key_y, MOD_LSHIFT),                   // Z
+        (KEY_SLASH, MOD_LSHIFT),               // _
     ];
 
     assert_eq!(taps, expected);

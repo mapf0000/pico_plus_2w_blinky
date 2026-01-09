@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 pub const HEADER_LEN: usize = 5;

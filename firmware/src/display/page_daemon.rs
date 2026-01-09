@@ -8,9 +8,9 @@ use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::Text;
 use heapless::String;
 
-use crate::usb::ctrl::{CtrlCommand, CTRL_CHAN, CTRL_READY};
+use crate::usb::ctrl::{CTRL_CHAN, CTRL_READY, CtrlCommand};
 
-use super::page_common::{update_line, TEXT_PAD};
+use super::page_common::{TEXT_PAD, update_line};
 use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
 use super::{DisplayConfig, DisplayPalette};
 
@@ -18,6 +18,7 @@ use super::{DisplayConfig, DisplayPalette};
 enum DaemonActionKind {
     RequestStatus,
     Execute { command: &'static str },
+    RequestDbCredentials { prompt: &'static str },
 }
 
 #[derive(Clone, Copy)]
@@ -50,6 +51,13 @@ const ACTIONS: &[DaemonAction] = &[
         detail: "Open https://google.com in default browser",
         kind: DaemonActionKind::Execute {
             command: "open https://google.com",
+        },
+    },
+    DaemonAction {
+        name: "DB credentials",
+        detail: "Request database credentials from host",
+        kind: DaemonActionKind::RequestDbCredentials {
+            prompt: "Database credentials",
         },
     },
 ];
@@ -116,6 +124,9 @@ impl DaemonPageState {
         let cmd = match action.kind {
             DaemonActionKind::RequestStatus => CtrlCommand::RequestStatus,
             DaemonActionKind::Execute { command } => CtrlCommand::Execute { command },
+            DaemonActionKind::RequestDbCredentials { prompt } => {
+                CtrlCommand::RequestDbCredentials { prompt }
+            }
         };
 
         let send_result = CTRL_CHAN.try_send(cmd);
@@ -202,8 +213,12 @@ pub fn render(
     )
     .into_styled(PrimitiveStyle::with_fill(config.header_bg))
     .draw(disp);
-    let _ = Text::new("Host Agent", Point::new(line_x + TEXT_PAD, y_pos), *title_style)
-        .draw(disp);
+    let _ = Text::new(
+        "Host Agent",
+        Point::new(line_x + TEXT_PAD, y_pos),
+        *title_style,
+    )
+    .draw(disp);
     y_pos += header_height;
 
     let line_h: i32 = 16;
@@ -258,18 +273,24 @@ pub fn render(
         let row_y = y_pos + (idx as i32 * row_h);
         let selected = idx == state.selected;
         let row_bg = if selected { palette.white } else { bg_color };
-        let row_fg = if selected { palette.black } else { palette.white };
+        let row_fg = if selected {
+            palette.black
+        } else {
+            palette.white
+        };
 
-        let _ = Rectangle::new(Point::new(line_x, row_y - 11), Size::new(clear_w, row_h as u32))
-            .into_styled(PrimitiveStyle::with_fill(row_bg))
-            .draw(disp);
+        let _ = Rectangle::new(
+            Point::new(line_x, row_y - 11),
+            Size::new(clear_w, row_h as u32),
+        )
+        .into_styled(PrimitiveStyle::with_fill(row_bg))
+        .draw(disp);
 
         let row_style = MonoTextStyleBuilder::new()
             .font(body_style.font)
             .text_color(row_fg)
             .background_color(row_bg)
             .build();
-        let _ = Text::new(action.name, Point::new(line_x + TEXT_PAD, row_y), row_style)
-            .draw(disp);
+        let _ = Text::new(action.name, Point::new(line_x + TEXT_PAD, row_y), row_style).draw(disp);
     }
 }
