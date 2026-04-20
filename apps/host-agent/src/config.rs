@@ -12,6 +12,7 @@ pub struct Config {
     pub cwd: Option<PathBuf>,
     pub probe_timeout_ms: u64,
     pub debug_log: Option<PathBuf>,
+    pub send_files: Vec<PathBuf>,
     pub raw: bool,
     pub debug: bool,
 }
@@ -34,6 +35,8 @@ struct Args {
     probe_timeout_ms: u64,
     #[arg(long)]
     debug_log: Option<PathBuf>,
+    #[arg(long = "send-file")]
+    send_file: Vec<PathBuf>,
     #[arg(long)]
     raw: bool,
     #[arg(long)]
@@ -64,6 +67,7 @@ impl Config {
             cwd: args.cwd,
             probe_timeout_ms: args.probe_timeout_ms,
             debug_log: args.debug_log,
+            send_files: args.send_file,
             raw: args.raw,
             debug: args.debug,
         })
@@ -82,7 +86,20 @@ fn normalize_args(args: Vec<String>) -> Vec<String> {
     let mut normalized = Vec::with_capacity(args.len());
     for arg in args {
         if let Some((key, value)) = arg.split_once('=') {
-            if matches!(key, "vid" | "pid" | "cwd" | "probe_timeout_ms") {
+            if matches!(
+                key,
+                "vid" | "pid" | "cwd" | "probe_timeout_ms" | "send_file"
+            ) {
+                let arg = if key == "send_file" {
+                    "--send-file".to_string()
+                } else {
+                    format!("--{key}")
+                };
+                normalized.push(arg);
+                normalized.push(value.to_string());
+                continue;
+            }
+            if matches!(key, "send-file") {
                 normalized.push(format!("--{key}"));
                 normalized.push(value.to_string());
                 continue;
@@ -122,7 +139,7 @@ fn parse_u16(input: &str) -> Result<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_u16;
+    use super::{normalize_args, parse_u16};
 
     #[test]
     fn parse_hex_prefix() {
@@ -137,5 +154,15 @@ mod tests {
     #[test]
     fn parse_decimal() {
         assert_eq!(parse_u16("4660").unwrap(), 4660);
+    }
+
+    #[test]
+    fn normalize_send_file_kv_syntax() {
+        let args = normalize_args(vec![
+            "host-agent".to_string(),
+            "send_file=/tmp/file.bin".to_string(),
+        ]);
+        assert_eq!(args[1], "--send-file");
+        assert_eq!(args[2], "/tmp/file.bin");
     }
 }

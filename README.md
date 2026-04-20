@@ -76,6 +76,19 @@ The build is wired so a single `cargo run -p pico_rust --release` builds both pa
   - Responds to `TAG_DB_CREDENTIALS_REQUEST` with a native dialog (masked password).
   - For headless runs/tests, set `HOST_AGENT_DB_USER` and `HOST_AGENT_DB_PASSWORD`.
 
+## On-device transfer controls (no Wi-Fi required)
+- Open the new `Transfer` page on the Pico display.
+- Controls:
+  - `A/B`: select action
+  - `X` on `Start Transfer (default)`: send `FILE_START_REQUEST` with default path mode
+  - `X` on mode row: toggle `relay->browser` vs `simulation(drop)`
+- Default transfer source:
+  - The host-agent uses its first `--send-file <path>` entry when the device sends a default transfer request (empty path payload).
+  - Example: `./host-agent --send-file /absolute/path/to/file.bin`
+- Simulation mode:
+  - The device keeps USB transfer ACK/RESULT flow and progress accounting.
+  - Chunk payloads are intentionally dropped instead of being forwarded to browser WebSocket clients.
+
 ## Testing
 - Host-only unit tests (skip embedded dependencies):
   - `cargo test --no-default-features --features "" --target aarch64-apple-darwin`

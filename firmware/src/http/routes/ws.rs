@@ -1,12 +1,84 @@
+use embassy_futures::select::{Either as SelectEither, select};
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
 use picoserve::futures::Either;
 use picoserve::io::embedded_io_async;
 use picoserve::response::ws; // for Read/Write trait bounds
+use portable_atomic::{AtomicUsize, Ordering};
 
 use crate::host::{self, HostOs};
 use crate::http::util::{escape_json_str, percent_decode_str};
+use crate::usb::ctrl::{CTRL_CHAN, CtrlCommand, MAX_TRANSFER_PATH_LEN};
 use crate::usb::hid::{HID_CHAN, HidCommand, MAX_BYTECODE, USB_READY};
 use crate::usb::usb_supervisor;
-use heapless::Vec;
+use heapless::{String, Vec};
+
+pub const TRANSFER_TEXT_MAX: usize = 768;
+pub const TRANSFER_BINARY_MAX: usize = 2048;
+
+pub enum TransferWsEvent {
+    Text(String<TRANSFER_TEXT_MAX>),
+    Binary(Vec<u8, TRANSFER_BINARY_MAX>),
+}
+
+pub static TRANSFER_WS_EVENTS: Channel<ThreadModeRawMutex, TransferWsEvent, 16> = Channel::new();
+static ACTIVE_WS_CLIENTS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn has_active_client() -> bool {
+    ACTIVE_WS_CLIENTS.load(Ordering::Acquire) > 0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferQueueError {
+    NoClient,
+    Full,
+}
+
+impl TransferQueueError {
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::NoClient => "browser is not connected",
+            Self::Full => "browser transfer queue is full",
+        }
+    }
+}
+
+pub fn queue_transfer_text(event: String<TRANSFER_TEXT_MAX>) -> Result<(), TransferQueueError> {
+    queue_transfer_event(TransferWsEvent::Text(event))
+}
+
+pub fn queue_transfer_binary(
+    event: Vec<u8, TRANSFER_BINARY_MAX>,
+) -> Result<(), TransferQueueError> {
+    queue_transfer_event(TransferWsEvent::Binary(event))
+}
+
+fn queue_transfer_event(event: TransferWsEvent) -> Result<(), TransferQueueError> {
+    if ACTIVE_WS_CLIENTS.load(Ordering::Acquire) == 0 {
+        return Err(TransferQueueError::NoClient);
+    }
+
+    TRANSFER_WS_EVENTS
+        .try_send(event)
+        .map_err(|_| TransferQueueError::Full)
+}
+
+fn begin_ws_session() {
+    if ACTIVE_WS_CLIENTS.fetch_add(1, Ordering::AcqRel) == 0 {
+        drain_transfer_events();
+    }
+}
+
+fn end_ws_session() {
+    let previous = ACTIVE_WS_CLIENTS.fetch_sub(1, Ordering::AcqRel);
+    if previous <= 1 {
+        ACTIVE_WS_CLIENTS.store(0, Ordering::Release);
+        drain_transfer_events();
+    }
+}
+
+fn drain_transfer_events() {
+    while TRANSFER_WS_EVENTS.try_receive().is_ok() {}
+}
 
 pub(crate) async fn ws_handler(
     upgrade: ws::WebSocketUpgrade,
@@ -24,49 +96,98 @@ impl ws::WebSocketCallback for HelloWs {
     ) -> Result<(), W::Error> {
         // greet once
         tx.send_text("hello").await?;
+        begin_ws_session();
 
         let mut buf = [0u8; 1024];
         loop {
-            match rx
-                .next_message(&mut buf, core::future::pending::<()>())
-                .await
+            match select(
+                TRANSFER_WS_EVENTS.receive(),
+                rx.next_message(&mut buf, core::future::pending::<()>()),
+            )
+            .await
             {
-                Ok(Either::First(Ok(ws::Message::Text(s)))) => {
-                    let cmd = s.trim();
-                    if cmd.is_empty() {
-                        continue;
-                    }
-                    if let Err(_) = handle_command(cmd, &mut tx).await {
+                SelectEither::First(event) => {
+                    if send_transfer_event(event, &mut tx).await.is_err() {
                         break;
                     }
                 }
-                Ok(Either::First(Ok(ws::Message::Binary(_b)))) => {
-                    // No binary protocol; ignore
-                }
-                Ok(Either::First(Ok(ws::Message::Ping(p)))) => tx.send_pong(p).await?,
-                Ok(Either::First(Ok(ws::Message::Pong(_)))) => { /* ignore */ }
-                Ok(Either::First(Ok(ws::Message::Close(_)))) => break,
-                Ok(Either::First(Err(_))) => break,
-                Ok(Either::Second(_)) => break,
-                Err(_) => break,
+                SelectEither::Second(result) => match result {
+                    Ok(Either::First(Ok(ws::Message::Text(s)))) => {
+                        let cmd = s.trim();
+                        if cmd.is_empty() {
+                            continue;
+                        }
+                        if let Some((request_id, rpc_cmd)) = parse_rpc_command(cmd) {
+                            let response = handle_command(rpc_cmd).await;
+                            let mut envelope: String<TRANSFER_TEXT_MAX> = String::new();
+                            let _ = core::fmt::write(
+                                &mut envelope,
+                                format_args!(
+                                    "{{\"event_type\":\"command/response\",\"version\":1,\"request_id\":{},\"payload\":{}}}",
+                                    request_id,
+                                    response.as_str()
+                                ),
+                            );
+                            if tx.send_text(envelope.as_str()).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        let response = handle_command(cmd).await;
+                        if tx.send_text(response.as_str()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Either::First(Ok(ws::Message::Binary(_b)))) => {
+                        // No browser -> firmware binary command protocol currently.
+                    }
+                    Ok(Either::First(Ok(ws::Message::Ping(p)))) => {
+                        if tx.send_pong(p).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Either::First(Ok(ws::Message::Pong(_)))) => {}
+                    Ok(Either::First(Ok(ws::Message::Close(_)))) => break,
+                    Ok(Either::First(Err(_))) => break,
+                    Ok(Either::Second(_)) => break,
+                    Err(_) => break,
+                },
             }
         }
 
+        end_ws_session();
         tx.close(None).await
+    }
+}
+
+async fn send_transfer_event<W: embedded_io_async::Write>(
+    event: TransferWsEvent,
+    tx: &mut ws::SocketTx<W>,
+) -> Result<(), W::Error> {
+    match event {
+        TransferWsEvent::Text(json) => tx.send_text(json.as_str()).await,
+        TransferWsEvent::Binary(data) => tx.send_binary(data.as_slice()).await,
     }
 }
 
 // ---- WS command handling ----
 
-/// Handle a single text command and send a text response.
-async fn handle_command<W: embedded_io_async::Write>(
-    cmd: &str,
-    tx: &mut ws::SocketTx<W>,
-) -> Result<(), W::Error> {
+fn parse_rpc_command(cmd: &str) -> Option<(u64, &str)> {
+    let rest = cmd.strip_prefix("RPC ")?;
+    let (request_id, rpc_cmd) = rest.split_once(' ')?;
+    let request_id = request_id.parse::<u64>().ok()?;
+    Some((request_id, rpc_cmd.trim()))
+}
+
+/// Handle a single text command and return a JSON response body.
+async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
+    let mut response: String<TRANSFER_TEXT_MAX> = String::new();
+
     if cmd.eq_ignore_ascii_case("STATUS") {
         let enabled = usb_supervisor::USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
         let ready = USB_READY.load(core::sync::atomic::Ordering::SeqCst);
-        let mut body: heapless::String<96> = heapless::String::new();
+        let mut body: String<96> = String::new();
         let _ = core::fmt::write(
             &mut body,
             format_args!(
@@ -76,14 +197,15 @@ async fn handle_command<W: embedded_io_async::Write>(
                 host::host_os_str()
             ),
         );
-        return tx.send_text(&body).await;
+        let _ = response.push_str(body.as_str());
+        return response;
     }
 
     if cmd.eq_ignore_ascii_case("CONFIG_GET") {
         let cfg = crate::device_config::get().await;
         let man = escape_json_str(cfg.usb_manufacturer.as_str());
         let prod = escape_json_str(cfg.usb_product.as_str());
-        let mut body: heapless::String<256> = heapless::String::new();
+        let mut body: String<256> = String::new();
         let _ = core::fmt::write(
             &mut body,
             format_args!(
@@ -92,7 +214,8 @@ async fn handle_command<W: embedded_io_async::Write>(
                 prod.as_str()
             ),
         );
-        return tx.send_text(&body).await;
+        let _ = response.push_str(body.as_str());
+        return response;
     }
 
     if let Some(rest) = cmd.strip_prefix("CONFIG_SET ") {
@@ -110,21 +233,31 @@ async fn handle_command<W: embedded_io_async::Write>(
             }
         }
         if usb_supervisor::USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst) {
-            return tx.send_text("{\"error\":\"USB already enabled\"}").await;
+            let _ = response.push_str("{\"error\":\"USB already enabled\"}");
+            return response;
         }
         match crate::device_config::set_partial(man_dec.as_deref(), prod_dec.as_deref()).await {
             Ok(()) => match crate::device_config::save().await {
-                Ok(()) => tx.send_text("{\"ok\":true}").await,
-                Err(_) => tx.send_text("{\"error\":\"persist failed\"}").await,
+                Ok(()) => {
+                    let _ = response.push_str("{\"ok\":true}");
+                    response
+                }
+                Err(_) => {
+                    let _ = response.push_str("{\"error\":\"persist failed\"}");
+                    response
+                }
             },
             Err(crate::device_config::SetError::TooLongManufacturer) => {
-                tx.send_text("{\"error\":\"bad manufacturer\"}").await
+                let _ = response.push_str("{\"error\":\"bad manufacturer\"}");
+                response
             }
             Err(crate::device_config::SetError::TooLongProduct) => {
-                tx.send_text("{\"error\":\"bad product\"}").await
+                let _ = response.push_str("{\"error\":\"bad product\"}");
+                response
             }
             Err(crate::device_config::SetError::InvalidChars) => {
-                tx.send_text("{\"error\":\"invalid characters\"}").await
+                let _ = response.push_str("{\"error\":\"invalid characters\"}");
+                response
             }
         }
     } else if cmd.eq_ignore_ascii_case("USB_REGISTER") || cmd.starts_with("USB_REGISTER ") {
@@ -146,26 +279,129 @@ async fn handle_command<W: embedded_io_async::Write>(
             }
         }
         match usb_supervisor::start(run_assistant).await {
-            Ok(()) => return tx.send_text("{\"ok\":true}").await,
-            Err(_) => return tx.send_text("{\"error\":\"usb start failed\"}").await,
+            Ok(()) => {
+                let _ = response.push_str("{\"ok\":true}");
+                return response;
+            }
+            Err(_) => {
+                let _ = response.push_str("{\"error\":\"usb start failed\"}");
+                return response;
+            }
         }
     } else if cmd.eq_ignore_ascii_case("USB_UNREGISTER") {
         USB_READY.store(false, core::sync::atomic::Ordering::SeqCst);
         match usb_supervisor::stop(150).await {
-            Ok(()) => return tx.send_text("{\"ok\":true}").await,
-            Err(_) => return tx.send_text("{\"error\":\"usb stop failed\"}").await,
+            Ok(()) => {
+                let _ = response.push_str("{\"ok\":true}");
+                return response;
+            }
+            Err(_) => {
+                let _ = response.push_str("{\"error\":\"usb stop failed\"}");
+                return response;
+            }
         }
     } else if let Some(hex) = cmd.strip_prefix("SCRIPT_RUN_HEX ") {
         match decode_hex(hex.trim()) {
             Ok(program) => match HID_CHAN.try_send(HidCommand::RunBytecode { program }) {
-                Ok(()) => tx.send_text("{\"ok\":true,\"queued\":true}").await,
-                Err(_) => tx.send_text("{\"error\":\"busy\"}").await,
+                Ok(()) => {
+                    let _ = response.push_str("{\"ok\":true,\"queued\":true}");
+                    response
+                }
+                Err(_) => {
+                    let _ = response.push_str("{\"error\":\"busy\"}");
+                    response
+                }
             },
-            Err(_) => tx.send_text("{\"error\":\"bad bytecode\"}").await,
+            Err(_) => {
+                let _ = response.push_str("{\"error\":\"bad bytecode\"}");
+                response
+            }
+        }
+    } else if let Some(rest) = cmd.strip_prefix("TRANSFER_START ") {
+        let mut path = None;
+        for pair in rest.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                if k == "path" {
+                    path = percent_decode_str::<{ MAX_TRANSFER_PATH_LEN }>(v);
+                }
+            }
+        }
+
+        let Some(path) = path else {
+            let _ = response.push_str("{\"error\":\"missing path\"}");
+            return response;
+        };
+
+        match CTRL_CHAN.try_send(CtrlCommand::StartTransfer { path }) {
+            Ok(()) => {
+                let _ = response.push_str("{\"ok\":true,\"queued\":true}");
+                response
+            }
+            Err(_) => {
+                let _ = response.push_str("{\"error\":\"busy\"}");
+                response
+            }
+        }
+    } else if cmd.eq_ignore_ascii_case("TRANSFER_START_DEFAULT") {
+        match CTRL_CHAN.try_send(CtrlCommand::StartTransferDefault) {
+            Ok(()) => {
+                let _ = response.push_str("{\"ok\":true,\"queued\":true}");
+                response
+            }
+            Err(_) => {
+                let _ = response.push_str("{\"error\":\"busy\"}");
+                response
+            }
+        }
+    } else if cmd.eq_ignore_ascii_case("TRANSFER_MODE_GET") {
+        let mode = match crate::usb::ctrl::transfer_relay_mode() {
+            crate::usb::ctrl::TransferRelayMode::RelayToBrowser => "relay",
+            crate::usb::ctrl::TransferRelayMode::SimulationDrop => "simulation",
+        };
+        let mut body: String<96> = String::new();
+        let _ = core::fmt::write(
+            &mut body,
+            format_args!(
+                "{{\"mode\":\"{}\",\"ws_clients\":{}}}",
+                mode,
+                ACTIVE_WS_CLIENTS.load(Ordering::Acquire)
+            ),
+        );
+        let _ = response.push_str(body.as_str());
+        response
+    } else if let Some(rest) = cmd.strip_prefix("TRANSFER_MODE_SET ") {
+        let mut mode = None;
+        for pair in rest.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                if k == "mode" {
+                    mode = Some(v);
+                }
+            }
+        }
+        match mode {
+            Some("relay") => {
+                crate::usb::ctrl::set_transfer_relay_mode(
+                    crate::usb::ctrl::TransferRelayMode::RelayToBrowser,
+                );
+                let _ = response.push_str("{\"ok\":true,\"mode\":\"relay\"}");
+                response
+            }
+            Some("simulation") => {
+                crate::usb::ctrl::set_transfer_relay_mode(
+                    crate::usb::ctrl::TransferRelayMode::SimulationDrop,
+                );
+                let _ = response.push_str("{\"ok\":true,\"mode\":\"simulation\"}");
+                response
+            }
+            _ => {
+                let _ = response.push_str("{\"error\":\"bad mode\"}");
+                response
+            }
         }
     } else {
         // Unknown command
-        tx.send_text("{\"error\":\"unknown command\"}").await
+        let _ = response.push_str("{\"error\":\"unknown command\"}");
+        response
     }
 }
 

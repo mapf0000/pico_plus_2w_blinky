@@ -7,6 +7,7 @@ mod api;
 pub mod codec;
 pub mod dsl;
 pub mod scripts;
+mod transfer;
 
 #[derive(Clone, PartialEq)]
 struct StatusState {
@@ -26,6 +27,9 @@ fn app() -> Html {
     let status: UseStateHandle<Option<StatusState>> = use_state(|| None);
     let config: UseStateHandle<Option<ConfigState>> = use_state(|| None);
     let scripts: UseStateHandle<Option<Vec<api::ScriptMeta>>> = use_state(|| None);
+    let transfer_store = use_mut_ref(transfer::TransferStore::new);
+    let transfers = use_state(Vec::<transfer::TransferView>::new);
+    let transfer_path = use_state(String::new);
     let dsl_text = use_state(|| String::new());
     let selected_os = use_state(|| String::from("mac"));
     let selected_layout = use_state(|| dsl_core::DEFAULT_LAYOUT_ID.to_string());
@@ -130,9 +134,63 @@ fn app() -> Html {
     {
         let push_log = push_log.clone();
         let ws_connected = ws_connected.clone();
+        let transfer_store = transfer_store.clone();
+        let transfers_state = transfers.clone();
         use_effect_with((), move |_| {
-            api::init_ws(move |s| push_log.emit(s), move |b| ws_connected.set(b));
+            api::init_ws(
+                {
+                    let push_log = push_log.clone();
+                    move |s| push_log.emit(s)
+                },
+                {
+                    let ws_connected = ws_connected.clone();
+                    move |b| ws_connected.set(b)
+                },
+                {
+                    let push_log = push_log.clone();
+                    let transfer_store = transfer_store.clone();
+                    let transfers_state = transfers_state.clone();
+                    move |event_json| {
+                        let now_ms = monotonic_now_ms();
+                        let mut store = transfer_store.borrow_mut();
+                        if let Err(err) = store.apply_text_event(&event_json, now_ms) {
+                            push_log.emit(format!("transfer event error: {err}"));
+                            return;
+                        }
+                        transfers_state.set(store.snapshots());
+                    }
+                },
+                {
+                    let push_log = push_log.clone();
+                    let transfer_store = transfer_store.clone();
+                    let transfers_state = transfers_state.clone();
+                    move |binary| {
+                        let now_ms = monotonic_now_ms();
+                        let mut store = transfer_store.borrow_mut();
+                        if let Err(err) = store.apply_binary_chunk(&binary, now_ms) {
+                            push_log.emit(format!("transfer chunk error: {err}"));
+                            return;
+                        }
+                        transfers_state.set(store.snapshots());
+                    }
+                },
+            );
             || ()
+        });
+    }
+
+    // Refresh ETA/rate view at a stable cadence to avoid render thrash.
+    {
+        let transfer_store = transfer_store.clone();
+        let transfers_state = transfers.clone();
+        use_effect_with((), move |_| {
+            let interval = gloo_timers::callback::Interval::new(300, move || {
+                let now_ms = monotonic_now_ms();
+                let mut store = transfer_store.borrow_mut();
+                store.tick(now_ms);
+                transfers_state.set(store.snapshots());
+            });
+            move || drop(interval)
         });
     }
 
@@ -271,6 +329,74 @@ fn app() -> Html {
         })
     };
 
+    let on_download_transfer = {
+        let transfer_store = transfer_store.clone();
+        let transfers_state = transfers.clone();
+        let push_log = push_log.clone();
+        Callback::from(move |transfer_id: u64| {
+            let plan = {
+                let mut store = transfer_store.borrow_mut();
+                match store.prepare_finalize(transfer_id) {
+                    Ok(plan) => {
+                        transfers_state.set(store.snapshots());
+                        plan
+                    }
+                    Err(err) => {
+                        push_log.emit(format!("finalize failed: {err}"));
+                        return;
+                    }
+                }
+            };
+
+            let transfer_store = transfer_store.clone();
+            let transfers_state = transfers_state.clone();
+            let push_log = push_log.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = transfer::finalize_and_download(&plan).await;
+                {
+                    let mut store = transfer_store.borrow_mut();
+                    store.finish_finalize(transfer_id, &result);
+                    transfers_state.set(store.snapshots());
+                }
+                match result {
+                    Ok(()) => push_log.emit(format!("download ready: {}", plan.file_name)),
+                    Err(err) => push_log.emit(format!("download failed: {err}")),
+                }
+            });
+        })
+    };
+
+    let on_start_transfer = {
+        let transfer_path = transfer_path.clone();
+        let set_busy = set_busy.clone();
+        let push_log = push_log.clone();
+        let toast_cb = show_toast.clone();
+        Callback::from(move |_| {
+            let path = (*transfer_path).trim().to_string();
+            if path.is_empty() {
+                push_log.emit("transfer path is empty".into());
+                return;
+            }
+            let set_busy = set_busy.clone();
+            let push_log = push_log.clone();
+            let show_toast = toast_cb.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                set_busy.emit(true);
+                match api::transfer_start(&path).await {
+                    Ok(()) => {
+                        push_log.emit(format!("transfer queued for path: {}", path));
+                        show_toast.emit(("Transfer queued".into(), true));
+                    }
+                    Err(err) => {
+                        push_log.emit(format!("transfer start error: {err}"));
+                        show_toast.emit((format!("Transfer start failed: {err}"), false));
+                    }
+                }
+                set_busy.emit(false);
+            });
+        })
+    };
+
     // UI pieces
     let st = (*status).clone();
     let conf = (*config).clone();
@@ -333,6 +459,16 @@ fn app() -> Html {
                     }
                     scripts={scr.clone()}
                     on_run={on_run_dsl.clone()} />
+                <DownloadManagerCard
+                    transfers={(*transfers).clone()}
+                    on_download={on_download_transfer.clone()} />
+                <TransferStartCard
+                    path={(*transfer_path).clone()}
+                    on_change={
+                        let transfer_path = transfer_path.clone();
+                        Callback::from(move |value: String| transfer_path.set(value))
+                    }
+                    on_start={on_start_transfer.clone()} />
                 <LogCard
                     lines={(*log_lines).clone()}
                     on_clear={
@@ -610,6 +746,165 @@ fn scripting_card(props: &ScriptProps) -> Html {
 }
 
 #[derive(Properties, PartialEq, Clone)]
+struct TransferStartProps {
+    pub path: String,
+    pub on_change: Callback<String>,
+    pub on_start: Callback<()>,
+}
+
+#[function_component(TransferStartCard)]
+fn transfer_start_card(props: &TransferStartProps) -> Html {
+    let on_input = {
+        let on_change = props.on_change.clone();
+        Callback::from(move |event: InputEvent| {
+            let value = event
+                .target_unchecked_into::<web_sys::HtmlInputElement>()
+                .value();
+            on_change.emit(value);
+        })
+    };
+
+    let on_start = {
+        let cb = props.on_start.clone();
+        Callback::from(move |_| cb.emit(()))
+    };
+
+    html! {
+        <div class="card full">
+          <h2>{"Start Transfer"}</h2>
+          <div class="row gap-2">
+            <input
+                id="transferPath"
+                type="text"
+                placeholder="/Users/alice/Downloads/archive.zip"
+                value={props.path.clone()}
+                oninput={on_input}
+            />
+            <button class="btn-accent" onclick={on_start}>{"Queue Transfer"}</button>
+          </div>
+          <div class="hint">{"Path is resolved on the host-agent machine."}</div>
+        </div>
+    }
+}
+
+#[derive(Properties, PartialEq, Clone)]
+struct DownloadManagerProps {
+    pub transfers: Vec<transfer::TransferView>,
+    pub on_download: Callback<u64>,
+}
+
+#[function_component(DownloadManagerCard)]
+fn download_manager_card(props: &DownloadManagerProps) -> Html {
+    html! {
+        <div class="card full">
+          <div class="row between items-center">
+            <h2 class="m-0">{"Download Manager"}</h2>
+            <span class="hint">{ format!("{} transfer(s)", props.transfers.len()) }</span>
+          </div>
+          if props.transfers.is_empty() {
+            <div class="hint">{"Waiting for host-agent transfer events."}</div>
+          } else {
+            <div class="row column gap-2">
+              { for props.transfers.iter().map(|transfer| {
+                  let progress_pct = if transfer.total_size == 0 {
+                      0.0
+                  } else {
+                      (transfer.received_size as f64 / transfer.total_size as f64 * 100.0).clamp(0.0, 100.0)
+                  };
+                  let on_download = {
+                      let cb = props.on_download.clone();
+                      let transfer_id = transfer.transfer_id;
+                      Callback::from(move |_| cb.emit(transfer_id))
+                  };
+                  html! {
+                    <div class="card transfer-row">
+                      <div class="row between items-center">
+                        <div>
+                          <strong>{ &transfer.file_name }</strong>
+                          <div class="hint">{ format!("id={} • {}", transfer.transfer_id, transfer_status_label(&transfer.status)) }</div>
+                        </div>
+                        <div class="row gap-2 items-center">
+                          <span class="hint">{ format!("{} / {}", format_bytes(transfer.received_size), format_bytes(transfer.total_size)) }</span>
+                          <span class="hint">{ format_rate(transfer.smoothed_rate_bps) }</span>
+                          <span class="hint">{ format_eta(transfer.eta_total_secs) }</span>
+                          <button
+                            class="btn-secondary"
+                            disabled={transfer.status != transfer::TransferState::Finished}
+                            onclick={on_download}
+                          >
+                            {"Download"}
+                          </button>
+                        </div>
+                      </div>
+                      <div class="hint">{ format!(
+                        "{:.1}% • chunks: total={} finished={} failed={} retrying={}",
+                        progress_pct,
+                        transfer.chunk_count,
+                        transfer.finished_chunks,
+                        transfer.failed_chunks,
+                        transfer.counters.retrying
+                      ) }</div>
+                    </div>
+                  }
+              }) }
+            </div>
+          }
+        </div>
+    }
+}
+
+fn transfer_status_label(status: &transfer::TransferState) -> &'static str {
+    match status {
+        transfer::TransferState::Open => "open",
+        transfer::TransferState::Downloading => "downloading",
+        transfer::TransferState::Verifying => "verifying",
+        transfer::TransferState::Finished => "finished",
+        transfer::TransferState::Failed => "failed",
+        transfer::TransferState::Aborted => "aborted",
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let value = bytes as f64;
+    if value >= GB {
+        format!("{:.2} GiB", value / GB)
+    } else if value >= MB {
+        format!("{:.2} MiB", value / MB)
+    } else if value >= KB {
+        format!("{:.1} KiB", value / KB)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn format_rate(rate_bps: f64) -> String {
+    if rate_bps <= 0.0 {
+        return "rate: --".to_string();
+    }
+    format!("rate: {}/s", format_bytes(rate_bps as u64))
+}
+
+fn format_eta(eta_secs: Option<f64>) -> String {
+    let Some(eta) = eta_secs else {
+        return "ETA: unknown".to_string();
+    };
+    if !eta.is_finite() {
+        return "ETA: unknown".to_string();
+    }
+    let eta = eta.max(0.0).round() as u64;
+    let minutes = eta / 60;
+    let seconds = eta % 60;
+    if minutes > 0 {
+        format!("ETA: {}m {:02}s", minutes, seconds)
+    } else {
+        format!("ETA: {}s", seconds)
+    }
+}
+
+#[derive(Properties, PartialEq, Clone)]
 struct LogProps {
     pub lines: Vec<String>,
     pub on_clear: Callback<()>,
@@ -655,6 +950,13 @@ fn toast_bar(props: &ToastProps) -> Html {
     } else {
         html! {}
     }
+}
+
+fn monotonic_now_ms() -> f64 {
+    web_sys::window()
+        .and_then(|window| window.performance())
+        .map(|performance| performance.now())
+        .unwrap_or(0.0)
 }
 
 #[wasm_bindgen(start)]

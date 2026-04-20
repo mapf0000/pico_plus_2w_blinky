@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pico Endpoint</title>
+    <link rel="stylesheet" href="/ui/style.css" />
+    
+    <!-- Trunk will compile this crate to WASM and inject the loader script. -->
+    
+<script type="module">
+import init, * as bindings from '/frontend-5773e57b4fd22616.js';
+const wasm = await init({ module_or_path: '/frontend-5773e57b4fd22616_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+  <link rel="modulepreload" href="/frontend-5773e57b4fd22616.js" crossorigin="anonymous" integrity="sha384-m6dd+AzEXE8l1vcG1bon9NQ/5jeGiicMN/LIMNCsENG0leOEu1yFA335B1+ajxkg"><link rel="preload" href="/frontend-5773e57b4fd22616_bg.wasm" crossorigin="anonymous" integrity="sha384-HCkB2slCMW/hJ9N4mzu+MEgfCwgHUc/BktocJxeDfsoRqMhrTTIxtSWBMF4Lp1Nt" as="fetch" type="application/wasm"></head>
+  <body>
+    <!-- Yew will mount to body by default via #[wasm_bindgen(start)] -->
+  </body>
+</html>

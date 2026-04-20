@@ -22,6 +22,7 @@ mod page_daemon;
 mod page_logs;
 mod page_payloads;
 mod page_system;
+mod page_transfer;
 mod pages;
 mod renderer;
 mod ui;

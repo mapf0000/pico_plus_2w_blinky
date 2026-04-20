@@ -1,11 +1,13 @@
 use futures_channel::oneshot;
+use js_sys::{ArrayBuffer, Uint8Array};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::thread_local;
 use std::vec::Vec;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::{JsCast, closure::Closure};
-use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
+use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
 
 use crate::{codec, scripts};
 
@@ -31,6 +33,18 @@ pub struct ScriptMeta {
     pub dsl: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RpcResponseEnvelope {
+    event_type: String,
+    request_id: u64,
+    payload: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventTypeEnvelope {
+    event_type: String,
+}
+
 // ----- WebSocket state -----
 
 thread_local! {
@@ -39,7 +53,8 @@ thread_local! {
 
 struct WsState {
     ws: WebSocket,
-    pending: Option<oneshot::Sender<String>>, // single in-flight request
+    next_request_id: u64,
+    pending: HashMap<u64, oneshot::Sender<String>>,
     // Keep event closures alive
     _onopen: Closure<dyn FnMut(Event)>,
     _onmessage: Closure<dyn FnMut(MessageEvent)>,
@@ -55,16 +70,25 @@ fn hostname() -> String {
         .unwrap_or_else(|_| "192.168.4.1".into())
 }
 
-pub fn init_ws(on_log: impl Fn(String) + 'static, on_state: impl Fn(bool) + 'static) {
+pub fn init_ws(
+    on_log: impl Fn(String) + 'static,
+    on_state: impl Fn(bool) + 'static,
+    on_transfer_text: impl Fn(String) + 'static,
+    on_transfer_binary: impl Fn(Vec<u8>) + 'static,
+) {
     WS.with(|cell| {
         if cell.borrow().is_some() {
             return;
         }
         let url = format!("ws://{}/ws", hostname());
         let ws = WebSocket::new(&url).expect("ws connect");
+        ws.set_binary_type(BinaryType::Arraybuffer);
 
         let on_log = Rc::new(on_log);
         let on_state = Rc::new(on_state);
+        let on_transfer_text = Rc::new(on_transfer_text);
+        let on_transfer_binary = Rc::new(on_transfer_binary);
+
         let onopen = {
             let on_log = on_log.clone();
             let on_state = on_state.clone();
@@ -76,21 +100,33 @@ pub fn init_ws(on_log: impl Fn(String) + 'static, on_state: impl Fn(bool) + 'sta
 
         let onmessage = {
             let on_log = on_log.clone();
+            let on_transfer_text = on_transfer_text.clone();
+            let on_transfer_binary = on_transfer_binary.clone();
             Closure::wrap(Box::new(move |e: MessageEvent| {
-                let s = e.data().as_string().unwrap_or_else(|| "(non-text)".into());
-                // Try to fulfill pending request first; otherwise log
-                let mut delivered = false;
-                WS.with(|cell| {
-                    if let Some(state) = cell.borrow_mut().as_mut() {
-                        if let Some(tx) = state.pending.take() {
-                            let _ = tx.send(s.clone());
-                            delivered = true;
-                        }
+                if let Some(s) = e.data().as_string() {
+                    if route_rpc_response(&s) {
+                        return;
                     }
-                });
-                if !delivered {
+                    if is_transfer_event(&s) {
+                        on_transfer_text(s);
+                        return;
+                    }
+                    if route_legacy_response(&s) {
+                        return;
+                    }
                     on_log(format!("WS msg: {}", s));
+                    return;
                 }
+
+                if let Ok(array_buffer) = e.data().dyn_into::<ArrayBuffer>() {
+                    let bytes = Uint8Array::new(&array_buffer);
+                    let mut payload = vec![0u8; bytes.length() as usize];
+                    bytes.copy_to(&mut payload);
+                    on_transfer_binary(payload);
+                    return;
+                }
+
+                on_log("WS msg: (non-text/non-binary)".into());
             }) as Box<dyn FnMut(_)>)
         };
 
@@ -98,7 +134,12 @@ pub fn init_ws(on_log: impl Fn(String) + 'static, on_state: impl Fn(bool) + 'sta
             let on_log = on_log.clone();
             let on_state = on_state.clone();
             Closure::wrap(Box::new(move |_e: Event| {
-                on_log("WS error".into());
+                let canceled = cancel_pending_requests();
+                if canceled > 0 {
+                    on_log(format!("WS error; canceled {canceled} pending request(s)"));
+                } else {
+                    on_log("WS error".into());
+                }
                 on_state(false);
             }) as Box<dyn FnMut(_)>)
         };
@@ -106,7 +147,12 @@ pub fn init_ws(on_log: impl Fn(String) + 'static, on_state: impl Fn(bool) + 'sta
             let on_log = on_log.clone();
             let on_state = on_state.clone();
             Closure::wrap(Box::new(move |_e: CloseEvent| {
-                on_log("WS closed".into());
+                let canceled = cancel_pending_requests();
+                if canceled > 0 {
+                    on_log(format!("WS closed; canceled {canceled} pending request(s)"));
+                } else {
+                    on_log("WS closed".into());
+                }
                 on_state(false);
             }) as Box<dyn FnMut(_)>)
         };
@@ -118,7 +164,8 @@ pub fn init_ws(on_log: impl Fn(String) + 'static, on_state: impl Fn(bool) + 'sta
 
         cell.replace(Some(WsState {
             ws,
-            pending: None,
+            next_request_id: 1,
+            pending: HashMap::new(),
             _onopen: onopen,
             _onmessage: onmessage,
             _onerror: onerror,
@@ -127,25 +174,103 @@ pub fn init_ws(on_log: impl Fn(String) + 'static, on_state: impl Fn(bool) + 'sta
     });
 }
 
-async fn send_cmd(cmd: &str) -> Result<String, String> {
-    // Serialize requests: only one pending at a time
-    let (tx, rx) = oneshot::channel::<String>();
-    let mut ok = false;
+fn route_rpc_response(text: &str) -> bool {
+    let Ok(envelope) = serde_json::from_str::<RpcResponseEnvelope>(text) else {
+        return false;
+    };
+    if envelope.event_type != "command/response" {
+        return false;
+    }
+
+    let payload = match envelope.payload {
+        serde_json::Value::String(value) => value,
+        other => other.to_string(),
+    };
+
     WS.with(|cell| {
-        if let Some(state) = cell.borrow_mut().as_mut() {
-            if state.pending.is_none() {
-                state.pending = Some(tx);
-                if let Err(_e) = state.ws.send_with_str(cmd) {
-                    // will error below when awaiting rx
-                } else {
-                    ok = true;
-                }
-            }
+        let mut slot = cell.borrow_mut();
+        let Some(state) = slot.as_mut() else {
+            return false;
+        };
+        let Some(tx) = state.pending.remove(&envelope.request_id) else {
+            return false;
+        };
+        let _ = tx.send(payload);
+        true
+    })
+}
+
+fn route_legacy_response(text: &str) -> bool {
+    WS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let Some(state) = slot.as_mut() else {
+            return false;
+        };
+        let first_id = state.pending.keys().next().copied();
+        let Some(first_id) = first_id else {
+            return false;
+        };
+        let Some(tx) = state.pending.remove(&first_id) else {
+            return false;
+        };
+        let _ = tx.send(text.to_string());
+        true
+    })
+}
+
+fn is_transfer_event(text: &str) -> bool {
+    let Ok(event) = serde_json::from_str::<EventTypeEnvelope>(text) else {
+        return false;
+    };
+    event.event_type.starts_with("transfer/")
+}
+
+fn cancel_pending_requests() -> usize {
+    WS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let Some(state) = slot.as_mut() else {
+            return 0;
+        };
+        let pending = std::mem::take(&mut state.pending);
+        let canceled = pending.len();
+        drop(pending);
+        canceled
+    })
+}
+
+async fn send_cmd(cmd: &str) -> Result<String, String> {
+    let (tx, rx) = oneshot::channel::<String>();
+    let mut tx = Some(tx);
+    let mut error = None::<String>;
+
+    WS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let Some(state) = slot.as_mut() else {
+            error = Some("ws not connected".into());
+            return;
+        };
+
+        let request_id = state.next_request_id;
+        state.next_request_id = state.next_request_id.saturating_add(1);
+
+        let Some(tx_value) = tx.take() else {
+            error = Some("internal request state error".into());
+            return;
+        };
+
+        state.pending.insert(request_id, tx_value);
+
+        let message = format!("RPC {} {}", request_id, cmd);
+        if state.ws.send_with_str(&message).is_err() {
+            state.pending.remove(&request_id);
+            error = Some("ws send failed".into());
         }
     });
-    if !ok {
-        return Err("ws not connected or busy".into());
+
+    if let Some(error) = error {
+        return Err(error);
     }
+
     rx.await.map_err(|_| "ws response canceled".into())
 }
 
@@ -223,6 +348,17 @@ pub async fn list_scripts() -> Result<Vec<ScriptMeta>, String> {
 pub async fn run_script(bytecode: &[u8]) -> Result<(), String> {
     let encoded = codec::encode_hex(bytecode);
     let cmd = format!("SCRIPT_RUN_HEX {}", encoded);
+    let text = send_cmd(&cmd).await?;
+    if text.contains("\"ok\":true") {
+        Ok(())
+    } else {
+        Err(text)
+    }
+}
+
+pub async fn transfer_start(path: &str) -> Result<(), String> {
+    let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC).to_string();
+    let cmd = format!("TRANSFER_START path={encoded_path}");
     let text = send_cmd(&cmd).await?;
     if text.contains("\"ok\":true") {
         Ok(())

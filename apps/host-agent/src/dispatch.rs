@@ -1,11 +1,12 @@
 use crate::config::Config;
+use crate::file_transfer::{self, TransferFeedback};
 use crate::tlv::{self, Frame};
 use crate::transport::Event;
 use anyhow::{Result, bail};
 use bytes::Bytes;
 use std::fs::OpenOptions;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::process::Command;
@@ -25,6 +26,7 @@ const TAG_EXECUTE_RESULT: u8 = 9;
 const TAG_MIC_PCM_DATA: u8 = 10;
 const TAG_DB_CREDENTIALS_REQUEST: u8 = 11;
 const TAG_DB_CREDENTIALS_RESPONSE: u8 = 12;
+const TAG_FILE_START_REQUEST: u8 = 27;
 const HANDSHAKE_PAYLOAD: &[u8] = b"handshake";
 const HANDSHAKE_OK_MSG: &str = "handshake-ok";
 const PROBE_OK_MSG: &str = "probe-ok";
@@ -33,6 +35,7 @@ const KEEPALIVE_TIMEOUT_SECS: u64 = KEEPALIVE_INTERVAL_SECS + 2;
 const MAX_EXEC_OUTPUT: usize = 8 * 1024;
 const EXEC_CHUNK_DELAY_MS: u64 = 20;
 const MAX_PROMPT_LABEL_LEN: usize = 80;
+const MAX_TRANSFER_PATH_LEN: usize = 1024;
 static DB_CREDENTIALS_PROMPT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 pub async fn run(
@@ -43,6 +46,18 @@ pub async fn run(
     let mut outbound = outbound;
     let mut debug_sink = DebugSink::new(config.debug_log.as_deref())?;
     let mut handshake_ok = false;
+    let default_transfer_path = config.send_files.first().cloned();
+    let (transfer_feedback_tx, transfer_feedback_rx) = mpsc::channel::<TransferFeedback>(128);
+    let (transfer_request_tx, transfer_request_rx) = mpsc::channel::<PathBuf>(32);
+    spawn_transfer_worker(outbound.clone(), transfer_feedback_rx, transfer_request_rx);
+
+    for path in config.send_files.clone() {
+        if transfer_request_tx.send(path).await.is_err() {
+            warn!("failed to queue startup transfer path");
+            break;
+        }
+    }
+
     let mut last_activity_at = Instant::now();
     let enable_keepalive = should_send_handshake(config);
     let mut keepalive = interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECS));
@@ -78,7 +93,16 @@ pub async fn run(
                     }
                     Event::Frame(frame) => {
                         last_activity_at = Instant::now();
-                        handle_frame(frame, &mut outbound, &mut debug_sink, &mut handshake_ok).await?;
+                        handle_frame(
+                            frame,
+                            &mut outbound,
+                            &mut debug_sink,
+                            &mut handshake_ok,
+                            &transfer_feedback_tx,
+                            &transfer_request_tx,
+                            default_transfer_path.as_ref(),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -109,6 +133,9 @@ async fn handle_frame(
     outbound: &mut mpsc::Sender<Frame>,
     debug_sink: &mut DebugSink,
     handshake_ok: &mut bool,
+    transfer_feedback: &mpsc::Sender<TransferFeedback>,
+    transfer_request: &mpsc::Sender<PathBuf>,
+    default_transfer_path: Option<&PathBuf>,
 ) -> Result<()> {
     match frame.tag {
         TAG_REQUEST_AGENT_STATUS => {
@@ -151,6 +178,45 @@ async fn handle_frame(
                 handle_db_credentials_request_in_background(frame, outbound).await;
             });
         }
+        TAG_FILE_START_REQUEST => {
+            if let Some(path) = transfer_path_from_payload(&frame.payload) {
+                if transfer_request.send(path.clone()).await.is_ok() {
+                    info!(path = %path.display(), "queued transfer start request");
+                } else {
+                    warn!("transfer request worker is not running");
+                }
+            } else if frame.payload.is_empty() {
+                if let Some(path) = default_transfer_path {
+                    if transfer_request.send(path.clone()).await.is_ok() {
+                        info!(
+                            path = %path.display(),
+                            "queued default transfer start request"
+                        );
+                    } else {
+                        warn!("transfer request worker is not running");
+                    }
+                } else {
+                    warn!(
+                        "received default transfer start request but no --send-file path is configured"
+                    );
+                }
+            } else {
+                warn!("received invalid transfer start request payload");
+            }
+        }
+        file_transfer::TAG_FILE_ACK
+        | file_transfer::TAG_FILE_RESULT
+        | file_transfer::TAG_FILE_ABORT => match file_transfer::decode_feedback(&frame) {
+            Ok(Some(feedback)) => {
+                if transfer_feedback.send(feedback).await.is_err() {
+                    debug!("transfer feedback dropped (worker not active)");
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!(tag = frame.tag, error = %err, "invalid transfer feedback frame");
+            }
+        },
         TAG_WS_CONNECT | TAG_WS_DATA | TAG_WS_DISCONNECT | TAG_WS_DATA_RECV
         | TAG_EXECUTE_RESULT | TAG_MIC_PCM_DATA => {
             debug!(
@@ -167,10 +233,45 @@ async fn handle_frame(
     Ok(())
 }
 
-fn should_send_handshake(config: &Config) -> bool {
+fn spawn_transfer_worker(
+    outbound: mpsc::Sender<Frame>,
+    mut feedback_rx: mpsc::Receiver<TransferFeedback>,
+    mut request_rx: mpsc::Receiver<PathBuf>,
+) {
+    tokio::spawn(async move {
+        while let Some(path) = request_rx.recv().await {
+            info!(path = %path.display(), "starting queued transfer");
+            let files = [path.clone()];
+            match file_transfer::send_files(&outbound, &mut feedback_rx, &files).await {
+                Ok(()) => {
+                    info!(path = %path.display(), "queued transfer finished");
+                }
+                Err(err) => {
+                    warn!(path = %path.display(), error = %err, "queued transfer failed");
+                }
+            }
+        }
+        warn!("transfer request worker stopped");
+    });
+}
+
+fn transfer_path_from_payload(payload: &Bytes) -> Option<PathBuf> {
+    if payload.is_empty() || payload.len() > MAX_TRANSFER_PATH_LEN {
+        return None;
+    }
+
+    let path_str = std::str::from_utf8(payload.as_ref()).ok()?.trim();
+    if path_str.is_empty() {
+        return None;
+    }
+
+    Some(PathBuf::from(path_str))
+}
+
+fn should_send_handshake(_config: &Config) -> bool {
     #[cfg(any(test, feature = "test-port-fd"))]
     {
-        if config.port_fd.is_some() {
+        if _config.port_fd.is_some() {
             return false;
         }
     }

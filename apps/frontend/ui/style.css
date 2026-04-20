@@ -204,6 +204,11 @@ h1 {
   pointer-events: none;
 }
 
+.transfer-row {
+  border: 1px solid color-mix(in srgb, var(--border) 60%, #fff 20%);
+  background: var(--surface-2);
+}
+
 h2 {
   font-size: 1.1rem;
   margin: 0 0 var(--space-3);

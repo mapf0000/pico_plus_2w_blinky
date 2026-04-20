@@ -33,6 +33,14 @@ const TAG_EXECUTE_RESULT: u8 = 9;
 const TAG_MIC_PCM_DATA: u8 = 10;
 const TAG_DB_CREDENTIALS_REQUEST: u8 = 11;
 const TAG_DB_CREDENTIALS_RESPONSE: u8 = 12;
+const TAG_FILE_OPEN: u8 = 20;
+const TAG_FILE_CHUNK: u8 = 21;
+const TAG_FILE_ACK: u8 = 22;
+const TAG_FILE_CLOSE: u8 = 23;
+const TAG_FILE_RESULT: u8 = 24;
+const TAG_FILE_ABORT: u8 = 25;
+const TAG_FILE_HEARTBEAT: u8 = 26;
+const TAG_FILE_START_REQUEST: u8 = 27;
 
 const CACHE_DIR_NAME: &str = "host-agent";
 const CACHE_FILE_NAME: &str = "port";
@@ -335,6 +343,14 @@ fn is_known_tag(tag: u8) -> bool {
             | TAG_MIC_PCM_DATA
             | TAG_DB_CREDENTIALS_REQUEST
             | TAG_DB_CREDENTIALS_RESPONSE
+            | TAG_FILE_OPEN
+            | TAG_FILE_CHUNK
+            | TAG_FILE_ACK
+            | TAG_FILE_CLOSE
+            | TAG_FILE_RESULT
+            | TAG_FILE_ABORT
+            | TAG_FILE_HEARTBEAT
+            | TAG_FILE_START_REQUEST
     )
 }
 

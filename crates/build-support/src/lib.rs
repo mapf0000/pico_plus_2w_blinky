@@ -265,6 +265,7 @@ mod frontend {
             .env_remove("RUSTDOCFLAGS")
             .env_remove("CARGO_ENCODED_RUSTDOCFLAGS")
             .env_remove("RUSTC_WORKSPACE_WRAPPER")
+            .env_remove("NO_COLOR")
             // Force wasm32 target for the inner cargo.
             .env("CARGO_BUILD_TARGET", "wasm32-unknown-unknown");
 
