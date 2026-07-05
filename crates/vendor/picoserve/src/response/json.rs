@@ -23,7 +23,7 @@ impl serde::ser::Error for SerializeError {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(any(test, feature = "std"))]
 impl std::error::Error for SerializeError {}
 
 impl From<fmt::Error> for SerializeError {
@@ -503,14 +503,14 @@ impl<T: serde::Serialize> Json<T> {
         JsonStream::new(&self.0).write_json_value(writer).await
     }
 
-    /// Convert JSON payload into a [super::Response] with a status code of "OK"
+    /// Convert JSON payload into a [`Response`](super::Response) with a status code of "OK"
     pub fn into_response(self) -> super::Response<impl super::HeadersIter, impl super::Body> {
         super::Response::ok(JsonBody(JsonStream::new(self.0)))
     }
 }
 
 impl<T: serde::Serialize> super::IntoResponse for Json<T> {
-    async fn write_to<R: embedded_io_async::Read, W: super::ResponseWriter<Error = R::Error>>(
+    async fn write_to<R: crate::io::Read, W: super::ResponseWriter<Error = R::Error>>(
         self,
         connection: super::Connection<'_, R>,
         response_writer: W,

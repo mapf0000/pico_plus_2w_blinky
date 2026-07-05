@@ -249,7 +249,21 @@ mod frontend {
 
         // Separate target dir => avoids locking the outer build's target/
         let trunk_target = cfg.out_dir.join("trunk-target");
-        let _ = std::fs::create_dir_all(&trunk_target);
+        std::fs::create_dir_all(&trunk_target).context("create Trunk target directory")?;
+
+        // wasm-bindgen does not remove snippets that are no longer referenced.
+        // Trunk can then copy and preload those stale files into a new dist,
+        // producing an index whose integrity metadata does not match the current
+        // module graph. Keep compiled Rust dependencies, but rebuild the binding
+        // output and final dist from clean directories.
+        let bindgen_output = trunk_target.join("wasm-bindgen");
+        if bindgen_output.exists() {
+            fs::remove_dir_all(&bindgen_output).context("clean stale wasm-bindgen output")?;
+        }
+        let dist = cfg.frontend_dir.join(DIST_DIR);
+        if dist.exists() {
+            fs::remove_dir_all(&dist).context("clean stale frontend dist")?;
+        }
 
         // Spawn Trunk with a “clean” env to avoid leaking embedded flags into wasm.
         let mut cmd = std::process::Command::new("trunk");
@@ -304,12 +318,13 @@ mod frontend {
         fs::copy(&js, cfg.out_dir.join("frontend_app.js")).context("copy js")?;
         fs::copy(&wasm, cfg.out_dir.join("frontend_app.wasm")).context("copy wasm")?;
 
-        // Optional CSS
+        // Static UI assets copied by Trunk.
         let css_dist = dist.join("ui/style.css");
-        if css_dist.exists() {
-            fs::copy(&css_dist, cfg.out_dir.join("frontend_style.css"))
-                .context("copy style.css")?;
-        }
+        fs::copy(&css_dist, cfg.out_dir.join("frontend_style.css"))
+            .with_context(|| format!("copy required frontend asset {}", css_dist.display()))?;
+        let idb_js_dist = dist.join("ui/idb.js");
+        fs::copy(&idb_js_dist, cfg.out_dir.join("frontend_idb.js"))
+            .with_context(|| format!("copy required frontend asset {}", idb_js_dist.display()))?;
 
         // Size checks
         let wasm_len = fs::metadata(&wasm)?.len();
@@ -345,14 +360,14 @@ mod frontend {
             f,
             "pub static APP_WASM: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/frontend_app.wasm\"));"
         )?;
-        if cfg.out_dir.join("frontend_style.css").exists() {
-            writeln!(
-                f,
-                "pub static STYLE_CSS: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/frontend_style.css\"));"
-            )?;
-        } else {
-            writeln!(f, "pub static STYLE_CSS: &str = \"\";")?;
-        }
+        writeln!(
+            f,
+            "pub static STYLE_CSS: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/frontend_style.css\"));"
+        )?;
+        writeln!(
+            f,
+            "pub static IDB_JS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/frontend_idb.js\"));"
+        )?;
         Ok(())
     }
 

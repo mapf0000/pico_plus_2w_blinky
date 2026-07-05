@@ -16,6 +16,7 @@ macro_rules! app_router {
             .route("/ui/app.js", get(frontend::route_frontend_js))
             .route("/ui/app.wasm", get(frontend::route_frontend_wasm))
             .route("/ui/style.css", get(frontend::route_frontend_style))
+            .route("/ui/idb.js", get(frontend::route_frontend_idb_js))
             // Health-only HTTP endpoint (keep simple HTTP for probes)
             .route("/health", get(api::route_health))
             // WebSocket endpoint for all API functionality

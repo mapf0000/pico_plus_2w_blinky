@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::thread_local;
 use std::vec::Vec;
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::Cell, cell::RefCell, rc::Rc};
 use wasm_bindgen::{JsCast, closure::Closure};
 use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
 
@@ -49,6 +49,7 @@ struct EventTypeEnvelope {
 
 thread_local! {
     static WS: RefCell<Option<WsState>> = RefCell::new(None);
+    static NEXT_FILESYSTEM_REQUEST_ID: Cell<u64> = const { Cell::new(1) };
 }
 
 struct WsState {
@@ -75,6 +76,7 @@ pub fn init_ws(
     on_state: impl Fn(bool) + 'static,
     on_transfer_text: impl Fn(String) + 'static,
     on_transfer_binary: impl Fn(Vec<u8>) + 'static,
+    on_filesystem_binary: impl Fn(Vec<u8>) + 'static,
 ) {
     WS.with(|cell| {
         if cell.borrow().is_some() {
@@ -88,6 +90,7 @@ pub fn init_ws(
         let on_state = Rc::new(on_state);
         let on_transfer_text = Rc::new(on_transfer_text);
         let on_transfer_binary = Rc::new(on_transfer_binary);
+        let on_filesystem_binary = Rc::new(on_filesystem_binary);
 
         let onopen = {
             let on_log = on_log.clone();
@@ -102,6 +105,7 @@ pub fn init_ws(
             let on_log = on_log.clone();
             let on_transfer_text = on_transfer_text.clone();
             let on_transfer_binary = on_transfer_binary.clone();
+            let on_filesystem_binary = on_filesystem_binary.clone();
             Closure::wrap(Box::new(move |e: MessageEvent| {
                 if let Some(s) = e.data().as_string() {
                     if route_rpc_response(&s) {
@@ -122,7 +126,14 @@ pub fn init_ws(
                     let bytes = Uint8Array::new(&array_buffer);
                     let mut payload = vec![0u8; bytes.length() as usize];
                     bytes.copy_to(&mut payload);
-                    on_transfer_binary(payload);
+                    match payload.split_first() {
+                        Some((1, data)) => on_transfer_binary(data.to_vec()),
+                        Some((2, data)) => on_filesystem_binary(data.to_vec()),
+                        Some((kind, _)) => {
+                            on_log(format!("WS msg: unknown binary kind {kind}"));
+                        }
+                        None => on_log("WS msg: empty binary message".into()),
+                    }
                     return;
                 }
 
@@ -360,6 +371,54 @@ pub async fn transfer_start(path: &str) -> Result<(), String> {
     let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC).to_string();
     let cmd = format!("TRANSFER_START path={encoded_path}");
     let text = send_cmd(&cmd).await?;
+    if text.contains("\"ok\":true") {
+        Ok(())
+    } else {
+        Err(text)
+    }
+}
+
+pub async fn transfer_set_default(path: &str) -> Result<(), String> {
+    let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC).to_string();
+    let cmd = format!("TRANSFER_DEFAULT_SET path={encoded_path}");
+    let text = send_cmd(&cmd).await?;
+    if text.contains("\"ok\":true") {
+        Ok(())
+    } else {
+        Err(text)
+    }
+}
+
+pub fn next_filesystem_request_id() -> u64 {
+    NEXT_FILESYSTEM_REQUEST_ID.with(|next| {
+        let request_id = next.get();
+        next.set(request_id.saturating_add(1));
+        request_id
+    })
+}
+
+pub async fn filesystem_list(
+    request_id: u64,
+    path: &str,
+    cursor: u32,
+    entry_limit: u16,
+    show_hidden: bool,
+) -> Result<(), String> {
+    let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC).to_string();
+    let flags = u8::from(show_hidden);
+    let command = format!(
+        "FS_LIST request_id={request_id}&cursor={cursor}&limit={entry_limit}&flags={flags}&path={encoded_path}"
+    );
+    let text = send_cmd(&command).await?;
+    if text.contains("\"ok\":true") {
+        Ok(())
+    } else {
+        Err(text)
+    }
+}
+
+pub async fn filesystem_cancel(request_id: u64) -> Result<(), String> {
+    let text = send_cmd(&format!("FS_LIST_CANCEL request_id={request_id}")).await?;
     if text.contains("\"ok\":true") {
         Ok(())
     } else {

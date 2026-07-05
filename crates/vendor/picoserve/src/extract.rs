@@ -1,22 +1,22 @@
 //! Types and traits for extracting data from requests.
 //!
-//! A handler function is an async function that takes any number of "extractors" as arguments. All arguments must implement [FromRequestParts], and the final extractory may optionally implement [FromRequest].
+//! A handler function is an async function that takes any number of "extractors" as arguments. All arguments must implement [`FromRequestParts`], and the final extractory may optionally implement [`FromRequest`].
 //!
 //! For example:
 //!
 //! + [`State<T>`] will extract part or all of the application state.
 //! + [`Form<T: serde::DeserializeOwned>`] will extract the body of a request as Form data.
 //!
-//! For an example of how to implement [FromRequest], see [custom_extractor](https://github.com/sammhicks/picoserve/blob/main/examples/custom_extractor/src/main.rs)
+//! For an example of how to implement [`FromRequest`], see [custom_extractor](https://github.com/sammhicks/picoserve/blob/main/examples/custom_extractor/src/main.rs)
 //!
 //! ## Requests and Borrowing
 //!
-//! Although [RequestHandlerFunctions](crate::routing::RequestHandlerFunction) may not borrow from request due to restrictions with Higher-Order-Lifetime-Bounds, by using [from_request](crate::from_request) and [from_request_parts](crate::from_request_parts), [RequestHandlerServices](crate::routing::RequestHandlerService) and [PathRouterServices](crate::routing::PathRouterService) may do so.
+//! Although [`RequestHandlerFunctions`](crate::routing::RequestHandlerFunction) may not borrow from request due to restrictions with Higher-Order-Lifetime-Bounds, by using [`from_request`](crate::from_request) and [`from_request_parts`](crate::from_request_parts), [`RequestHandlerServices`](crate::routing::RequestHandlerService) and [`PathRouterServices`](crate::routing::PathRouterService) may do so.
 
 use crate::{
     self as picoserve,
-    io::{Read, ReadExt},
-    request::{RequestBody, RequestParts},
+    io::{Error, Read, ReadExt},
+    request::{ReadAllBodyError, RequestBody, RequestParts},
     response::{ErrorWithStatusCode, IntoResponse},
 };
 
@@ -50,7 +50,7 @@ pub trait FromRequestParts<'r, State>: Sized {
     ) -> Result<Self, Self::Rejection>;
 }
 
-/// Extract values from Request Parts. Each `$name` must implement [FromRequestParts], but may borrow from the request.
+/// Extract values from Request Parts. Each `$name` must implement [`FromRequestParts`], but may borrow from the request.
 /// If extraction is rejected, the rejection is written to `$response_writer` and the function returns.
 #[macro_export]
 macro_rules! from_request_parts {
@@ -79,7 +79,7 @@ pub trait FromRequest<'r, State, M = private::ViaRequest>: Sized {
     ) -> Result<Self, Self::Rejection>;
 }
 
-/// Extract a value from a request. `$name` must implement [FromRequest], but may borrow from the request.
+/// Extract a value from a request. `$name` must implement [`FromRequest`], but may borrow from the request.
 /// If extraction is rejected, the rejection is written to `$response_writer` and the function returns.
 #[macro_export]
 macro_rules! from_request {
@@ -101,48 +101,20 @@ macro_rules! from_request {
     };
 }
 
-/// Errors arising while reading the entire body.
-#[derive(Debug, thiserror::Error, ErrorWithStatusCode)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum FailedToExtractEntireBodyError {
-    #[error("No space to extract entire body. Content Length: {content_length}. Buffer Length: {buffer_length}.")]
-    #[status_code(PAYLOAD_TOO_LARGE)]
-    BufferIsTooSmall {
-        content_length: usize,
-        buffer_length: usize,
-    },
-    #[error("IO Error while reading body.")]
-    #[status_code(INTERNAL_SERVER_ERROR)]
-    IoError,
-}
-
 impl<'r, State> FromRequest<'r, State> for &'r mut [u8] {
-    type Rejection = FailedToExtractEntireBodyError;
+    type Rejection = ReadAllBodyError;
 
     async fn from_request<R: Read>(
         _state: &'r State,
         _request_parts: RequestParts<'r>,
         request_body: RequestBody<'r, R>,
     ) -> Result<Self, Self::Rejection> {
-        if !request_body.entire_body_fits_into_buffer() {
-            return Err(FailedToExtractEntireBodyError::BufferIsTooSmall {
-                content_length: request_body.content_length(),
-                buffer_length: request_body.buffer_length(),
-            });
-        }
-
-        request_body.read_all().await.map_err(|err| {
-            log_error!(
-                "Failed to read body: {:?}",
-                crate::logging::Debug2Format(&err)
-            );
-            FailedToExtractEntireBodyError::IoError
-        })
+        request_body.read_all().await
     }
 }
 
 impl<'r, State> FromRequest<'r, State> for &'r [u8] {
-    type Rejection = FailedToExtractEntireBodyError;
+    type Rejection = ReadAllBodyError;
 
     async fn from_request<R: Read>(
         state: &'r State,
@@ -155,9 +127,43 @@ impl<'r, State> FromRequest<'r, State> for &'r [u8] {
     }
 }
 
-#[cfg(feature = "alloc")]
+impl<'r, State, const N: usize> FromRequest<'r, State> for heapless::Vec<u8, N> {
+    type Rejection = ReadAllBodyError;
+
+    async fn from_request<R: Read>(
+        _state: &'r State,
+        _request_parts: RequestParts<'r>,
+        request_body: RequestBody<'r, R>,
+    ) -> Result<Self, Self::Rejection> {
+        let mut buffer = Self::new();
+
+        let content_length = request_body.content_length();
+
+        buffer
+            .resize(request_body.content_length(), 0)
+            .map_err(|()| ReadAllBodyError::BufferIsTooSmall {
+                content_length,
+                buffer_length: N,
+            })?;
+
+        request_body
+            .reader()
+            .read_exact(buffer.as_mut_slice())
+            .await
+            .map_err(|error| match error {
+                embedded_io_async::ReadExactError::UnexpectedEof => ReadAllBodyError::UnexpectedEof,
+                embedded_io_async::ReadExactError::Other(error) => {
+                    ReadAllBodyError::IO(error.kind())
+                }
+            })?;
+
+        Ok(buffer)
+    }
+}
+
+#[cfg(any(test, feature = "alloc"))]
 impl<'r, State> FromRequest<'r, State> for alloc::vec::Vec<u8> {
-    type Rejection = FailedToExtractEntireBodyError;
+    type Rejection = ReadAllBodyError;
 
     async fn from_request<R: Read>(
         _state: &'r State,
@@ -169,7 +175,7 @@ impl<'r, State> FromRequest<'r, State> for alloc::vec::Vec<u8> {
         let content_length = request_body.content_length();
 
         buffer.try_reserve_exact(content_length).map_err(|_| {
-            FailedToExtractEntireBodyError::BufferIsTooSmall {
+            ReadAllBodyError::BufferIsTooSmall {
                 content_length,
                 buffer_length: request_body.buffer_length(),
             }
@@ -181,21 +187,20 @@ impl<'r, State> FromRequest<'r, State> for alloc::vec::Vec<u8> {
             .reader()
             .read_exact(buffer.as_mut_slice())
             .await
-            .map_err(|err| {
-                log_error!(
-                    "Failed to read body: {:?}",
-                    crate::logging::Debug2Format(&err)
-                );
-                FailedToExtractEntireBodyError::IoError
+            .map_err(|error| match error {
+                embedded_io_async::ReadExactError::UnexpectedEof => ReadAllBodyError::UnexpectedEof,
+                embedded_io_async::ReadExactError::Other(error) => {
+                    ReadAllBodyError::IO(error.kind())
+                }
             })?;
 
         Ok(buffer)
     }
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(any(test, feature = "alloc"))]
 impl<'r, State> FromRequest<'r, State> for alloc::borrow::Cow<'r, [u8]> {
-    type Rejection = FailedToExtractEntireBodyError;
+    type Rejection = ReadAllBodyError;
 
     async fn from_request<R: Read>(
         state: &'r State,
@@ -220,7 +225,7 @@ impl<'r, State> FromRequest<'r, State> for alloc::borrow::Cow<'r, [u8]> {
 pub enum FailedToExtractEntireBodyAsStringError {
     #[error(transparent)]
     #[status_code(transparent)]
-    FailedToExtractEntireBody(FailedToExtractEntireBodyError),
+    FailedToExtractEntireBody(ReadAllBodyError),
     #[error("Body is not UTF-8: {0}")]
     #[status_code(BAD_REQUEST)]
     StringIsNotUtf8(#[cfg_attr(feature = "defmt", defmt(Debug2Format))] core::str::Utf8Error),
@@ -257,7 +262,24 @@ impl<'r, State> FromRequest<'r, State> for &'r str {
     }
 }
 
-#[cfg(feature = "alloc")]
+impl<'r, State, const N: usize> FromRequest<'r, State> for heapless::String<N> {
+    type Rejection = FailedToExtractEntireBodyAsStringError;
+
+    async fn from_request<R: Read>(
+        state: &'r State,
+        request_parts: RequestParts<'r>,
+        request_body: RequestBody<'r, R>,
+    ) -> Result<Self, Self::Rejection> {
+        heapless::String::from_utf8(
+            heapless::Vec::from_request(state, request_parts, request_body)
+                .await
+                .map_err(FailedToExtractEntireBodyAsStringError::FailedToExtractEntireBody)?,
+        )
+        .map_err(FailedToExtractEntireBodyAsStringError::StringIsNotUtf8)
+    }
+}
+
+#[cfg(any(test, feature = "alloc"))]
 impl<'r, State> FromRequest<'r, State> for alloc::string::String {
     type Rejection = FailedToExtractEntireBodyAsStringError;
 
@@ -275,7 +297,7 @@ impl<'r, State> FromRequest<'r, State> for alloc::string::String {
     }
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(any(test, feature = "alloc"))]
 impl<'r, State> FromRequest<'r, State> for alloc::borrow::Cow<'r, str> {
     type Rejection = FailedToExtractEntireBodyAsStringError;
 
@@ -328,7 +350,7 @@ impl<T: serde::de::DeserializeOwned> core::ops::DerefMut for Query<T> {
     }
 }
 
-/// Rejection used for [Query].
+/// Rejection used for [`Query`].
 #[derive(Debug, thiserror::Error, ErrorWithStatusCode)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[error("Bad Query")]
@@ -365,7 +387,7 @@ impl<T: serde::de::DeserializeOwned> core::ops::DerefMut for Form<T> {
     }
 }
 
-/// Rejection used for [Form].
+/// Rejection used for [`Form`].
 #[derive(Debug, thiserror::Error, ErrorWithStatusCode)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[status_code(BAD_REQUEST)]
@@ -400,7 +422,8 @@ impl<'r, State, T: serde::de::DeserializeOwned> FromRequest<'r, State> for Form<
     }
 }
 
-/// Rejection used for [Json].
+/// Rejection used for [`Json`].
+#[cfg(feature = "json")]
 #[derive(Debug, thiserror::Error, ErrorWithStatusCode)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum JsonRejection {
@@ -451,7 +474,7 @@ impl<'r, State, T: serde::Deserialize<'r>> FromRequest<'r, State, T> for Json<T>
     }
 }
 
-/// Used to do reference to value conversions, mainly used with the [State] extractor to extract parts of the application state.
+/// Used to do reference to value conversions, mainly used with the [`State`] extractor to extract parts of the application state.
 pub trait FromRef<T> {
     /// Perform the reference to value conversion
     fn from_ref(input: &T) -> Self;

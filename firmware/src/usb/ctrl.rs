@@ -12,10 +12,29 @@ use crate::http::util::escape_json_str;
 
 pub enum CtrlCommand {
     RequestStatus,
-    Execute { command: &'static str },
-    RequestDbCredentials { prompt: &'static str },
-    StartTransfer { path: String<MAX_TRANSFER_PATH_LEN> },
+    Execute {
+        command: &'static str,
+    },
+    RequestDbCredentials {
+        prompt: &'static str,
+    },
+    StartTransfer {
+        path: String<MAX_TRANSFER_PATH_LEN>,
+    },
+    SetTransferDefault {
+        path: String<MAX_TRANSFER_PATH_LEN>,
+    },
     StartTransferDefault,
+    ListDirectory {
+        request_id: u64,
+        cursor: u32,
+        entry_limit: u16,
+        flags: u8,
+        path: String<MAX_TRANSFER_PATH_LEN>,
+    },
+    CancelDirectoryList {
+        request_id: u64,
+    },
 }
 
 pub static CTRL_CHAN: Channel<ThreadModeRawMutex, CtrlCommand, 8> = Channel::new();
@@ -151,6 +170,12 @@ const TAG_FILE_RESULT: u8 = 24;
 const TAG_FILE_ABORT: u8 = 25;
 const TAG_FILE_HEARTBEAT: u8 = 26;
 const TAG_FILE_START_REQUEST: u8 = 27;
+const TAG_FILE_SET_DEFAULT_PATH: u8 = 28;
+const TAG_FS_LIST_REQUEST: u8 = 29;
+const TAG_FS_LIST_PAGE: u8 = 30;
+const TAG_FS_LIST_CANCEL: u8 = 31;
+
+const FS_PROTOCOL_VERSION: u16 = 1;
 
 const FILE_RESULT_OK: u8 = 0;
 const FILE_RESULT_HASH_MISMATCH: u8 = 1;
@@ -397,8 +422,40 @@ where
             let payload = path.as_bytes();
             send_tlv(class, max_packet, TAG_FILE_START_REQUEST, payload).await
         }
+        CtrlCommand::SetTransferDefault { path } => {
+            let payload = path.as_bytes();
+            send_tlv(class, max_packet, TAG_FILE_SET_DEFAULT_PATH, payload).await
+        }
         CtrlCommand::StartTransferDefault => {
             send_tlv(class, max_packet, TAG_FILE_START_REQUEST, &[]).await
+        }
+        CtrlCommand::ListDirectory {
+            request_id,
+            cursor,
+            entry_limit,
+            flags,
+            path,
+        } => {
+            let mut payload: Vec<u8, MAX_PAYLOAD_LEN> = Vec::new();
+            let path_bytes = path.as_bytes();
+            let path_len = path_bytes.len() as u16;
+            let _ = payload.extend_from_slice(&FS_PROTOCOL_VERSION.to_le_bytes());
+            let _ = payload.extend_from_slice(&request_id.to_le_bytes());
+            let _ = payload.extend_from_slice(&cursor.to_le_bytes());
+            let _ = payload.extend_from_slice(&entry_limit.to_le_bytes());
+            let _ = payload.push(flags);
+            let _ = payload.extend_from_slice(&path_len.to_le_bytes());
+            let _ = payload.extend_from_slice(path_bytes);
+            send_tlv(class, max_packet, TAG_FS_LIST_REQUEST, payload.as_slice()).await
+        }
+        CtrlCommand::CancelDirectoryList { request_id } => {
+            send_tlv(
+                class,
+                max_packet,
+                TAG_FS_LIST_CANCEL,
+                &request_id.to_le_bytes(),
+            )
+            .await
         }
     }
 }
@@ -510,11 +567,18 @@ where
         TAG_FILE_HEARTBEAT => {
             log::debug!("usb: transfer heartbeat");
         }
+        TAG_FS_LIST_PAGE => {
+            if !forward_filesystem_page(payload) {
+                log::warn!("usb: failed to forward filesystem page");
+            }
+        }
         TAG_EXECUTE
         | TAG_DEBUG_MSG
         | TAG_DB_CREDENTIALS_REQUEST
         | TAG_FILE_ACK
-        | TAG_FILE_RESULT => {
+        | TAG_FILE_RESULT
+        | TAG_FS_LIST_REQUEST
+        | TAG_FS_LIST_CANCEL => {
             log::debug!("usb: unhandled tag={} len={}", tag, payload.len());
         }
         _ => {
@@ -1157,6 +1221,7 @@ fn build_ws_chunk_envelope(
 ) -> Option<Vec<u8, { ws::TRANSFER_BINARY_MAX }>> {
     let payload_len: u16 = chunk.payload.len().try_into().ok()?;
     let mut out: Vec<u8, { ws::TRANSFER_BINARY_MAX }> = Vec::new();
+    out.push(ws::WS_BINARY_KIND_TRANSFER).ok()?;
     out.extend_from_slice(&chunk.transfer_id.to_le_bytes())
         .ok()?;
     out.extend_from_slice(&chunk.chunk_index.to_le_bytes())
@@ -1167,6 +1232,22 @@ fn build_ws_chunk_envelope(
         .ok()?;
     out.extend_from_slice(chunk.payload).ok()?;
     Some(out)
+}
+
+fn forward_filesystem_page(payload: &[u8]) -> bool {
+    if payload.len() < 10 {
+        return false;
+    }
+    let version = u16::from_le_bytes([payload[0], payload[1]]);
+    if version != FS_PROTOCOL_VERSION {
+        return false;
+    }
+
+    let mut out: Vec<u8, { ws::TRANSFER_BINARY_MAX }> = Vec::new();
+    if out.push(ws::WS_BINARY_KIND_FILESYSTEM).is_err() || out.extend_from_slice(payload).is_err() {
+        return false;
+    }
+    ws::queue_transfer_binary(out).is_ok()
 }
 
 fn parse_file_open(payload: &[u8]) -> Option<IncomingOpen<'_>> {

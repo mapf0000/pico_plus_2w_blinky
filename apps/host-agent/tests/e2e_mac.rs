@@ -18,6 +18,8 @@ const TAG_AGENT_STATUS: u8 = 8;
 const TAG_EXECUTE_RESULT: u8 = 9;
 const TAG_DB_CREDENTIALS_REQUEST: u8 = 11;
 const TAG_DB_CREDENTIALS_RESPONSE: u8 = 12;
+const TAG_FS_LIST_REQUEST: u8 = 29;
+const TAG_FS_LIST_PAGE: u8 = 30;
 const MAX_EXEC_OUTPUT: usize = 8 * 1024;
 const WAIT_CONNECT_MS: u64 = 1200;
 const RESPONSE_TIMEOUT_MS: u64 = 500;
@@ -595,6 +597,71 @@ fn e2e_debug_msg_logging() -> io::Result<()> {
 
     let _ = child.kill();
     let _ = child.wait();
+    Ok(())
+}
+
+#[test]
+fn e2e_filesystem_listing_roundtrip() -> io::Result<()> {
+    let (master, slave, _slave_path) = open_pty_pair()?;
+    let mut master = master;
+    let slave_fd = slave.as_raw_fd();
+    let root = std::env::temp_dir().join(format!(
+        "host-agent-e2e-fs-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("folder"))?;
+    std::fs::write(root.join("file.bin"), b"content")?;
+
+    let (mut child, log_path) = spawn_agent(slave_fd, None)?;
+    drop(slave);
+
+    let result = (|| {
+        std::thread::sleep(Duration::from_millis(WAIT_CONNECT_MS));
+        let path = root.to_string_lossy();
+        let mut request = Vec::new();
+        request.extend_from_slice(&1u16.to_le_bytes());
+        request.extend_from_slice(&77u64.to_le_bytes());
+        request.extend_from_slice(&0u32.to_le_bytes());
+        request.extend_from_slice(&64u16.to_le_bytes());
+        request.push(0);
+        request.extend_from_slice(&(path.len() as u16).to_le_bytes());
+        request.extend_from_slice(path.as_bytes());
+        send_frame_with_retry(
+            &mut master,
+            &mut child,
+            &log_path,
+            TAG_FS_LIST_REQUEST,
+            &request,
+        )?;
+        read_frame(
+            master.as_raw_fd(),
+            Duration::from_millis(RESPONSE_DEADLINE_MS),
+        )
+    })();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (tag, payload) = result?;
+    assert_eq!(tag, TAG_FS_LIST_PAGE);
+    assert!(payload.len() <= 2048);
+    assert_eq!(&payload[0..2], &1u16.to_le_bytes());
+    assert_eq!(&payload[2..10], &77u64.to_le_bytes());
+    assert_eq!(payload[10], 0);
+    assert!(
+        payload
+            .windows(b"folder".len())
+            .any(|part| part == b"folder")
+    );
+    assert!(
+        payload
+            .windows(b"file.bin".len())
+            .any(|part| part == b"file.bin")
+    );
     Ok(())
 }
 

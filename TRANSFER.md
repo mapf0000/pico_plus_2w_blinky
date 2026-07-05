@@ -1,137 +1,401 @@
-# Browser Download Manager Plan (Host-Agent -> Device -> Browser)
+# File Transfer
 
-## 1. Objective
+This repository implements file transfer from the computer connected to the
+Pico over USB to a browser connected to the Pico over Wi-Fi.
 
-Implement an end-to-end file transfer pipeline where the **host-agent is the sender** and the browser receives data through the device, with a rich in-browser download manager that shows:
+The Pico is a streaming relay. It does not store the complete transferred file.
 
-- Transfer status: `open`, `downloading`, `finished`, `failed`, `aborted`
-- Per-transfer progress: `% downloaded`, bytes received/total
-- Per-transfer rate: smoothed bytes/sec
-- Per-transfer ETA: estimated time remaining
-- Chunk-level visibility: chunk count, each chunk status, per-chunk ETA, retries, errors
+```text
+USB-connected computer
+  host-agent reads a local file
+        |
+        | USB CDC, binary TLV frames
+        v
+Pico firmware
+        |
+        | WebSocket over the Pico access point
+        v
+Receiving browser
+  chunks are stored in IndexedDB
+        |
+        v
+  user saves the completed file
+```
 
-The implementation should be robust under packet fragmentation, reconnects, and backpressure, and should be developed test-first for protocol/state-machine-critical paths.
+## Current status
 
-## 2. Scope and Constraints
+The transfer path is implemented across the host-agent, firmware, and web
+frontend:
 
-- Direction: `host-agent -> USB CDC TLV -> firmware -> WebSocket -> browser`
-- Existing transport:
-  - Host-agent TLV framing (`apps/host-agent/src/tlv.rs`)
-  - Firmware CDC control class (`firmware/src/usb/ctrl.rs`)
-  - Firmware WS endpoint (`firmware/src/http/routes/ws.rs`)
-  - Frontend single-request WS client (`apps/frontend/src/api.rs`) must be refactored for streaming/multiplexing
-- Existing hard constraints:
-  - TLV payload max currently `2048` bytes on host-agent side
-  - Firmware control path currently has a very small receive accumulation buffer and must be redesigned for streaming safety
-- Non-goals for v1:
-  - Resume after browser reload
-  - Multi-device transfer fan-out
-  - Cryptographic confidentiality (integrity is in scope)
+- The host-agent reads files, calculates SHA-256, sends chunks, processes ACKs,
+  and retries timed-out chunks.
+- The firmware incrementally decodes USB frames, validates transfer metadata and
+  chunks, and forwards accepted chunks to the active WebSocket client.
+- The browser validates chunk CRC32 values, stores chunks in IndexedDB, displays
+  progress/rate/ETA, verifies the complete SHA-256, and saves the file.
+- The browser can explore the source computer's filesystem through the running
+  host-agent, including folders, files, symlinks, metadata, hidden files, and
+  paginated directory listings.
+- Transfers can be started from the browser, from the Pico display, or when the
+  host-agent starts with `--send-file`.
 
-## 3. Architecture Overview
+This is a connected-session transfer mechanism. Resume after a browser reload
+or WebSocket disconnect is not supported.
 
-1. Host-agent reads file and sends framed chunk stream over CDC TLV.
-2. Firmware acts as a streaming relay with minimal buffering and strict backpressure.
-3. Browser receives metadata and chunk stream via WebSocket.
-4. Browser persists chunks in IndexedDB (not localStorage), tracks live transfer/chunk state, computes rate + ETA, and exposes a download/finalization action.
+## Supported setup
 
-## 4. Protocol Design
+### Pico hardware
 
-### 4.1 CDC TLV extension (host-agent <-> firmware)
+The primary target is the Pimoroni Pico Plus 2 W (RP2350B). The transfer uses:
 
-Use new tags in an isolated range (example `20..=29`) to avoid collisions with existing tags:
+- USB composite device: mass storage plus CDC control interfaces
+- CYW43 Wi-Fi in access-point mode
+- The embedded Yew web frontend
 
-- `TAG_FILE_OPEN`
-- `TAG_FILE_CHUNK`
-- `TAG_FILE_ACK`
-- `TAG_FILE_CLOSE`
-- `TAG_FILE_RESULT`
-- `TAG_FILE_ABORT`
-- `TAG_FILE_HEARTBEAT` (optional for long transfers)
+### Source computer
 
-### 4.2 Message schema
+The source computer is connected to the Pico by USB and runs `host-agent`.
 
-All payloads are little-endian encoded fixed header + variable tail.
+The firmware exposes a read-only FAT16 volume named `PICO_AGENT`. The current
+image packages:
 
-- `FILE_OPEN`:
-  - `protocol_version: u16`
-  - `transfer_id: u64`
-  - `total_size: u64`
-  - `chunk_size: u16`
-  - `chunk_count: u32`
-  - `sha256: [u8; 32]`
-  - `file_name_len: u16`
-  - `file_name_utf8: [u8; file_name_len]`
-- `FILE_CHUNK`:
-  - `transfer_id: u64`
-  - `chunk_index: u32`
-  - `offset: u64`
-  - `payload_len: u16`
-  - `payload: [u8; payload_len]`
-  - `chunk_crc32: u32`
-- `FILE_ACK`:
-  - `transfer_id: u64`
-  - `highest_contiguous_chunk: u32`
-  - `next_expected_offset: u64`
-  - `window_credit: u16`
-- `FILE_CLOSE`:
-  - `transfer_id: u64`
-  - `sent_chunk_count: u32`
-  - `sent_total_size: u64`
-- `FILE_RESULT`:
-  - `transfer_id: u64`
-  - `result_code: u8` (`ok`, `hash_mismatch`, `size_mismatch`, `aborted`, `internal_error`)
-  - `detail_len: u16`
-  - `detail_utf8`
-- `FILE_ABORT`:
-  - `transfer_id: u64`
-  - `reason_code: u8`
-  - `detail_len: u16`
-  - `detail_utf8`
+| Platform | Path on USB volume | Status |
+| --- | --- | --- |
+| macOS ARM64 | `/MAC/HOSTAGNT` | Supported and packaged |
+| Windows x86-64 | `/WIN/HOSTAGNT.EXE` | Optional placeholder |
+| Linux x86-64 | `/LINUX/HOSTAGNT` | Optional placeholder |
 
-### 4.3 Protocol best practices
+The agent must run on the source computer because a USB device cannot directly
+read files from its host's filesystem.
 
-- Version every transfer (`protocol_version`) and reject unsupported versions clearly.
-- Keep messages idempotent:
-  - Duplicate `FILE_OPEN` with same `transfer_id` is accepted if metadata matches.
-  - Duplicate `FILE_CHUNK` is ignored or re-ACKed.
-- Always include explicit terminal events (`FILE_RESULT`/`FILE_ABORT`).
-- Enforce strict bounds:
-  - `payload_len <= negotiated_chunk_size`
-  - `offset + payload_len <= total_size`
-  - `chunk_index < chunk_count`
-- Do not rely on serial line coding for reliability; rely on app-level ACK and retries.
+### Receiving computer
 
-## 5. Firmware Relay Design
+The receiving computer connects directly to the Pico access point:
 
-### 5.1 Critical redesign in CDC receive path
+| Setting | Value |
+| --- | --- |
+| SSID | `PicoEndpoint` |
+| Password | `pico12345` |
+| Web UI | `http://192.168.4.1/` |
 
-Current receive accumulation in `firmware/src/usb/ctrl.rs` is too small for robust chunked transfer. Replace with a streaming TLV parser:
+The receiving browser must remain open and connected for the duration of the
+transfer.
 
-- Ring buffer or streaming decoder state machine
-- No assumption that one packet == one frame
-- Support partial header, partial payload, and multiple frames per packet
-- Safe resync on invalid length/tag
+## Build and deploy
 
-### 5.2 Relay behavior
+From the repository root, build the local host-agent, include it in the USB
+mass-storage image, build the frontend and firmware, and flash the Pico:
 
-- Maintain per-transfer relay state keyed by `transfer_id`.
-- Forward metadata and chunk events to WS subscribers.
-- Backpressure rules:
-  - Firmware only advertises `window_credit` it can safely relay.
-  - If WS side stalls, reduce credit to 0 and pause host-agent sender.
-- Timeout and cleanup:
-  - Abort stale transfers after configurable inactivity timeout.
-  - Free per-transfer resources deterministically.
+```sh
+scripts/fw-deploy-with-agent
+```
 
-## 6. WebSocket Protocol (firmware <-> browser)
+The script detects the current Rust host target. Override it when necessary:
 
-Use multiplexed WS semantics:
+```sh
+HOST_AGENT_TARGET=aarch64-apple-darwin scripts/fw-deploy-with-agent
+```
 
-- Text JSON for control/state events
-- Binary WS frames for chunk payloads (preferred for efficiency)
+To build only the macOS ARM64 host-agent artifact:
 
-Control events (JSON):
+```sh
+scripts/build-host-agent aarch64-apple-darwin
+```
+
+The artifact is copied to:
+
+```text
+apps/host-agent/artifacts/aarch64-apple-darwin/host-agent
+```
+
+The normal firmware build then embeds it in `host-agent.img`.
+
+## Transfer workflow
+
+### 1. Connect the receiving computer
+
+1. Power the Pico.
+2. Join the `PicoEndpoint` Wi-Fi network using `pico12345`.
+3. Open `http://192.168.4.1/`.
+4. Keep the page open during the transfer.
+
+### 2. Start USB
+
+USB is started on demand from the web UI:
+
+1. Select the source computer's operating system.
+2. Use **Start USB** or **Start USB on macOS (Assistant)**.
+3. Wait until the UI reports that USB is ready.
+
+The source computer should now see the `PICO_AGENT` volume and the CDC serial
+interfaces.
+
+### 3. Run the host-agent on the source computer
+
+On macOS ARM64:
+
+```sh
+cp /Volumes/PICO_AGENT/MAC/HOSTAGNT ./host-agent
+chmod +x ./host-agent
+./host-agent
+```
+
+The agent discovers and probes serial ports automatically. If discovery is
+ambiguous, provide a port explicitly:
+
+```sh
+./host-agent --port /dev/cu.usbmodemXXXX
+```
+
+VID/PID filtering is also supported:
+
+```sh
+./host-agent vid=1209 pid=1234
+```
+
+### 4. Start a transfer
+
+There are three supported ways to start.
+
+#### Start from the browser
+
+Use the **Source Files** card to explore the source computer:
+
+1. **Home** opens the host user's home directory.
+2. **/** opens the filesystem root; mounted macOS volumes are under `/Volumes`.
+3. Select a folder or breadcrumb to navigate.
+4. Use **Show hidden** when dotfiles should be included.
+5. Select **Transfer** beside a regular file to queue it immediately.
+6. **Select** copies the path into the manual **Start Transfer** field.
+
+Directories are returned in bounded pages. Use **Load more** when a directory
+contains more entries than fit in the current page.
+
+The manual **Start Transfer** card remains available: enter an absolute path
+that exists on the source computer and select **Queue Transfer**. In both cases,
+the browser sends the path through the Pico to the running host-agent. The
+host-agent opens that path locally and starts sending it.
+
+**Set Default** updates the running host-agent's default path without starting
+a transfer. The default path is used by the Pico display's start action.
+
+#### Start when launching the host-agent
+
+```sh
+./host-agent --send-file /absolute/path/to/file.bin
+```
+
+Each `--send-file` argument is queued when the agent connects. The first path
+also becomes the default path for later default-start requests.
+
+#### Start from the Pico display
+
+Open the **Transfer** page:
+
+- `A/B`: select an action
+- `X` on **Start Transfer (default)**: request the host-agent's default path
+- `X` on the mode row: toggle relay and simulation modes
+
+Relay mode requires an active browser WebSocket connection. Simulation mode
+executes the USB protocol and progress accounting but intentionally drops chunk
+data instead of forwarding it to the browser.
+
+### 5. Save the received file
+
+During transfer, the browser displays:
+
+- status
+- received and total bytes
+- progress percentage
+- smoothed transfer rate
+- estimated time remaining
+- finished, retrying, and failed chunk counts
+
+Incoming chunks are persisted in IndexedDB. When the transfer is complete,
+select **Download**:
+
+1. The browser waits for pending IndexedDB writes.
+2. It verifies the complete SHA-256 against the value supplied by the
+   host-agent.
+3. It writes the file through the File System Access API when available.
+4. Otherwise it uses a Blob download, limited to 128 MiB.
+5. Successfully saved transfer chunks are removed from IndexedDB.
+
+Canceling or failing the save operation leaves the completed transfer available
+for another download attempt.
+
+## Host-agent options
+
+Relevant command-line options are:
+
+| Option | Purpose |
+| --- | --- |
+| `--send-file <path>` | Queue a file and set the first file as the default |
+| `--port <path>` | Use a specific serial port |
+| `--vid <value>` / `vid=<value>` | Filter USB serial ports by VID |
+| `--pid <value>` / `pid=<value>` | Filter USB serial ports by PID |
+| `--cwd <path>` / `cwd=<path>` | Change the agent working directory |
+| `--probe-timeout-ms <ms>` | Configure serial-port probing |
+| `--debug-log <path>` | Store debug messages received from the Pico |
+| `--raw` | Log raw serial input |
+| `--debug` | Enable debug-level logging |
+
+`--send-file` can be repeated. Transfers are processed serially by the current
+host-agent transfer worker.
+
+## Protocol
+
+### USB CDC framing
+
+Every USB control message uses this TLV frame:
+
+```text
++--------+----------------------+------------------+
+| tag:u8 | payload_len:u32 LE   | payload          |
++--------+----------------------+------------------+
+```
+
+The maximum TLV payload is 2048 bytes.
+
+### Transfer tags
+
+| Tag | Name | Direction | Purpose |
+| ---: | --- | --- | --- |
+| 20 | `FILE_OPEN` | agent → Pico | Declare transfer metadata |
+| 21 | `FILE_CHUNK` | agent → Pico | Send one file chunk |
+| 22 | `FILE_ACK` | Pico → agent | Acknowledge contiguous chunks and grant credit |
+| 23 | `FILE_CLOSE` | agent → Pico | Finish the byte stream |
+| 24 | `FILE_RESULT` | Pico → agent | Report the Pico relay result |
+| 25 | `FILE_ABORT` | both | Terminate a transfer with a reason |
+| 26 | `FILE_HEARTBEAT` | reserved | Long-transfer heartbeat |
+| 27 | `FILE_START_REQUEST` | Pico → agent | Start a path or the default path |
+| 28 | `FILE_SET_DEFAULT_PATH` | Pico → agent | Update the default source path |
+| 29 | `FS_LIST_REQUEST` | Pico → agent | Request one directory page |
+| 30 | `FS_LIST_PAGE` | agent → Pico | Return directory entries or an error |
+| 31 | `FS_LIST_CANCEL` | Pico → agent | Mark a directory request as stale |
+
+All multibyte integers are little-endian.
+
+### Filesystem listing
+
+`FS_LIST_REQUEST` contains:
+
+```text
+protocol_version : u16
+request_id       : u64
+cursor           : u32
+entry_limit      : u16
+flags            : u8
+path_len         : u16
+path             : UTF-8 bytes
+```
+
+An empty path resolves to the host user's home directory. Flag bit 0 includes
+hidden dotfiles. The browser currently requests up to 64 entries per page.
+
+`FS_LIST_PAGE` contains the request ID, status, continuation cursor, canonical
+directory, optional error, and repeated entry records. Each entry includes:
+
+```text
+kind             : u8
+flags            : u8
+size             : u64
+modified_secs    : u64
+name_len         : u16
+name             : UTF-8 bytes
+```
+
+Kinds distinguish files, directories, file/directory symlinks, and other
+filesystem objects. Listings are sorted with directories first and then by
+case-insensitive name. Non-UTF-8 names are omitted because the current browser
+and command protocol address paths as UTF-8.
+
+Each page is generated from a fresh directory read. If a directory changes
+between continuation requests, entries can move between pages; refresh the
+directory to obtain a consistent current view.
+
+### `FILE_OPEN`
+
+```text
+protocol_version : u16
+transfer_id      : u64
+total_size       : u64
+chunk_size       : u16
+chunk_count      : u32
+sha256           : [u8; 32]
+file_name_len    : u16
+file_name        : UTF-8 bytes
+```
+
+The current protocol version is `1`. Firmware accepts file names up to 96
+bytes. A duplicate open is accepted only when its metadata matches the active
+transfer.
+
+### `FILE_CHUNK`
+
+```text
+transfer_id : u64
+chunk_index : u32
+offset      : u64
+payload_len : u16
+payload     : bytes
+crc32       : u32
+```
+
+The fixed overhead is 26 bytes, so the maximum data portion is 2022 bytes. The
+host-agent currently uses that maximum as its default chunk size.
+
+Firmware accepts chunks in order. It validates:
+
+- transfer ID
+- chunk index and offset
+- declared and actual payload length
+- total-size bounds
+- CRC32
+
+Duplicates are re-ACKed. A CRC mismatch causes the chunk to be retried.
+Protocol and bounds violations abort the transfer.
+
+### `FILE_ACK`
+
+```text
+transfer_id             : u64
+highest_contiguous_chunk: u32
+next_expected_offset    : u64
+window_credit           : u16
+```
+
+`u32::MAX` means that no chunk has been acknowledged. Firmware currently grants
+a fixed credit of eight chunks after accepted input. The host-agent limits
+credit to 64 and retries the oldest outstanding chunk after a five-second ACK
+timeout, up to five retries.
+
+### `FILE_CLOSE`, `FILE_RESULT`, and `FILE_ABORT`
+
+`FILE_CLOSE` contains the transfer ID, sent chunk count, and sent byte count.
+Firmware returns a result after validating counts and total size.
+
+Result codes are:
+
+| Code | Meaning |
+| ---: | --- |
+| 0 | OK |
+| 1 | SHA-256 mismatch |
+| 2 | Size mismatch |
+| 3 | Aborted |
+| 4 | Internal error |
+
+The Pico does not calculate the complete SHA-256 because it does not retain the
+file. Final SHA-256 verification occurs in the browser during download.
+Consequently, an OK result to the host-agent means that the Pico accepted and
+queued all bytes, not that the browser has saved the file.
+
+## WebSocket messages
+
+The firmware and frontend share one WebSocket connection for command responses
+and transfers.
+
+Control events are JSON text messages:
 
 - `transfer/open`
 - `transfer/progress`
@@ -139,278 +403,116 @@ Control events (JSON):
 - `transfer/finished`
 - `transfer/failed`
 - `transfer/aborted`
-- `transfer/ack_request` (if browser-managed ack windowing is enabled)
 
-Binary chunk envelope:
-
-- Fixed binary header:
-  - `transfer_id: u64`
-  - `chunk_index: u32`
-  - `offset: u64`
-  - `payload_len: u16`
-  - `crc32: u32`
-- Followed by raw chunk bytes
-
-Best practices:
-
-- Make control events self-describing and forward-compatible (`event_type`, `version`).
-- Do not block command-response API while streaming; move from single pending response model to event dispatcher.
-
-## 7. Frontend Download Manager Design
-
-### 7.1 Storage strategy
-
-- Use IndexedDB for chunk persistence and metadata.
-- Avoid localStorage for binary or high-frequency updates.
-- Keep in-memory cache small (active window only).
-
-### 7.2 State model (idiomatic + testable)
-
-Represent transfer/chunk lifecycle with enums:
-
-- `TransferState`: `Open`, `Downloading`, `Verifying`, `Finished`, `Failed`, `Aborted`
-- `ChunkState`: `Open`, `Downloading`, `Finished`, `Retrying`, `Failed`
-
-Use a reducer-style state machine to process events deterministically.
-
-Track per transfer:
-
-- `transfer_id`
-- `file_name`
-- `total_size`
-- `received_size`
-- `chunk_count`
-- `finished_chunks`
-- `failed_chunks`
-- `started_at`
-- `updated_at`
-- `smoothed_rate_bps`
-- `eta_total`
-- `status`
-
-Track per chunk:
-
-- `chunk_index`
-- `size`
-- `received`
-- `attempts`
-- `started_at`
-- `finished_at`
-- `status`
-- `instant_rate_bps`
-- `eta_chunk`
-
-### 7.3 Rate and ETA calculations
-
-Use monotonic timestamps and EWMA smoothing:
-
-- `instant_rate = delta_bytes / delta_time`
-- `smoothed_rate = alpha * instant_rate + (1 - alpha) * previous_smoothed_rate` (`alpha ~= 0.2`)
-- `eta_total = (total_size - received_size) / max(smoothed_rate, epsilon)`
-- `eta_chunk = (chunk_size - chunk_received) / max(chunk_rate, epsilon)`
-
-Rules:
-
-- Clamp and saturate to avoid negative or overflow values.
-- Show `ETA unknown` when insufficient samples.
-- Update UI cadence at 200-500 ms to avoid render thrash.
-
-### 7.4 UX behavior
-
-- Main table: one row per transfer with status, progress bar, rate, ETA, controls.
-- Chunk detail panel per transfer:
-  - Chunk status counts
-  - Current downloading chunk(s)
-  - Retry/error list
-- For large chunk counts, virtualize list rendering and show aggregated counters by default.
-
-## 8. Idiomatic Rust Plan
-
-### 8.1 Type modeling
-
-Use strong domain types:
-
-- `TransferId(u64)`
-- `ChunkIndex(u32)`
-- `ByteCount(u64)`
-- `BytesPerSec(u64)`
-- `ProtocolVersion(u16)`
-
-Benefits:
-
-- Compile-time separation of semantically different integers
-- Cleaner APIs and less accidental field mix-up
-
-### 8.2 Error handling and boundaries
-
-- `thiserror` for layered error enums (`CodecError`, `ProtocolError`, `RelayError`, `StorageError`)
-- `Result` across boundaries; avoid panics in transfer path
-- `#[non_exhaustive]` on public protocol enums likely to evolve
-
-### 8.3 Concurrency and backpressure
-
-- Bounded `tokio::sync::mpsc` channels between parser/relay/sender
-- `tokio::select!` for cancellation, timeout, and channel coordination
-- Avoid unbounded queues in hot path
-
-### 8.4 Serialization
-
-- Binary payloads encoded manually or via zero-copy-friendly helpers
-- Control JSON with strict serde contracts (`deny_unknown_fields` where appropriate)
-
-## 9. TDD Strategy (Neuralgic Points First)
-
-### 9.1 Neuralgic points
-
-1. TLV fragmentation/reassembly correctness
-2. ACK window, retries, and duplicate chunk handling
-3. Transfer state-machine transitions and terminal states
-4. Rate/ETA math stability with jittery timestamps
-5. Firmware relay backpressure and memory safety
-6. Frontend WS multiplexing (stream + command responses)
-
-### 9.2 Test-first sequence
-
-1. **Codec tests first**
-   - Round-trip encode/decode for all message types
-   - Fragmented input fuzz tests
-   - Invalid length/tag resync tests
-2. **State-machine tests**
-   - Given event streams, assert exact state transitions
-   - Duplicate `FILE_CHUNK` and duplicate `FILE_OPEN` semantics
-   - Abort and timeout transitions
-3. **Rate/ETA deterministic tests**
-   - Inject fake clock
-   - Validate EWMA convergence and edge cases (`0 bytes`, pauses, spikes)
-4. **Backpressure tests**
-   - Simulated slow WS receiver
-   - Assert host-agent sender pauses/resumes via ACK credit
-5. **Integration tests (PTY)**
-   - Extend `apps/host-agent/tests/e2e_mac.rs` with transfer scenarios
-   - Simulate frame fragmentation and reconnect behavior
-6. **Frontend wasm tests**
-   - Reducer tests for chunk/transfer status updates
-   - UI formatter tests for `%`, rate strings, ETA labels
-7. **End-to-end smoke**
-   - Transfer small, medium, large files
-   - Forced abort, hash mismatch, induced timeout
-
-## 10. Implementation Phases
-
-### Phase 0: Design lock
-
-- Finalize tag IDs and schemas.
-- Finalize transfer state machine and ACK policy.
-- Add protocol markdown + binary examples.
-
-Acceptance:
-
-- Protocol doc complete with examples and failure semantics.
-
-### Phase 1: Host-agent protocol + sender core
-
-Files:
-
-- `apps/host-agent/src/tlv.rs` (message support)
-- `apps/host-agent/src/dispatch.rs` (new file transfer handlers)
-- New modules:
-  - `apps/host-agent/src/transfer/mod.rs`
-  - `apps/host-agent/src/transfer/codec.rs`
-  - `apps/host-agent/src/transfer/sender.rs`
-  - `apps/host-agent/src/transfer/state.rs`
-
-Acceptance:
-
-- Host-agent can stream file chunks with retry + ACK handling in test harness.
-
-### Phase 2: Firmware CDC parser + relay
-
-Files:
-
-- `firmware/src/usb/ctrl.rs` (streaming parser redesign)
-- New module: `firmware/src/usb/file_transfer.rs`
-- `firmware/src/http/routes/ws.rs` (control + binary forwarding)
-
-Acceptance:
-
-- Firmware relays transfer events and chunk data without overrun under fragmented input.
-
-### Phase 3: Frontend WS refactor + storage
-
-Files:
-
-- `apps/frontend/src/api.rs` (multiplexed WS client)
-- New modules:
-  - `apps/frontend/src/transfer/store.rs`
-  - `apps/frontend/src/transfer/reducer.rs`
-  - `apps/frontend/src/transfer/indexed_db.rs`
-  - `apps/frontend/src/transfer/metrics.rs`
-
-Acceptance:
-
-- Browser stores incoming chunks in IndexedDB and maintains accurate transfer model.
-
-### Phase 4: Download manager UI
-
-Files:
-
-- `apps/frontend/src/lib.rs` (new transfer manager section)
-- `apps/frontend/ui/style.css` (status/graph/table styles)
-
-Acceptance:
-
-- UI shows required statuses, chunk counts, `%`, rates, ETA (chunk + total), and completion.
-
-### Phase 5: Hardening and tuning
-
-- Throughput tuning (chunk size/window)
-- Better diagnostics and telemetry
-- Limits and guardrails
-
-Acceptance:
-
-- Sustained transfer stability with no memory growth and predictable recovery on fault injection.
-
-## 11. Performance and Reliability Guidelines
-
-- Start conservative defaults:
-  - `chunk_size = 1024`
-  - `window_credit = 4`
-  - Retry timeout based on smoothed RTT with clamp
-- Adaptive tuning:
-  - Increase credit/chunk size after stable ACKs
-  - Decrease aggressively on timeout (`AIMD`-style)
-- Keep transfer logs structured (`transfer_id`, chunk range, retries, RTT, credits).
-
-## 12. Security and Safety
-
-- Validate all lengths and indexes before allocation.
-- Enforce max transfer size and max concurrent transfers.
-- Verify final SHA-256 before marking finished.
-- Sanitize file metadata for UI display (escape/length clamp).
-- Treat all incoming protocol data as untrusted.
-
-## 13. Observability and Diagnostics
-
-- Structured logs in host-agent and firmware for each protocol edge.
-- Frontend debug panel:
-  - Active transfer IDs
-  - Current credits/chunk window
-  - Smoothed rate and RTT
-  - Last error reason
-- Add counters:
-  - Chunks sent/acked/retried/failed
-  - Bytes relayed
-  - Transfer completion ratio
-
-## 14. Done Criteria
-
-Feature is done when:
-
-- End-to-end transfer works reliably from host-agent to browser.
-- Download manager displays:
-  - overall status (`open`, `downloading`, `finished`, `%`, ETA)
-  - chunk count and per-chunk status (`open`, `downloading`, `finished`, retry/fail)
-  - live transfer rate
-- TDD coverage exists for all neuralgic protocol and state-machine paths.
-- Fault scenarios (timeout, duplicates, abort, corruption) are deterministic and user-visible.
+Binary WebSocket messages begin with a one-byte kind:
+
+| Kind | Payload |
+| ---: | --- |
+| 1 | File-transfer chunk |
+| 2 | Filesystem listing page |
+
+A kind-1 transfer payload contains:
+
+```text
+transfer_id : u64
+chunk_index : u32
+offset      : u64
+payload_len : u16
+crc32       : u32
+payload     : bytes
+```
+
+The firmware maintains a bounded 16-event WebSocket queue. Starting relay mode
+without a browser, disconnecting the browser, or filling this queue aborts the
+transfer rather than buffering the complete file on the Pico.
+
+## Storage and integrity
+
+Integrity is checked at two levels:
+
+- CRC32 detects corruption of each chunk at the Pico and again in the browser.
+- SHA-256 verifies the complete ordered file in the browser before saving.
+
+The browser requires ordered chunks and validates indexes, offsets, sizes, and
+the final byte count. IndexedDB holds chunk data only; transfer progress state
+is kept in memory.
+
+Reloading the page discards the active in-memory transfer state. Start the
+transfer again after reconnecting.
+
+## Security model
+
+The current deployment assumes a controlled physical and wireless environment:
+
+- Wi-Fi uses WPA2 with credentials compiled into the firmware.
+- HTTP and WebSocket traffic are not protected by TLS.
+- The web UI has no separate user authentication.
+- A connected browser can request any path readable by the running host-agent.
+- The host-agent also supports other privileged USB commands, including command
+  execution.
+
+Run the host-agent only while this access is intended, and stop USB or terminate
+the agent when finished.
+
+## Operational limits
+
+| Limit | Current value |
+| --- | ---: |
+| USB TLV payload | 2048 bytes |
+| File data per chunk | 2022 bytes |
+| Firmware active transfer records | 4 |
+| Firmware WebSocket transfer queue | 16 events |
+| Browser Blob fallback | 128 MiB |
+| Transfer path sent by firmware | 512 bytes |
+| Filesystem path sent by firmware | 512 bytes |
+| Filesystem page request | 64 entries |
+| Host filesystem page maximum | 128 entries |
+| Browser filesystem timeout | 15 seconds |
+| File name accepted by firmware | 96 bytes |
+| Host ACK timeout | 5 seconds |
+| Host chunk retry limit | 5 |
+
+The File System Access API path streams chunks from IndexedDB to the destination
+and is preferred for large files. Browser storage quotas and free disk space
+remain platform-dependent.
+
+## Implementation map
+
+| Component | Location |
+| --- | --- |
+| Host TLV codec | `apps/host-agent/src/tlv.rs` |
+| Host sender and transfer codec | `apps/host-agent/src/file_transfer.rs` |
+| Host filesystem listing | `apps/host-agent/src/filesystem.rs` |
+| Host request dispatch | `apps/host-agent/src/dispatch.rs` |
+| Firmware USB decoder and relay | `firmware/src/usb/ctrl.rs` |
+| Firmware WebSocket endpoint | `firmware/src/http/routes/ws.rs` |
+| Browser WebSocket client | `apps/frontend/src/api.rs` |
+| Browser filesystem state/codec | `apps/frontend/src/filesystem.rs` |
+| Browser transfer state/integrity | `apps/frontend/src/transfer.rs` |
+| Browser IndexedDB and download | `apps/frontend/ui/idb.js` |
+| Browser transfer UI | `apps/frontend/src/lib.rs` |
+| Pico display transfer page | `firmware/src/display/page_transfer.rs` |
+
+## Verification
+
+Run host-agent unit and macOS PTY integration tests:
+
+```sh
+cargo test -p host-agent
+```
+
+Run frontend filesystem/transfer state, CRC, SHA-256, and rate/ETA tests:
+
+```sh
+cargo test -p frontend
+```
+
+Check the firmware for the embedded target:
+
+```sh
+cargo check -p pico_rust --target thumbv8m.main-none-eabihf
+```
+
+The automated suite does not currently exercise a complete
+host-agent-to-firmware-to-browser hardware transfer. Validate the complete flow
+on hardware after protocol, USB, WebSocket, or storage changes.

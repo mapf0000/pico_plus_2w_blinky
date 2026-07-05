@@ -43,7 +43,7 @@ impl EventWriterState {
     }
 }
 
-/// Writing events to an [EventWriter] will send the events to the client.
+/// Writing events to an [`EventWriter`] will send the events to the client.
 pub struct EventWriter<'a, W: Write> {
     writer: W,
     event_writer_state: &'a EventWriterState,
@@ -88,7 +88,7 @@ impl<W: Write> EventWriter<'_, W> {
             writer: W,
         }
 
-        impl<W: Write> embedded_io_async::ErrorType for DataWriter<W> {
+        impl<W: Write> crate::io::ErrorType for DataWriter<W> {
             type Error = W::Error;
         }
 
@@ -174,7 +174,7 @@ pub trait EventSource {
 pub struct EventStream<S: EventSource>(pub S);
 
 impl<S: EventSource> EventStream<S> {
-    /// Convert SSE stream into a [super::Response] with a status code of "OK"
+    /// Convert SSE stream into a [`Response`](super::Response) with a status code of "OK"
     pub fn into_response(self) -> super::Response<impl super::HeadersIter, impl super::Body> {
         super::Response {
             status_code: StatusCode::OK,
@@ -256,7 +256,7 @@ mod tests {
 
     struct CountWriteSize(usize);
 
-    impl embedded_io_async::ErrorType for CountWriteSize {
+    impl crate::io::ErrorType for CountWriteSize {
         type Error = core::convert::Infallible;
     }
 
@@ -268,13 +268,17 @@ mod tests {
 
             Ok(write_size)
         }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     struct ThrottledWriter {
         write_size: usize,
     }
 
-    impl embedded_io_async::ErrorType for ThrottledWriter {
+    impl crate::io::ErrorType for ThrottledWriter {
         type Error = core::convert::Infallible;
     }
 
@@ -289,6 +293,10 @@ mod tests {
 
                 Ok(1)
             }
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
         }
     }
 

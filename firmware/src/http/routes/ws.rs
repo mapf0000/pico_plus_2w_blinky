@@ -13,7 +13,10 @@ use crate::usb::usb_supervisor;
 use heapless::{String, Vec};
 
 pub const TRANSFER_TEXT_MAX: usize = 768;
-pub const TRANSFER_BINARY_MAX: usize = 2048;
+pub const TRANSFER_BINARY_MAX: usize = 2049;
+pub const WS_BINARY_KIND_TRANSFER: u8 = 1;
+pub const WS_BINARY_KIND_FILESYSTEM: u8 = 2;
+const WS_COMMAND_MAX: usize = 2048;
 
 pub enum TransferWsEvent {
     Text(String<TRANSFER_TEXT_MAX>),
@@ -98,7 +101,7 @@ impl ws::WebSocketCallback for HelloWs {
         tx.send_text("hello").await?;
         begin_ws_session();
 
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; WS_COMMAND_MAX];
         loop {
             match select(
                 TRANSFER_WS_EVENTS.receive(),
@@ -333,6 +336,94 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
         };
 
         match CTRL_CHAN.try_send(CtrlCommand::StartTransfer { path }) {
+            Ok(()) => {
+                let _ = response.push_str("{\"ok\":true,\"queued\":true}");
+                response
+            }
+            Err(_) => {
+                let _ = response.push_str("{\"error\":\"busy\"}");
+                response
+            }
+        }
+    } else if let Some(rest) = cmd.strip_prefix("TRANSFER_DEFAULT_SET ") {
+        let mut path = None;
+        for pair in rest.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                if k == "path" {
+                    path = percent_decode_str::<{ MAX_TRANSFER_PATH_LEN }>(v);
+                }
+            }
+        }
+
+        let Some(path) = path else {
+            let _ = response.push_str("{\"error\":\"missing path\"}");
+            return response;
+        };
+
+        match CTRL_CHAN.try_send(CtrlCommand::SetTransferDefault { path }) {
+            Ok(()) => {
+                let _ = response.push_str("{\"ok\":true,\"updated\":true}");
+                response
+            }
+            Err(_) => {
+                let _ = response.push_str("{\"error\":\"busy\"}");
+                response
+            }
+        }
+    } else if let Some(rest) = cmd.strip_prefix("FS_LIST ") {
+        let mut request_id = None;
+        let mut cursor = None;
+        let mut entry_limit = None;
+        let mut flags = None;
+        let mut path = None;
+        for pair in rest.split('&') {
+            if let Some((key, value)) = pair.split_once('=') {
+                match key {
+                    "request_id" => request_id = value.parse::<u64>().ok(),
+                    "cursor" => cursor = value.parse::<u32>().ok(),
+                    "limit" => entry_limit = value.parse::<u16>().ok(),
+                    "flags" => flags = value.parse::<u8>().ok(),
+                    "path" => {
+                        path = percent_decode_str::<{ MAX_TRANSFER_PATH_LEN }>(value);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let (Some(request_id), Some(cursor), Some(entry_limit), Some(flags), Some(path)) =
+            (request_id, cursor, entry_limit, flags, path)
+        else {
+            let _ = response.push_str("{\"error\":\"invalid filesystem request\"}");
+            return response;
+        };
+
+        match CTRL_CHAN.try_send(CtrlCommand::ListDirectory {
+            request_id,
+            cursor,
+            entry_limit,
+            flags,
+            path,
+        }) {
+            Ok(()) => {
+                let _ = response.push_str("{\"ok\":true,\"queued\":true}");
+                response
+            }
+            Err(_) => {
+                let _ = response.push_str("{\"error\":\"busy\"}");
+                response
+            }
+        }
+    } else if let Some(rest) = cmd.strip_prefix("FS_LIST_CANCEL ") {
+        let request_id = rest
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("request_id="))
+            .and_then(|value| value.parse::<u64>().ok());
+        let Some(request_id) = request_id else {
+            let _ = response.push_str("{\"error\":\"invalid filesystem request id\"}");
+            return response;
+        };
+        match CTRL_CHAN.try_send(CtrlCommand::CancelDirectoryList { request_id }) {
             Ok(()) => {
                 let _ = response.push_str("{\"ok\":true,\"queued\":true}");
                 response

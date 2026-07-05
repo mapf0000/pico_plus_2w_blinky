@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
-which  = "8.0.0"
+which = "8.0"
 blake3 = "1"
 dsl-core = { path = "../dsl/dsl-core", features = ["layout_mac_de_de"] }
 builtin-scripts = { path = "../builtin-scripts" }

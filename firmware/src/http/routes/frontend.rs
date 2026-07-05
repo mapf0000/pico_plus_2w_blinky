@@ -14,6 +14,7 @@ pub(crate) async fn route_frontend_index() -> impl picoserve::response::IntoResp
         ty: "text/html; charset=utf-8",
         data: frontend_static::INDEX_HTML.as_bytes(),
     })
+    .with_header("Cache-Control", "no-store")
 }
 
 pub(crate) async fn route_frontend_js() -> impl picoserve::response::IntoResponse {
@@ -25,6 +26,7 @@ pub(crate) async fn route_frontend_js() -> impl picoserve::response::IntoRespons
         ty: "application/javascript",
         data: frontend_static::APP_JS,
     })
+    .with_header("Cache-Control", "no-store")
 }
 
 pub(crate) async fn route_frontend_wasm() -> impl picoserve::response::IntoResponse {
@@ -36,6 +38,7 @@ pub(crate) async fn route_frontend_wasm() -> impl picoserve::response::IntoRespo
         ty: "application/wasm",
         data: frontend_static::APP_WASM,
     })
+    .with_header("Cache-Control", "no-store")
 }
 
 pub(crate) async fn route_frontend_style() -> impl picoserve::response::IntoResponse {
@@ -47,4 +50,17 @@ pub(crate) async fn route_frontend_style() -> impl picoserve::response::IntoResp
         ty: "text/css; charset=utf-8",
         data: frontend_static::STYLE_CSS.as_bytes(),
     })
+    .with_header("Cache-Control", "no-store")
+}
+
+pub(crate) async fn route_frontend_idb_js() -> impl picoserve::response::IntoResponse {
+    log::debug!(
+        "http: serve idb.js ({} bytes)",
+        frontend_static::IDB_JS.len()
+    );
+    Response::ok(BytesWithType {
+        ty: "application/javascript",
+        data: frontend_static::IDB_JS,
+    })
+    .with_header("Cache-Control", "no-store")
 }

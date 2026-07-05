@@ -6,6 +6,8 @@ This workspace builds two artifacts together:
 
 The build is wired so a single `cargo run -p pico_rust --release` builds both parts, flashes the board, and opens a serial log.
 
+See [TRANSFER.md](TRANSFER.md) for the complete USB-to-Wi-Fi file-transfer setup, workflow, protocol, limits, and security model.
+
 ## Overview
 - Primary hardware target: Pimoroni Pico Plus 2 W (RP2350B) with 16 MiB QSPI flash, 8 MiB PSRAM, and 520 KiB SRAM.
 - Default target is the host triple; firmware builds use `thumbv8m.main-none-eabihf`.
@@ -42,10 +44,14 @@ The build is wired so a single `cargo run -p pico_rust --release` builds both pa
 - Custom runner: `scripts/pico-run`
 
 ## Build: One‑shot
+- Flash + run with logs, while also packaging the local host-agent into the USB drive image:
+  - From repo root: `scripts/fw-deploy-with-agent`
 - Flash + run with logs:
   - From repo root: `cargo run -p pico_rust --release --target thumbv8m.main-none-eabihf`
   - Or: `cd firmware && cargo run --release`
 - Notes:
+  - `scripts/fw-deploy-with-agent` first builds `host-agent` for the local machine's host target and copies it into `apps/host-agent/artifacts/<target>/`, then runs the normal firmware deploy command.
+  - Set `HOST_AGENT_TARGET=<triple>` to override the detected host target if needed.
   - The runner uses `picotool load -u -x` and waits for a USB serial device (120s default). Use `--timeout=<secs>` or `--no-wait` after the ELF to change behavior.
   - If logs don’t appear immediately, the device may not have brought up USB CDC yet. The runner prints hints; you can also access the device over Wi‑Fi at `http://192.168.4.1/` and use the UI to trigger features.
 
@@ -59,6 +65,8 @@ The build is wired so a single `cargo run -p pico_rust --release` builds both pa
   - `cd apps/frontend && trunk build --release` (outputs to `apps/frontend/dist/`)
 
 ## Host agent USB mass storage image
+- One-command local flow:
+  - `scripts/fw-deploy-with-agent`
 - Build the macOS host agent:
   - `cargo build -p host-agent --release --target aarch64-apple-darwin`
   - Or run `scripts/build-host-agent` (copies into the artifacts folder).
@@ -88,6 +96,11 @@ The build is wired so a single `cargo run -p pico_rust --release` builds both pa
 - Simulation mode:
   - The device keeps USB transfer ACK/RESULT flow and progress accounting.
   - Chunk payloads are intentionally dropped instead of being forwarded to browser WebSocket clients.
+
+## Source filesystem browser
+- With the browser WebSocket connected and the host-agent running, the Web UI can browse the source computer's filesystem through the Pico.
+- The browser starts in the host user's home directory and supports root/home/up navigation, breadcrumbs, hidden files, metadata, and paginated listings.
+- Select a regular file to populate the manual transfer path or queue it directly.
 
 ## Testing
 - Host-only unit tests (skip embedded dependencies):

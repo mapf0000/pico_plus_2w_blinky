@@ -2,7 +2,7 @@ use std::{
     convert::Infallible,
     format,
     pin::Pin,
-    string::String,
+    string::{String, ToString},
     task::{Context, Poll},
     time::Duration,
     vec::Vec,
@@ -10,7 +10,6 @@ use std::{
 
 use alloc::borrow::ToOwned;
 
-use embedded_io_async::Read;
 use futures_util::FutureExt;
 use http_body_util::BodyExt;
 use hyper::StatusCode;
@@ -19,6 +18,15 @@ use tokio::sync::mpsc;
 use self::routing::PathRouter;
 
 use super::*;
+
+use super::io::{Read, Write};
+
+const TEST_CONFIG: crate::Config = crate::Config::new(crate::Timeouts {
+    start_read_request: crate::time::Duration::from_secs(10),
+    persistent_start_read_request: crate::time::Duration::from_secs(10),
+    read_request: crate::time::Duration::from_secs(10),
+    write: crate::time::Duration::from_secs(10),
+});
 
 struct VecRead(Vec<u8>);
 
@@ -49,7 +57,7 @@ impl io::ErrorType for PipeRx {
     type Error = Infallible;
 }
 
-impl io::Read for PipeRx {
+impl Read for PipeRx {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         if self.current.is_empty() {
             let Some(mut next) = self.channel.recv().await else {
@@ -88,8 +96,7 @@ impl hyper::rt::Read for PipeRx {
             // Copied from MaybeUninit::slice_assume_init_mut.
             #[allow(unsafe_code, clippy::multiple_unsafe_ops_per_block)]
             unsafe {
-                // TODO - replace with MaybeUninit::slice_assume_init_mut when stable
-                &mut *(buf.as_mut() as *mut [std::mem::MaybeUninit<u8>] as *mut [u8])
+                buf.as_mut().assume_init_mut()
             },
         );
 
@@ -97,10 +104,22 @@ impl hyper::rt::Read for PipeRx {
         // read_size comes from reading from the buffer and thus is at most the size of the buffer.
         #[allow(unsafe_code)]
         unsafe {
-            buf.advance(read_size)
-        };
+            buf.advance(read_size);
+        }
 
         Poll::Ready(Ok(()))
+    }
+}
+
+impl PipeRx {
+    async fn read_all(&mut self) -> Vec<u8> {
+        let mut buffer = std::mem::take(&mut self.current.0);
+
+        while let Some(mut message) = self.channel.recv().await {
+            buffer.append(&mut message);
+        }
+
+        buffer
     }
 }
 
@@ -110,11 +129,15 @@ impl io::ErrorType for PipeTx {
     type Error = Infallible;
 }
 
-impl io::Write for PipeTx {
+impl Write for PipeTx {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         let _ = self.0.send(buf.into());
 
         Ok(buf.len())
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
@@ -158,23 +181,43 @@ struct TestSocket<TX, RX> {
     rx: RX,
 }
 
-impl<TX: io::Write<Error = Infallible>, RX: io::Read<Error = Infallible>> io::Socket<TokioRuntime>
+impl<TX: Write<Error = Infallible>, RX: Read<Error = Infallible>> io::Socket<TokioRuntime>
     for TestSocket<TX, RX>
 {
     type Error = Infallible;
 
-    type ReadHalf<'a> = &'a mut RX where TX: 'a, RX: 'a;
-    type WriteHalf<'a> = &'a mut TX where TX: 'a, RX: 'a;
+    type ReadHalf<'a>
+        = &'a mut RX
+    where
+        TX: 'a,
+        RX: 'a;
+    type WriteHalf<'a>
+        = &'a mut TX
+    where
+        TX: 'a,
+        RX: 'a;
 
     fn split(&mut self) -> (Self::ReadHalf<'_>, Self::WriteHalf<'_>) {
         (&mut self.rx, &mut self.tx)
     }
 
-    async fn shutdown<Timer: time::Timer<TokioRuntime>>(
+    async fn abort<Timer: crate::Timer<TokioRuntime>>(
         self,
-        _timeouts: &Timeouts<Timer::Duration>,
+        _timeouts: &crate::Timeouts,
+        _timer: &mut Timer,
+    ) -> Result<(), crate::Error<Self::Error>> {
+        Ok(())
+    }
+
+    async fn shutdown<Timer: time::Timer<TokioRuntime>>(
+        mut self,
+        _timeouts: &Timeouts,
         _timer: &mut Timer,
     ) -> Result<(), Error<Self::Error>> {
+        drop(self.tx);
+
+        while self.rx.read(&mut [0; 1024]).await.map_err(Error::Read)? > 0 {}
+
         Ok(())
     }
 }
@@ -210,36 +253,36 @@ impl<TX: hyper::rt::Write + Unpin, RX: Unpin> hyper::rt::Write for TestSocket<TX
     }
 }
 
+impl TestSocket<PipeTx, PipeRx> {
+    fn pipe_pair() -> (Self, Self) {
+        let (tx0, rx0) = pipe();
+        let (tx1, rx1) = pipe();
+
+        (Self { tx: tx0, rx: rx1 }, Self { tx: tx1, rx: rx0 })
+    }
+}
+
+impl<Rx> TestSocket<PipeTx, Rx> {
+    fn send(&self, data: impl AsRef<[u8]>) -> Result<(), mpsc::error::SendError<Vec<u8>>> {
+        self.tx.0.send(data.as_ref().into())
+    }
+}
+
 async fn run_single_request_test(
     app: &Router<impl PathRouter>,
     request: hyper::Request<http_body_util::Full<hyper::body::Bytes>>,
 ) -> (hyper::http::response::Parts, hyper::body::Bytes) {
-    let (request_tx, request_rx) = pipe();
-    let (response_tx, response_rx) = pipe();
-
-    let config = Config::new(Timeouts {
-        start_read_request: None,
-        persistent_start_read_request: None,
-        read_request: None,
-        write: None,
-    });
+    let (client_socket, server_socket) = TestSocket::pipe_pair();
 
     let mut http_buffer = [0; 2048];
 
-    let server = std::pin::pin!(
-        Server::new(app, &config, &mut http_buffer).serve(TestSocket {
-            rx: request_rx,
-            tx: response_tx,
-        })
-    );
+    let server =
+        std::pin::pin!(Server::new_tokio(app, &TEST_CONFIG, &mut http_buffer).serve(server_socket));
 
-    let (mut request_sender, connection) = hyper::client::conn::http1::handshake(TestSocket {
-        tx: request_tx,
-        rx: response_rx,
-    })
-    .now_or_never()
-    .expect("handshake stalled")
-    .unwrap();
+    let (mut request_sender, connection) = hyper::client::conn::http1::handshake(client_socket)
+        .now_or_never()
+        .expect("handshake stalled")
+        .unwrap();
 
     tokio::spawn(connection);
 
@@ -484,35 +527,19 @@ async fn file_etag_based_cache() {
 #[tokio::test]
 /// Test that only a single request is handled if configured to close the connection
 async fn only_one_request() {
-    let (request_tx, request_rx) = pipe();
-    let (response_tx, response_rx) = pipe();
+    let (client_socket, server_socket) = TestSocket::pipe_pair();
 
     let app = Router::new().route("/", routing::get(|| async move { "Hello World" }));
 
-    let config = Config::new(Timeouts {
-        start_read_request: None,
-        persistent_start_read_request: None,
-        read_request: None,
-        write: None,
-    });
-
     let mut http_buffer = [0; 2048];
 
-    let server = Server::new(&app, &config, &mut http_buffer).serve(TestSocket {
-        rx: request_rx,
-        tx: response_tx,
-    });
+    let server = Server::new_tokio(&app, &TEST_CONFIG, &mut http_buffer).serve(server_socket);
 
-    request_tx
-        .0
-        .send(
-            "GET / HTTP/1.1\r\n\r\nGET / HTTP/1.1\r\n\r\n"
-                .as_bytes()
-                .into(),
-        )
+    client_socket
+        .send("GET / HTTP/1.1\r\n\r\nGET / HTTP/1.1\r\n\r\n")
         .unwrap();
 
-    drop(request_tx);
+    drop(client_socket.tx);
 
     assert_eq!(
         server
@@ -523,7 +550,7 @@ async fn only_one_request() {
         1
     );
 
-    drop(response_rx);
+    drop(client_socket.rx);
 }
 
 #[tokio::test]
@@ -531,17 +558,11 @@ async fn only_one_request() {
 async fn keep_alive() {
     let app = Router::new().route("/", routing::get(|| async move { "Hello World" }));
 
-    let config = Config::new(Timeouts {
-        start_read_request: None,
-        persistent_start_read_request: None,
-        read_request: None,
-        write: None,
-    })
-    .keep_connection_alive();
+    let config = TEST_CONFIG.keep_connection_alive();
 
     let mut http_buffer = [0; 2048];
 
-    let server = Server::new(&app, &config, &mut http_buffer).serve(TestSocket {
+    let server = Server::new_tokio(&app, &config, &mut http_buffer).serve(TestSocket {
         rx: "GET / HTTP/1.1\r\n\r\nGET / HTTP/1.1\r\n\r\n".as_bytes(),
         tx: std::vec::Vec::new(),
     });
@@ -580,7 +601,7 @@ async fn upgrade_with_request_body() {
         type Error = Infallible;
     }
 
-    impl io::Read for VecSequence {
+    impl Read for VecSequence {
         async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
             if self.current.is_empty() {
                 self.current = match self.rest_reversed.pop() {
@@ -598,20 +619,26 @@ async fn upgrade_with_request_body() {
     }
 
     impl response::Body for UpgradeCheck {
-        async fn write_response_body<R: io::Read, W: io::Write<Error = R::Error>>(
+        async fn write_response_body<R: Read, W: Write<Error = R::Error>>(
             self,
             connection: response::Connection<'_, R>,
             _writer: W,
         ) -> Result<(), W::Error> {
+            let mut connection = connection.upgrade(self.upgrade_token);
+
             let mut actual = [0; EXPECTED_UPGRADE.len()];
+            let mut read_position = 0;
 
-            connection
-                .upgrade(self.upgrade_token)
-                .read_exact(&mut actual)
-                .await
-                .unwrap();
-
-            assert_eq!(EXPECTED_UPGRADE, actual);
+            while read_position < actual.len() {
+                match connection.read(&mut actual[read_position..]).await {
+                    Ok(0) => panic!(
+                        "Unexpected EOF after reading {:?}",
+                        core::str::from_utf8(&actual[..read_position])
+                    ),
+                    Ok(n) => read_position += n,
+                    Err(error) => panic!("Failed to read: {error:?}"),
+                }
+            }
 
             Ok(())
         }
@@ -630,7 +657,7 @@ async fn upgrade_with_request_body() {
 
     impl routing::RequestHandlerService<()> for BodyCheck {
         async fn call_request_handler_service<
-            R: embedded_io_async::Read,
+            R: Read,
             W: response::ResponseWriter<Error = R::Error>,
         >(
             &self,
@@ -687,20 +714,17 @@ async fn upgrade_with_request_body() {
 
             response::Response {
                 status_code: response::StatusCode::OK,
-                headers: [("Content-Type", "text/plain"), ("Content-Length", "0")],
+                headers: [
+                    ("Content-Type", "text/plain"),
+                    ("Content-Length", "0"),
+                    ("Connection", "Upgrade"),
+                ],
                 body: UpgradeCheck { upgrade_token },
             }
             .write_to(connection, response_writer)
             .await
         }
     }
-
-    let config = Config::new(Timeouts {
-        start_read_request: None,
-        persistent_start_read_request: None,
-        read_request: None,
-        write: None,
-    });
 
     let mut http_buffer = [0; 2048];
 
@@ -712,21 +736,24 @@ async fn upgrade_with_request_body() {
             {
                 let app = Router::new().route("/", routing::post_service(BodyCheck { read_body }));
 
-                let server = Server::new(&app, &config, &mut http_buffer).serve(TestSocket {
-                    rx: VecSequence {
-                        current: VecRead(Vec::new()),
-                        rest_reversed: [
-                            &REQUEST_PAYLOAD[b..],
-                            &REQUEST_PAYLOAD[a..b],
-                            &REQUEST_PAYLOAD[..a],
-                        ]
-                        .into_iter()
-                        .filter(|s| !s.is_empty())
-                        .map(Vec::from)
-                        .collect(),
-                    },
-                    tx: Vec::new(),
-                });
+                let mut response_bytes = Vec::new();
+
+                let server =
+                    Server::new_tokio(&app, &TEST_CONFIG, &mut http_buffer).serve(TestSocket {
+                        rx: VecSequence {
+                            current: VecRead(Vec::new()),
+                            rest_reversed: [
+                                &REQUEST_PAYLOAD[b..],
+                                &REQUEST_PAYLOAD[a..b],
+                                &REQUEST_PAYLOAD[..a],
+                            ]
+                            .into_iter()
+                            .filter(|s| !s.is_empty())
+                            .map(Vec::from)
+                            .collect(),
+                        },
+                        tx: &mut response_bytes,
+                    });
 
                 assert_eq!(
                     server
@@ -736,6 +763,32 @@ async fn upgrade_with_request_body() {
                         .handled_requests_count,
                     1
                 );
+
+                std::println!("{}", core::str::from_utf8(&response_bytes).unwrap());
+
+                let mut headers = [httparse::EMPTY_HEADER; 4];
+
+                let mut response = httparse::Response::new(&mut headers);
+
+                let read_position = response.parse(&response_bytes).unwrap().unwrap();
+
+                let upgrade_header = core::str::from_utf8(
+                    response
+                        .headers
+                        .iter()
+                        .find_map(|header| {
+                            (header.name.eq_ignore_ascii_case("connection")).then_some(header.value)
+                        })
+                        .unwrap(),
+                )
+                .unwrap();
+
+                assert!(
+                    upgrade_header.eq_ignore_ascii_case("upgrade"),
+                    r#"Invalid "connection" header for upgrade response: {upgrade_header}"#
+                );
+
+                assert_eq!(read_position, response_bytes.len());
             }
         }
     }
@@ -743,8 +796,6 @@ async fn upgrade_with_request_body() {
 
 #[tokio::test]
 async fn huge_request() {
-    let request_body = ('a'..='z').cycle().take(10000).collect::<String>();
-
     struct ReadBody {
         expected_body: Option<String>,
     }
@@ -782,6 +833,8 @@ async fn huge_request() {
                 .await
         }
     }
+
+    let request_body = ('a'..='z').cycle().take(10000).collect::<String>();
 
     for read_length in [None, Some(26), Some(request_body.len())] {
         let expected_body = read_length.map(|length| request_body[..length].into());
@@ -868,4 +921,202 @@ async fn from_request_macros() {
     .await;
 
     assert_eq!(parts.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn not_reading_the_entire_request_body_closes_the_connection() {
+    let (mut client_socket, server_socket) = TestSocket::pipe_pair();
+
+    let app = Router::new().route("/", crate::routing::post(|| async {}));
+    let mut http_buffer = [0; 1024];
+
+    let mut server_task =
+        std::pin::pin!(
+            crate::Server::new_tokio(&app, &TEST_CONFIG, &mut http_buffer).serve(server_socket)
+        );
+
+    client_socket
+        .send("POST / HTTP/1.1\r\nContent-Length: 1024\r\n\r\nINCOMPLETE_DATA")
+        .unwrap();
+
+    tokio::time::pause();
+
+    assert!(server_task.as_mut().now_or_never().is_none());
+
+    tokio::time::advance(std::time::Duration::from_secs(
+        TEST_CONFIG.timeouts.read_request.as_secs() + 1,
+    ))
+    .await;
+
+    assert_eq!(
+        server_task
+            .as_mut()
+            .now_or_never()
+            .unwrap()
+            .unwrap()
+            .handled_requests_count,
+        1
+    );
+
+    let response_bytes = client_socket.rx.read_all().now_or_never().unwrap();
+
+    let mut headers = [httparse::EMPTY_HEADER; 4];
+
+    let mut response = httparse::Response::new(&mut headers);
+
+    response.parse(&response_bytes).unwrap().unwrap();
+
+    assert_eq!(response.code, Some(200));
+}
+
+#[tokio::test]
+async fn rudy_protection() {
+    let (mut client_socket, server_socket) = TestSocket::pipe_pair();
+
+    let app = Router::new().route(
+        "/",
+        crate::routing::post(|_body: Vec<u8>| async move {
+            fn fail() {
+                panic!("Request Handler mustn't be called");
+            }
+
+            fail();
+        }),
+    );
+    let mut timer = crate::time::TokioTimer;
+    let mut http_buffer = [0; 1024];
+
+    let mut server_task = std::pin::pin!(crate::serve_and_shutdown(
+        &app,
+        &mut timer,
+        &TEST_CONFIG,
+        &mut http_buffer,
+        server_socket,
+        core::future::pending::<((), crate::time::Duration)>(),
+    ));
+
+    client_socket
+        .send("POST / HTTP/1.1\r\nContent-Length: 1024\r\n\r\nINCOMPLETE_DATA")
+        .unwrap();
+
+    tokio::time::pause();
+
+    assert!(server_task.as_mut().now_or_never().is_none());
+
+    tokio::time::advance(std::time::Duration::from_secs(1000)).await;
+
+    assert_eq!(
+        server_task
+            .as_mut()
+            .now_or_never()
+            .unwrap()
+            .unwrap()
+            .handled_requests_count,
+        1
+    );
+
+    let response_bytes = client_socket.rx.read_all().now_or_never().unwrap();
+
+    let mut headers = [httparse::EMPTY_HEADER; 4];
+
+    let mut response = httparse::Response::new(&mut headers);
+
+    let response_body_start = response.parse(&response_bytes).unwrap().unwrap();
+
+    let response_code = response.code.unwrap();
+
+    assert!(
+        response_code >= 400,
+        "Invalid response code: {response_code}"
+    );
+
+    let expected_response_body =
+        crate::request::ReadAllBodyError::IO(crate::io::ErrorKind::TimedOut).to_string();
+
+    assert_eq!(
+        response_bytes[response_body_start..].trim_ascii(),
+        expected_response_body.as_bytes()
+    );
+}
+
+#[tokio::test]
+async fn ignoring_rudy_protection() {
+    struct IgnoringRudyProtection;
+
+    impl crate::routing::RequestHandlerService for IgnoringRudyProtection {
+        async fn call_request_handler_service<
+            R: Read,
+            W: response::ResponseWriter<Error = R::Error>,
+        >(
+            &self,
+            (): &(),
+            (): (),
+            mut request: request::Request<'_, R>,
+            response_writer: W,
+        ) -> Result<ResponseSent, W::Error> {
+            use crate::response::IntoResponse;
+
+            let mut request_reader = request
+                .body_connection
+                .body()
+                .reader()
+                .with_different_timeout_signal(std::future::pending::<()>());
+
+            while request_reader.read(&mut [0; 1024]).await.unwrap() > 0 {}
+
+            ().write_to(request.body_connection.finalize().await?, response_writer)
+                .await
+        }
+    }
+
+    let (mut client_socket, server_socket) = TestSocket::pipe_pair();
+
+    let app = Router::new().route("/", crate::routing::post_service(IgnoringRudyProtection));
+    let mut timer = crate::time::TokioTimer;
+    let mut http_buffer = [0; 1024];
+
+    let mut server_task = std::pin::pin!(crate::serve_and_shutdown(
+        &app,
+        &mut timer,
+        &TEST_CONFIG,
+        &mut http_buffer,
+        server_socket,
+        core::future::pending::<((), crate::time::Duration)>(),
+    ));
+
+    client_socket
+        .send("POST / HTTP/1.1\r\nContent-Length: 1024\r\n\r\nINCOMPLETE_DATA")
+        .unwrap();
+
+    tokio::time::pause();
+
+    assert!(server_task.as_mut().now_or_never().is_none());
+
+    tokio::time::advance(std::time::Duration::from_secs(1000)).await;
+
+    assert!(server_task.as_mut().now_or_never().is_none());
+
+    client_socket.send([0; 1024]).unwrap();
+
+    drop(client_socket.tx);
+
+    assert_eq!(
+        server_task
+            .as_mut()
+            .now_or_never()
+            .unwrap()
+            .unwrap()
+            .handled_requests_count,
+        1
+    );
+
+    let response_bytes = client_socket.rx.read_all().now_or_never().unwrap();
+
+    let mut headers = [httparse::EMPTY_HEADER; 4];
+
+    let mut response = httparse::Response::new(&mut headers);
+
+    response.parse(&response_bytes).unwrap().unwrap();
+
+    assert_eq!(response.code, Some(200));
 }

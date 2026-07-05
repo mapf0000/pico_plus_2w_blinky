@@ -86,7 +86,7 @@ impl super::HeadersIter for ETag {
     }
 }
 
-/// [RequestHandlerService] that serves a single file.
+/// [`RequestHandlerService`] that serves a single file.
 #[derive(Debug, Clone)]
 pub struct File {
     content_type: &'static str,
@@ -148,6 +148,22 @@ impl<State, PathParameters> crate::routing::RequestHandlerService<State, PathPar
         request: crate::request::Request<'_, R>,
         response_writer: W,
     ) -> Result<ResponseSent, W::Error> {
+        struct FileContent<'a>(&'a File);
+
+        impl super::Content for FileContent<'_> {
+            fn content_type(&self) -> &'static str {
+                self.0.content_type
+            }
+
+            fn content_length(&self) -> usize {
+                self.0.body.len()
+            }
+
+            async fn write_content<W: Write>(self, mut writer: W) -> Result<(), W::Error> {
+                writer.write_all(self.0.body).await
+            }
+        }
+
         if let Some(if_none_match) = request.parts.headers().get("If-None-Match") {
             if if_none_match
                 .split(b',')
@@ -166,22 +182,6 @@ impl<State, PathParameters> crate::routing::RequestHandlerService<State, PathPar
             }
         }
 
-        struct FileContent<'a>(&'a File);
-
-        impl super::Content for FileContent<'_> {
-            fn content_type(&self) -> &'static str {
-                self.0.content_type
-            }
-
-            fn content_length(&self) -> usize {
-                self.0.body.len()
-            }
-
-            async fn write_content<W: Write>(self, mut writer: W) -> Result<(), W::Error> {
-                writer.write_all(self.0.body).await
-            }
-        }
-
         super::Response::ok(FileContent(self))
             .with_headers(self.headers)
             .with_headers(self.etag.clone())
@@ -190,7 +190,7 @@ impl<State, PathParameters> crate::routing::RequestHandlerService<State, PathPar
     }
 }
 
-/// [PathRouter] that serves a single file based on the request path.
+/// [`PathRouter`] that serves a single file based on the request path.
 #[derive(Debug, Default)]
 pub struct Directory {
     /// The files in the directory.
@@ -207,30 +207,28 @@ impl Directory {
     };
 
     fn matching_file(&self, path: crate::request::Path) -> Option<&File> {
-        for (name, file) in self.files.iter() {
+        let found_file = self.files.iter().find_map(|(name, file)| {
             if let Some(crate::request::Path(crate::url_encoded::UrlEncodedString(""))) =
                 path.strip_slash_and_prefix(name)
             {
-                return Some(file);
+                Some(file)
             } else {
-                continue;
+                None
             }
-        }
+        });
 
-        for (name, sub_directory) in self.sub_directories.iter() {
-            if let Some(path) = path.strip_slash_and_prefix(name) {
-                return sub_directory.matching_file(path);
-            } else {
-                continue;
-            }
-        }
-
-        None
+        found_file.or_else(|| {
+            self.sub_directories
+                .iter()
+                .find_map(|(name, sub_directory)| {
+                    sub_directory.matching_file(path.strip_slash_and_prefix(name)?)
+                })
+        })
     }
 }
 
 impl<State, CurrentPathParameters> PathRouterService<State, CurrentPathParameters> for Directory {
-    async fn call_request_handler_service<R: Read, W: super::ResponseWriter<Error = R::Error>>(
+    async fn call_path_router_service<R: Read, W: super::ResponseWriter<Error = R::Error>>(
         &self,
         state: &State,
         current_path_parameters: CurrentPathParameters,

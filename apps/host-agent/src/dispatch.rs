@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::file_transfer::{self, TransferFeedback};
+use crate::filesystem;
 use crate::tlv::{self, Frame};
 use crate::transport::Event;
 use anyhow::{Result, bail};
@@ -27,6 +28,7 @@ const TAG_MIC_PCM_DATA: u8 = 10;
 const TAG_DB_CREDENTIALS_REQUEST: u8 = 11;
 const TAG_DB_CREDENTIALS_RESPONSE: u8 = 12;
 const TAG_FILE_START_REQUEST: u8 = 27;
+const TAG_FILE_SET_DEFAULT_PATH: u8 = 28;
 const HANDSHAKE_PAYLOAD: &[u8] = b"handshake";
 const HANDSHAKE_OK_MSG: &str = "handshake-ok";
 const PROBE_OK_MSG: &str = "probe-ok";
@@ -46,9 +48,10 @@ pub async fn run(
     let mut outbound = outbound;
     let mut debug_sink = DebugSink::new(config.debug_log.as_deref())?;
     let mut handshake_ok = false;
-    let default_transfer_path = config.send_files.first().cloned();
+    let mut default_transfer_path = config.send_files.first().cloned();
     let (transfer_feedback_tx, transfer_feedback_rx) = mpsc::channel::<TransferFeedback>(128);
     let (transfer_request_tx, transfer_request_rx) = mpsc::channel::<PathBuf>(32);
+    let filesystem_cancellations = filesystem::CancellationRegistry::default();
     spawn_transfer_worker(outbound.clone(), transfer_feedback_rx, transfer_request_rx);
 
     for path in config.send_files.clone() {
@@ -100,7 +103,8 @@ pub async fn run(
                             &mut handshake_ok,
                             &transfer_feedback_tx,
                             &transfer_request_tx,
-                            default_transfer_path.as_ref(),
+                            &mut default_transfer_path,
+                            &filesystem_cancellations,
                         )
                         .await?;
                     }
@@ -135,7 +139,8 @@ async fn handle_frame(
     handshake_ok: &mut bool,
     transfer_feedback: &mpsc::Sender<TransferFeedback>,
     transfer_request: &mpsc::Sender<PathBuf>,
-    default_transfer_path: Option<&PathBuf>,
+    default_transfer_path: &mut Option<PathBuf>,
+    filesystem_cancellations: &filesystem::CancellationRegistry,
 ) -> Result<()> {
     match frame.tag {
         TAG_REQUEST_AGENT_STATUS => {
@@ -186,7 +191,7 @@ async fn handle_frame(
                     warn!("transfer request worker is not running");
                 }
             } else if frame.payload.is_empty() {
-                if let Some(path) = default_transfer_path {
+                if let Some(path) = default_transfer_path.as_ref() {
                     if transfer_request.send(path.clone()).await.is_ok() {
                         info!(
                             path = %path.display(),
@@ -204,6 +209,34 @@ async fn handle_frame(
                 warn!("received invalid transfer start request payload");
             }
         }
+        TAG_FILE_SET_DEFAULT_PATH => {
+            if let Some(path) = transfer_path_from_payload(&frame.payload) {
+                info!(path = %path.display(), "updated default transfer path");
+                *default_transfer_path = Some(path);
+            } else {
+                warn!("received invalid default transfer path payload");
+            }
+        }
+        filesystem::TAG_FS_LIST_REQUEST => match filesystem::decode_list_request(&frame.payload) {
+            Ok(request) => {
+                filesystem_cancellations.begin(request.request_id);
+                let outbound = outbound.clone();
+                let cancellations = filesystem_cancellations.clone();
+                tokio::spawn(filesystem::send_list_page(outbound, request, cancellations));
+            }
+            Err(err) => {
+                warn!(error = %err, "invalid filesystem list request");
+            }
+        },
+        filesystem::TAG_FS_LIST_CANCEL => match filesystem::decode_cancel_request(&frame.payload) {
+            Ok(request_id) => {
+                let active = filesystem_cancellations.cancel(request_id);
+                debug!(request_id, active, "filesystem list cancellation");
+            }
+            Err(err) => {
+                warn!(error = %err, "invalid filesystem cancel request");
+            }
+        },
         file_transfer::TAG_FILE_ACK
         | file_transfer::TAG_FILE_RESULT
         | file_transfer::TAG_FILE_ABORT => match file_transfer::decode_feedback(&frame) {
@@ -217,8 +250,13 @@ async fn handle_frame(
                 warn!(tag = frame.tag, error = %err, "invalid transfer feedback frame");
             }
         },
-        TAG_WS_CONNECT | TAG_WS_DATA | TAG_WS_DISCONNECT | TAG_WS_DATA_RECV
-        | TAG_EXECUTE_RESULT | TAG_MIC_PCM_DATA => {
+        TAG_WS_CONNECT
+        | TAG_WS_DATA
+        | TAG_WS_DISCONNECT
+        | TAG_WS_DATA_RECV
+        | TAG_EXECUTE_RESULT
+        | TAG_MIC_PCM_DATA
+        | filesystem::TAG_FS_LIST_PAGE => {
             debug!(
                 tag = frame.tag,
                 len = frame.payload.len(),

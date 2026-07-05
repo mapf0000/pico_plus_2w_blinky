@@ -6,6 +6,7 @@ use dsl_core::MAX_DSL_LINES;
 mod api;
 pub mod codec;
 pub mod dsl;
+mod filesystem;
 pub mod scripts;
 mod transfer;
 
@@ -22,6 +23,14 @@ struct ConfigState {
     usb_product: String,
 }
 
+#[derive(Clone)]
+struct BrowseRequest {
+    path: String,
+    cursor: u32,
+    append: bool,
+    show_hidden: bool,
+}
+
 #[function_component(App)]
 fn app() -> Html {
     let status: UseStateHandle<Option<StatusState>> = use_state(|| None);
@@ -30,6 +39,8 @@ fn app() -> Html {
     let transfer_store = use_mut_ref(transfer::TransferStore::new);
     let transfers = use_state(Vec::<transfer::TransferView>::new);
     let transfer_path = use_state(String::new);
+    let filesystem_store = use_mut_ref(filesystem::BrowserStore::new);
+    let filesystem_view = use_state(filesystem::BrowserView::default);
     let dsl_text = use_state(|| String::new());
     let selected_os = use_state(|| String::from("mac"));
     let selected_layout = use_state(|| dsl_core::DEFAULT_LAYOUT_ID.to_string());
@@ -67,6 +78,53 @@ fn app() -> Html {
                 toast.set(None);
             })
             .forget();
+        })
+    };
+
+    let on_browse = {
+        let filesystem_store = filesystem_store.clone();
+        let filesystem_view = filesystem_view.clone();
+        let push_log = push_log.clone();
+        Callback::from(move |request: BrowseRequest| {
+            let request_id = api::next_filesystem_request_id();
+            let previous_request_id = {
+                let mut store = filesystem_store.borrow_mut();
+                let previous = store.begin_request(request_id, request.append, request.show_hidden);
+                filesystem_view.set(store.snapshot());
+                previous
+            };
+
+            let filesystem_store = filesystem_store.clone();
+            let filesystem_view = filesystem_view.clone();
+            let push_log = push_log.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Some(previous_request_id) = previous_request_id {
+                    let _ = api::filesystem_cancel(previous_request_id).await;
+                }
+                if let Err(error) = api::filesystem_list(
+                    request_id,
+                    &request.path,
+                    request.cursor,
+                    64,
+                    request.show_hidden,
+                )
+                .await
+                {
+                    let mut store = filesystem_store.borrow_mut();
+                    store.fail_request(request_id, error.clone());
+                    filesystem_view.set(store.snapshot());
+                    push_log.emit(format!("filesystem list error: {error}"));
+                    return;
+                }
+
+                gloo_timers::future::TimeoutFuture::new(15_000).await;
+                let mut store = filesystem_store.borrow_mut();
+                store.fail_request(
+                    request_id,
+                    "filesystem request timed out; ensure the host-agent is running".to_string(),
+                );
+                filesystem_view.set(store.snapshot());
+            });
         })
     };
 
@@ -136,6 +194,8 @@ fn app() -> Html {
         let ws_connected = ws_connected.clone();
         let transfer_store = transfer_store.clone();
         let transfers_state = transfers.clone();
+        let filesystem_store = filesystem_store.clone();
+        let filesystem_view = filesystem_view.clone();
         use_effect_with((), move |_| {
             api::init_ws(
                 {
@@ -174,7 +234,38 @@ fn app() -> Html {
                         transfers_state.set(store.snapshots());
                     }
                 },
+                {
+                    let push_log = push_log.clone();
+                    let filesystem_store = filesystem_store.clone();
+                    let filesystem_view = filesystem_view.clone();
+                    move |binary| match filesystem::decode_list_page(&binary) {
+                        Ok(page) => {
+                            let mut store = filesystem_store.borrow_mut();
+                            if store.apply_page(page) {
+                                filesystem_view.set(store.snapshot());
+                            }
+                        }
+                        Err(error) => {
+                            push_log.emit(format!("filesystem page error: {error}"));
+                        }
+                    }
+                },
             );
+            || ()
+        });
+    }
+
+    {
+        let on_browse = on_browse.clone();
+        use_effect_with(*ws_connected, move |connected| {
+            if *connected {
+                on_browse.emit(BrowseRequest {
+                    path: String::new(),
+                    cursor: 0,
+                    append: false,
+                    show_hidden: false,
+                });
+            }
             || ()
         });
     }
@@ -366,13 +457,12 @@ fn app() -> Html {
         })
     };
 
-    let on_start_transfer = {
-        let transfer_path = transfer_path.clone();
+    let queue_transfer_path = {
         let set_busy = set_busy.clone();
         let push_log = push_log.clone();
         let toast_cb = show_toast.clone();
-        Callback::from(move |_| {
-            let path = (*transfer_path).trim().to_string();
+        Callback::from(move |path: String| {
+            let path = path.trim().to_string();
             if path.is_empty() {
                 push_log.emit("transfer path is empty".into());
                 return;
@@ -390,6 +480,43 @@ fn app() -> Html {
                     Err(err) => {
                         push_log.emit(format!("transfer start error: {err}"));
                         show_toast.emit((format!("Transfer start failed: {err}"), false));
+                    }
+                }
+                set_busy.emit(false);
+            });
+        })
+    };
+
+    let on_start_transfer = {
+        let transfer_path = transfer_path.clone();
+        let queue_transfer_path = queue_transfer_path.clone();
+        Callback::from(move |_| queue_transfer_path.emit((*transfer_path).clone()))
+    };
+
+    let on_set_transfer_default = {
+        let transfer_path = transfer_path.clone();
+        let set_busy = set_busy.clone();
+        let push_log = push_log.clone();
+        let toast_cb = show_toast.clone();
+        Callback::from(move |_| {
+            let path = (*transfer_path).trim().to_string();
+            if path.is_empty() {
+                push_log.emit("transfer path is empty".into());
+                return;
+            }
+            let set_busy = set_busy.clone();
+            let push_log = push_log.clone();
+            let show_toast = toast_cb.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                set_busy.emit(true);
+                match api::transfer_set_default(&path).await {
+                    Ok(()) => {
+                        push_log.emit(format!("default transfer path set: {}", path));
+                        show_toast.emit(("Transfer default updated".into(), true));
+                    }
+                    Err(err) => {
+                        push_log.emit(format!("transfer default error: {err}"));
+                        show_toast.emit((format!("Set default failed: {err}"), false));
                     }
                 }
                 set_busy.emit(false);
@@ -462,13 +589,23 @@ fn app() -> Html {
                 <DownloadManagerCard
                     transfers={(*transfers).clone()}
                     on_download={on_download_transfer.clone()} />
+                <FileBrowserCard
+                    view={(*filesystem_view).clone()}
+                    connected={*ws_connected}
+                    on_browse={on_browse.clone()}
+                    on_select={{
+                        let transfer_path = transfer_path.clone();
+                        Callback::from(move |path: String| transfer_path.set(path))
+                    }}
+                    on_transfer={queue_transfer_path.clone()} />
                 <TransferStartCard
                     path={(*transfer_path).clone()}
                     on_change={
                         let transfer_path = transfer_path.clone();
                         Callback::from(move |value: String| transfer_path.set(value))
                     }
-                    on_start={on_start_transfer.clone()} />
+                    on_start={on_start_transfer.clone()}
+                    on_set_default={on_set_transfer_default.clone()} />
                 <LogCard
                     lines={(*log_lines).clone()}
                     on_clear={
@@ -746,10 +883,234 @@ fn scripting_card(props: &ScriptProps) -> Html {
 }
 
 #[derive(Properties, PartialEq, Clone)]
+struct FileBrowserProps {
+    pub view: filesystem::BrowserView,
+    pub connected: bool,
+    pub on_browse: Callback<BrowseRequest>,
+    pub on_select: Callback<String>,
+    pub on_transfer: Callback<String>,
+}
+
+#[function_component(FileBrowserCard)]
+fn file_browser_card(props: &FileBrowserProps) -> Html {
+    let browse_home = {
+        let on_browse = props.on_browse.clone();
+        let show_hidden = props.view.show_hidden;
+        Callback::from(move |_| {
+            on_browse.emit(BrowseRequest {
+                path: String::new(),
+                cursor: 0,
+                append: false,
+                show_hidden,
+            })
+        })
+    };
+    let browse_root = {
+        let on_browse = props.on_browse.clone();
+        let show_hidden = props.view.show_hidden;
+        Callback::from(move |_| {
+            on_browse.emit(BrowseRequest {
+                path: "/".to_string(),
+                cursor: 0,
+                append: false,
+                show_hidden,
+            })
+        })
+    };
+    let browse_parent = {
+        let on_browse = props.on_browse.clone();
+        let show_hidden = props.view.show_hidden;
+        let parent = filesystem::parent_path(&props.view.directory);
+        Callback::from(move |_| {
+            on_browse.emit(BrowseRequest {
+                path: parent.clone(),
+                cursor: 0,
+                append: false,
+                show_hidden,
+            })
+        })
+    };
+    let refresh = {
+        let on_browse = props.on_browse.clone();
+        let show_hidden = props.view.show_hidden;
+        let path = props.view.directory.clone();
+        Callback::from(move |_| {
+            on_browse.emit(BrowseRequest {
+                path: path.clone(),
+                cursor: 0,
+                append: false,
+                show_hidden,
+            })
+        })
+    };
+    let toggle_hidden = {
+        let on_browse = props.on_browse.clone();
+        let path = props.view.directory.clone();
+        Callback::from(move |event: Event| {
+            let show_hidden = event
+                .target_unchecked_into::<web_sys::HtmlInputElement>()
+                .checked();
+            on_browse.emit(BrowseRequest {
+                path: path.clone(),
+                cursor: 0,
+                append: false,
+                show_hidden,
+            });
+        })
+    };
+    let load_more = {
+        let on_browse = props.on_browse.clone();
+        let path = props.view.directory.clone();
+        let cursor = props.view.next_cursor;
+        let show_hidden = props.view.show_hidden;
+        Callback::from(move |_| {
+            on_browse.emit(BrowseRequest {
+                path: path.clone(),
+                cursor,
+                append: true,
+                show_hidden,
+            })
+        })
+    };
+
+    html! {
+        <div class="card full file-browser">
+          <div class="row between items-center">
+            <h2 class="m-0">{"Source Files"}</h2>
+            <span class="hint">
+              { if props.connected { "Host filesystem via USB agent" } else { "WebSocket disconnected" } }
+            </span>
+          </div>
+
+          <div class="row gap-2 my-1">
+            <button onclick={browse_home} disabled={!props.connected || props.view.loading}>{"Home"}</button>
+            <button onclick={browse_root} disabled={!props.connected || props.view.loading}>{"/"}</button>
+            <button
+                onclick={browse_parent}
+                disabled={!props.connected || props.view.loading || props.view.directory.is_empty() || props.view.directory == "/"}
+            >
+              {"Up"}
+            </button>
+            <button onclick={refresh} disabled={!props.connected || props.view.loading}>{"Refresh"}</button>
+            <label class="inline fs-hidden">
+              <input type="checkbox" checked={props.view.show_hidden} onchange={toggle_hidden} />
+              {"Show hidden"}
+            </label>
+          </div>
+
+          <nav class="fs-breadcrumbs" aria-label="Current directory">
+            if props.view.directory.is_empty() {
+              <span class="hint">{"Waiting for host-agent…"}</span>
+            } else {
+              { for filesystem::breadcrumbs(&props.view.directory).into_iter().map(|(label, path)| {
+                  let on_browse = props.on_browse.clone();
+                  let show_hidden = props.view.show_hidden;
+                  let onclick = Callback::from(move |_| {
+                      on_browse.emit(BrowseRequest {
+                          path: path.clone(),
+                          cursor: 0,
+                          append: false,
+                          show_hidden,
+                      });
+                  });
+                  html! {
+                    <button class="fs-crumb" {onclick} disabled={props.view.loading}>{label}</button>
+                  }
+              }) }
+            }
+          </nav>
+
+          if let Some(error) = &props.view.error {
+            <div class="fs-error">{error}</div>
+          }
+
+          <div class="fs-table" role="table" aria-label="Source directory">
+            <div class="fs-row fs-header" role="row">
+              <span>{"Name"}</span>
+              <span>{"Size"}</span>
+              <span>{"Modified"}</span>
+              <span>{"Actions"}</span>
+            </div>
+            if props.view.entries.is_empty() && !props.view.loading && props.view.error.is_none() {
+              <div class="hint">{"This directory is empty."}</div>
+            }
+            { for props.view.entries.iter().map(|entry| {
+                let full_path = filesystem::join_path(&props.view.directory, &entry.name);
+                let icon = match entry.kind {
+                    filesystem::EntryKind::Directory => "📁",
+                    filesystem::EntryKind::SymlinkDirectory => "🔗📁",
+                    filesystem::EntryKind::File => "📄",
+                    filesystem::EntryKind::SymlinkFile => "🔗📄",
+                    filesystem::EntryKind::Other => "•",
+                };
+                let name_action = if entry.kind.is_directory() {
+                    let on_browse = props.on_browse.clone();
+                    let path = full_path.clone();
+                    let show_hidden = props.view.show_hidden;
+                    Callback::from(move |_| {
+                        on_browse.emit(BrowseRequest {
+                            path: path.clone(),
+                            cursor: 0,
+                            append: false,
+                            show_hidden,
+                        });
+                    })
+                } else {
+                    let on_select = props.on_select.clone();
+                    let path = full_path.clone();
+                    Callback::from(move |_| on_select.emit(path.clone()))
+                };
+                let select = {
+                    let on_select = props.on_select.clone();
+                    let path = full_path.clone();
+                    Callback::from(move |_| on_select.emit(path.clone()))
+                };
+                let transfer = {
+                    let on_transfer = props.on_transfer.clone();
+                    let path = full_path.clone();
+                    Callback::from(move |_| on_transfer.emit(path.clone()))
+                };
+                html! {
+                  <div class="fs-row" role="row">
+                    <button
+                        class="fs-name"
+                        onclick={name_action}
+                        disabled={!entry.readable || (!entry.kind.is_directory() && !entry.kind.is_file())}
+                        title={full_path.clone()}
+                    >
+                      <span>{icon}</span>
+                      <span>{&entry.name}</span>
+                    </button>
+                    <span class="fs-meta">
+                      { if entry.kind.is_file() { format_bytes(entry.size) } else { "—".to_string() } }
+                    </span>
+                    <span class="fs-meta">{format_modified(entry.modified_secs)}</span>
+                    <span class="row gap-1">
+                      if entry.kind.is_file() {
+                        <button class="btn-secondary" onclick={select} disabled={!entry.readable}>{"Select"}</button>
+                        <button class="btn-accent" onclick={transfer} disabled={!entry.readable}>{"Transfer"}</button>
+                      }
+                    </span>
+                  </div>
+                }
+            }) }
+          </div>
+
+          if props.view.loading {
+            <div class="hint">{"Loading directory…"}</div>
+          } else if props.view.has_more {
+            <button class="btn-secondary" onclick={load_more}>{"Load more"}</button>
+          }
+        </div>
+    }
+}
+
+#[derive(Properties, PartialEq, Clone)]
 struct TransferStartProps {
     pub path: String,
     pub on_change: Callback<String>,
     pub on_start: Callback<()>,
+    pub on_set_default: Callback<()>,
 }
 
 #[function_component(TransferStartCard)]
@@ -769,6 +1130,11 @@ fn transfer_start_card(props: &TransferStartProps) -> Html {
         Callback::from(move |_| cb.emit(()))
     };
 
+    let on_set_default = {
+        let cb = props.on_set_default.clone();
+        Callback::from(move |_| cb.emit(()))
+    };
+
     html! {
         <div class="card full">
           <h2>{"Start Transfer"}</h2>
@@ -781,8 +1147,9 @@ fn transfer_start_card(props: &TransferStartProps) -> Html {
                 oninput={on_input}
             />
             <button class="btn-accent" onclick={on_start}>{"Queue Transfer"}</button>
+            <button onclick={on_set_default}>{"Set Default"}</button>
           </div>
-          <div class="hint">{"Path is resolved on the host-agent machine."}</div>
+          <div class="hint">{"Path is resolved on the host-agent machine. Set Default updates the running host-agent without relaunching it."}</div>
         </div>
     }
 }
@@ -878,6 +1245,24 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+fn format_modified(modified_secs: Option<u64>) -> String {
+    let Some(modified_secs) = modified_secs else {
+        return "—".to_string();
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let date = js_sys::Date::new(&JsValue::from_f64(modified_secs as f64 * 1000.0));
+        return date
+            .to_locale_string("en-GB", &JsValue::UNDEFINED)
+            .as_string()
+            .unwrap_or_else(|| modified_secs.to_string());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    modified_secs.to_string()
 }
 
 fn format_rate(rate_bps: f64) -> String {

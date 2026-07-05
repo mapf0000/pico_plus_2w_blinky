@@ -209,6 +209,92 @@ h1 {
   background: var(--surface-2);
 }
 
+.file-browser {
+  min-height: 260px;
+}
+
+.fs-hidden {
+  color: var(--muted);
+  margin-left: auto;
+}
+
+.fs-breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 6px 0 10px;
+}
+
+.fs-crumb {
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
+.fs-crumb + .fs-crumb::before {
+  content: "›";
+  color: var(--muted);
+  margin-right: 8px;
+}
+
+.fs-error {
+  color: #fecaca;
+  background: #3e1216;
+  border: 1px solid color-mix(in srgb, var(--bad) 55%, var(--border));
+  border-radius: var(--radius-ctl);
+  padding: 8px 10px;
+  margin-bottom: var(--space-2);
+}
+
+.fs-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-x: auto;
+  margin-bottom: var(--space-2);
+}
+
+.fs-row {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 100px 170px minmax(170px, auto);
+  gap: 10px;
+  align-items: center;
+  min-width: 720px;
+  padding: 6px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+
+.fs-header {
+  color: var(--muted);
+  font-size: .8rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.fs-name {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 7px;
+  overflow: hidden;
+  text-align: left;
+}
+
+.fs-name span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fs-meta {
+  color: var(--muted);
+  font-size: .85rem;
+  white-space: nowrap;
+}
+
 h2 {
   font-size: 1.1rem;
   margin: 0 0 var(--space-3);

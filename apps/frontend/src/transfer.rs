@@ -12,7 +12,7 @@ const CHUNK_HEADER_LEN: usize = 8 + 4 + 8 + 2 + 4;
 const MAX_BLOB_FALLBACK_BYTES: f64 = 128.0 * 1024.0 * 1024.0;
 
 #[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(module = "/src/idb.js")]
+#[wasm_bindgen(raw_module = "/ui/idb.js")]
 extern "C" {
     #[wasm_bindgen(js_name = queueChunkPersist)]
     fn js_queue_chunk_persist(transfer_id: u64, chunk_index: u32, payload: &[u8]);

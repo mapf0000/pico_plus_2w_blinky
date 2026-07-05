@@ -1,24 +1,24 @@
 //! HTTP response types.
 //!
-//! Anything that implements [IntoResponse] can be returned from handlers, such as
+//! Anything that implements [`IntoResponse`] can be returned from handlers, such as
 //!
-//! + [Response]
-//! + [Json]
-//! + [Redirect]
+//! + [`Response`]
+//! + [`Json`]
+//! + [`Redirect`]
 //! + `(("HeaderName", "HeaderValue"), impl Content)`
 //! + `(("HeaderName0", "HeaderValue0"), ("HeaderName1", "HeaderValue1"), impl Content)`
 //! + `([("HeaderName0", "HeaderValue0"), ("HeaderName1", "HeaderValue1")], impl Content)`
-//! + `([StatusCode], impl Content)`
-//! + `([StatusCode], ("HeaderName", "HeaderValue"), impl Content)`
+//! + `(StatusCode, impl Content)`
+//! + `(StatusCode, ("HeaderName", "HeaderValue"), impl Content)`
 //! + Tuples consisting of:
-//!     1. Optionally, a status code. If not provided, a status code of [StatusCode::OK] is used
-//!     2. A number of values which implement [HeadersIter], such as:
+//!     1. Optionally, a status code. If not provided, a status code of [`StatusCode::OK`] is used
+//!     2. A number of values which implement [`HeadersIter`], such as:
 //!         + `(&str, impl Display)`
 //!         + `Option<impl HeadersIter>`
 //!         + `[impl HeadersIter; N]`
-//!     3. A value which implements [Content]
+//!     3. A value which implements [`Content`]
 //!
-//! For a complete list, see [IntoResponse].
+//! For a complete list, see [`IntoResponse`].
 
 use core::fmt;
 
@@ -42,6 +42,9 @@ pub mod json;
 
 #[cfg(feature = "ws")]
 pub mod ws;
+
+pub(crate) mod response_stream;
+pub(crate) use response_stream::ResponseStream;
 
 pub use fs::{Directory, File};
 pub use sse::EventStream;
@@ -74,33 +77,83 @@ impl fmt::Write for MeasureFormatSize<'_> {
     }
 }
 
-pub(crate) struct BufferedReader<'r, R: Read> {
-    pub(crate) reader: R,
-    pub(crate) buffer: &'r mut [u8],
-    pub(crate) read_position: usize,
-    pub(crate) buffer_usage: usize,
+pub(crate) enum AfterBodyReadMode<'r> {
+    ReadFromReader,
+    ReadFromBuffer {
+        remaining: &'r [u8],
+    },
+    SkipRemainingBodyFromReader {
+        scratch_buffer: &'r mut [u8],
+        body_bytes_remaining: usize,
+    },
 }
 
-impl<R: Read> BufferedReader<'_, R> {
-    async fn read_into(&mut self, buffer: &mut [u8]) -> Result<usize, R::Error> {
-        let prefix = &self.buffer[self.read_position..self.buffer_usage];
+pub(crate) struct AfterBodyReader<'r, R: Read> {
+    pub(crate) mode: AfterBodyReadMode<'r>,
+    pub(crate) reader: R,
+}
 
-        if prefix.is_empty() {
-            self.reader.read(buffer).await
-        } else {
-            let read_size = prefix.len().min(buffer.len());
+impl<R: Read> AfterBodyReader<'_, R> {
+    async fn read_after_body(
+        &mut self,
+        buffer: &mut [u8],
+        _upgrade_token: &crate::extract::UpgradeToken,
+    ) -> Result<usize, R::Error> {
+        loop {
+            break match &mut self.mode {
+                AfterBodyReadMode::ReadFromReader => self.reader.read(buffer).await,
+                AfterBodyReadMode::ReadFromBuffer { remaining } => {
+                    if remaining.is_empty() {
+                        self.mode = AfterBodyReadMode::ReadFromReader;
 
-            buffer[..read_size].copy_from_slice(prefix);
-            self.read_position += read_size;
+                        continue;
+                    }
 
-            Ok(read_size)
+                    let read_size = remaining.len().min(buffer.len());
+
+                    buffer[..read_size].copy_from_slice(&remaining[..read_size]);
+
+                    *remaining = &remaining[read_size..];
+
+                    Ok(read_size)
+                }
+                AfterBodyReadMode::SkipRemainingBodyFromReader {
+                    scratch_buffer,
+                    body_bytes_remaining,
+                } => {
+                    if *body_bytes_remaining == 0 {
+                        self.mode = AfterBodyReadMode::ReadFromReader;
+
+                        continue;
+                    }
+
+                    let read_buffer_size = (*body_bytes_remaining).min(scratch_buffer.len());
+
+                    let read_size = self
+                        .reader
+                        .read(&mut scratch_buffer[..read_buffer_size])
+                        .await?;
+
+                    *body_bytes_remaining -= read_size;
+
+                    if read_size == 0 {
+                        // EOF from reader while skipping, transition to reading directly from reader, which will again return EOF.
+                        self.mode = AfterBodyReadMode::ReadFromReader;
+
+                        Ok(0)
+                    } else {
+                        continue;
+                    }
+                }
+            };
         }
     }
 }
 
 /// A connection which has been upgraded, and is thus allowed to read arbitary data from the socket.
 pub struct UpgradedConnection<'r, R: Read> {
-    reader: BufferedReader<'r, R>,
+    upgrade_token: crate::extract::UpgradeToken,
+    reader: AfterBodyReader<'r, R>,
 }
 
 impl<R: Read> crate::io::ErrorType for UpgradedConnection<'_, R> {
@@ -109,26 +162,26 @@ impl<R: Read> crate::io::ErrorType for UpgradedConnection<'_, R> {
 
 impl<R: Read> Read for UpgradedConnection<'_, R> {
     async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error> {
-        self.reader.read_into(buffer).await
+        self.reader
+            .read_after_body(buffer, &self.upgrade_token)
+            .await
     }
 }
 
-/// A handle to the current conneection. Allows a long-lasting response to check if the client has disconnected.
+/// A handle to the current connection. Allows a long-lasting response to check if the client has disconnected.
 pub struct Connection<'r, R: Read> {
-    pub(crate) reader: BufferedReader<'r, R>,
-    pub(crate) has_been_upgraded: &'r mut bool,
+    pub(crate) reader: AfterBodyReader<'r, R>,
+    pub(crate) connection_flags: &'r mut crate::request::ConnectionFlags,
     pub(crate) shutdown_signal: oneshot_broadcast::Listener<'r, ()>,
 }
 
 impl<'r, R: Read> Connection<'r, R> {
     /// Upgrade the connection and get access to the inner reader
-    pub fn upgrade(
-        self,
-        _upgrade_token: crate::extract::UpgradeToken,
-    ) -> UpgradedConnection<'r, R> {
-        *self.has_been_upgraded = true;
+    pub fn upgrade(self, upgrade_token: crate::extract::UpgradeToken) -> UpgradedConnection<'r, R> {
+        self.connection_flags.notify_connection_has_been_upgraded();
 
         UpgradedConnection {
+            upgrade_token,
             reader: self.reader,
         }
     }
@@ -163,17 +216,34 @@ impl<E: crate::io::Error> crate::io::Read for EmptyReader<E> {
     }
 }
 
-impl<'r, E: crate::io::Error> Connection<'r, EmptyReader<E>> {
-    pub(crate) fn empty(has_been_upgraded: &'r mut bool) -> Self {
+pub(crate) struct EmptyParts {
+    connection_flags: crate::request::ConnectionFlags,
+    shutdown_signal: oneshot_broadcast::SignalCore<()>,
+}
+
+impl Default for EmptyParts {
+    fn default() -> Self {
         Self {
-            reader: BufferedReader {
+            connection_flags: crate::request::ConnectionFlags::new(),
+            shutdown_signal: oneshot_broadcast::Signal::core(),
+        }
+    }
+}
+
+impl<'r, E: crate::io::Error> Connection<'r, EmptyReader<E>> {
+    pub(crate) fn empty(
+        EmptyParts {
+            connection_flags,
+            shutdown_signal,
+        }: &'r mut EmptyParts,
+    ) -> Self {
+        Self {
+            reader: AfterBodyReader {
+                mode: AfterBodyReadMode::ReadFromReader,
                 reader: EmptyReader(core::marker::PhantomData),
-                buffer: &mut [],
-                read_position: 0,
-                buffer_usage: 0,
             },
-            has_been_upgraded,
-            shutdown_signal: oneshot_broadcast::Listener::never(),
+            connection_flags,
+            shutdown_signal: shutdown_signal.make_signal().listen(),
         }
     }
 }
@@ -289,12 +359,12 @@ impl Body for NoBody {
     }
 }
 
-/// Indicates that a [Response] has no content.
+/// Indicates that a [`Response`] has no content.
 ///
-/// Tuples where the first element is a [StatusCode], the last element is [NoContent] and the others implement [HeadersIter] implement [IntoResponse].
+/// Tuples where the first element is a [`StatusCode`], the last element is [`NoContent`] and the others implement [`HeadersIter`] implement [`IntoResponse`].
 pub struct NoContent;
 
-/// A [Response] body containing data with a known type and length.
+/// A [`Response`] body containing data with a known type and length.
 pub trait Content {
     /// The value of the "Content-Type" header.
     fn content_type(&self) -> &'static str;
@@ -357,7 +427,7 @@ impl<const N: usize> Content for heapless::Vec<u8, N> {
     content_methods!(as_slice);
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(any(test, feature = "alloc"))]
 impl Content for alloc::vec::Vec<u8> {
     content_methods!(as_slice);
 }
@@ -380,7 +450,7 @@ impl<const N: usize> Content for heapless::String<N> {
     content_methods!(as_str);
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(any(test, feature = "alloc"))]
 impl Content for alloc::string::String {
     content_methods!(as_str);
 }
@@ -520,85 +590,11 @@ pub trait ResponseWriter: Sized {
     ) -> Result<ResponseSent, Self::Error>;
 }
 
-pub(crate) struct ResponseStream<W: Write> {
-    writer: W,
-    connection_header: super::KeepAlive,
-}
-
-impl<W: Write> ResponseStream<W> {
-    pub fn new(writer: W, connection_header: super::KeepAlive) -> Self {
-        Self {
-            writer,
-            connection_header,
-        }
-    }
-}
-
-impl<W: Write> ResponseWriter for ResponseStream<W> {
-    type Error = W::Error;
-
-    async fn write_response<R: Read<Error = Self::Error>, H: HeadersIter, B: Body>(
-        mut self,
-        connection: Connection<'_, R>,
-        Response {
-            status_code,
-            headers,
-            body,
-        }: Response<H, B>,
-    ) -> Result<ResponseSent, Self::Error> {
-        struct HeadersWriter<WW: Write> {
-            writer: WW,
-            connection_header: Option<KeepAlive>,
-        }
-
-        impl<WW: Write> ForEachHeader for HeadersWriter<WW> {
-            type Output = ();
-            type Error = WW::Error;
-
-            async fn call<Value: fmt::Display>(
-                &mut self,
-                name: &str,
-                value: Value,
-            ) -> Result<(), Self::Error> {
-                if name.eq_ignore_ascii_case("connection") {
-                    self.connection_header = None;
-                }
-                write!(self.writer, "{name}: {value}\r\n").await
-            }
-
-            async fn finalize(mut self) -> Result<(), Self::Error> {
-                if let Some(connection_header) = self.connection_header {
-                    self.call("Connection", connection_header).await?;
-                }
-
-                Ok(())
-            }
-        }
-
-        use crate::io::WriteExt;
-        write!(self.writer, "HTTP/1.1 {status_code}\r\n").await?;
-
-        headers
-            .for_each_header(HeadersWriter {
-                writer: &mut self.writer,
-                connection_header: Some(self.connection_header),
-            })
-            .await?;
-
-        self.writer.write_all(b"\r\n").await?;
-        self.writer.flush().await?;
-
-        body.write_response_body(connection, &mut self.writer)
-            .await
-            .map(super::ResponseSent)
-    }
-}
-
 /// Trait for generating responses.
 ///
-/// Types that implement IntoResponse can be returned from handlers.
+/// Types that implement `IntoResponse` can be returned from handlers.
 pub trait IntoResponse: Sized {
-    /// Write the generated response into the given [ResponseWriter].
+    /// Write the generated response into the given [`ResponseWriter`].
     async fn write_to<R: Read, W: ResponseWriter<Error = R::Error>>(
         self,
         connection: Connection<'_, R>,
@@ -726,7 +722,7 @@ declare_tuple_into_response!(
     H1 H2 H3 H4 H5 H6 H7 H8 H9 H10 H11 H12 H13 H14 H15 H16;
 );
 
-/// Returns a value in [core::fmt::Debug] form as text.
+/// Returns a value in [`core::fmt::Debug`] form as text.
 pub struct DebugValue<D>(pub D);
 
 impl<D: fmt::Debug> IntoResponse for DebugValue<D> {
@@ -748,7 +744,7 @@ pub struct Redirect {
 }
 
 impl Redirect {
-    /// Create a new [Redirect] that uses a 303 "See Other" status code.
+    /// Create a new [`Redirect`] that uses a 303 "See Other" status code.
     pub fn to(location: &'static str) -> Self {
         Self {
             status_code: StatusCode::SEE_OTHER,
@@ -773,10 +769,10 @@ impl IntoResponse for Redirect {
     }
 }
 
-/// Error Responses consisting of a `text/plain` message and a [StatusCode].
+/// Error Responses consisting of a `text/plain` message and a [`StatusCode`].
 ///
-/// This trait is derivable. See [picoserve_derive::ErrorWithStatusCode].
+/// This trait is derivable. See [`picoserve_derive::ErrorWithStatusCode`].
 pub trait ErrorWithStatusCode: fmt::Display + IntoResponse {
-    /// The [StatusCode] to return for this error.
+    /// The [`StatusCode`] to return for this error.
     fn status_code(&self) -> StatusCode;
 }
