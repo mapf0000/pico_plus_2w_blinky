@@ -1,6 +1,5 @@
 use core::fmt::Write as _;
 
-use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
@@ -10,9 +9,9 @@ use heapless::String;
 
 use crate::usb::ctrl::{CTRL_CHAN, CTRL_READY, CtrlCommand};
 
+use super::DisplayPalette;
 use super::page_common::{TEXT_PAD, update_line};
 use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
-use super::{DisplayConfig, DisplayPalette};
 
 #[derive(Clone, Copy)]
 enum DaemonActionKind {
@@ -176,35 +175,23 @@ impl Page for DaemonPageState {
         args: PageRenderArgs<'_, D>,
         _data: PageRenderData<'_>,
     ) {
-        render(
-            args.disp,
-            args.line_x,
-            args.y_pos,
-            args.clear_w,
-            args.content_width,
-            args.content_height,
-            args.bg_color,
-            args.config,
-            args.title_style,
-            args.body_style,
-            self,
-        );
+        render(args, self);
     }
 }
 
-pub fn render(
-    disp: &mut impl DrawTarget<Color = Rgb565>,
-    line_x: i32,
-    mut y_pos: i32,
-    clear_w: u32,
-    content_width: u32,
-    content_height: u32,
-    bg_color: Rgb565,
-    config: &DisplayConfig,
-    title_style: &MonoTextStyle<Rgb565>,
-    body_style: &MonoTextStyle<Rgb565>,
-    state: &mut DaemonPageState,
-) {
+fn render<D: DrawTarget<Color = Rgb565>>(args: PageRenderArgs<'_, D>, state: &mut DaemonPageState) {
+    let PageRenderArgs {
+        disp,
+        line_x,
+        mut y_pos,
+        clear_w,
+        content_width,
+        content_height,
+        bg_color,
+        config,
+        title_style,
+        body_style,
+    } = args;
     let palette = config.palette;
     let header_height = 18;
     let _ = Rectangle::new(
@@ -242,10 +229,8 @@ pub fn render(
         .build();
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         state.status_bg,
         status_text,
         &mut state.prev_status,
@@ -268,8 +253,7 @@ pub fn render(
     let row_h: i32 = 16;
     let max_rows = (content_height.saturating_sub(y_pos as u32) / row_h as u32) as usize;
     let visible_actions = ACTIONS.len().min(max_rows);
-    for idx in 0..visible_actions {
-        let action = &ACTIONS[idx];
+    for (idx, action) in ACTIONS.iter().take(visible_actions).enumerate() {
         let row_y = y_pos + (idx as i32 * row_h);
         let selected = idx == state.selected;
         let row_bg = if selected { palette.white } else { bg_color };

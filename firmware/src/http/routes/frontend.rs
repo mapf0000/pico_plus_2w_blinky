@@ -44,7 +44,7 @@ pub(crate) async fn route_frontend_wasm() -> impl picoserve::response::IntoRespo
 pub(crate) async fn route_frontend_style() -> impl picoserve::response::IntoResponse {
     log::debug!(
         "http: serve style.css ({} bytes)",
-        frontend_static::STYLE_CSS.as_bytes().len()
+        frontend_static::STYLE_CSS.len()
     );
     Response::ok(BytesWithType {
         ty: "text/css; charset=utf-8",

@@ -10,9 +10,9 @@ use heapless::{String, Vec};
 
 use crate::usb::hid::{HID_CHAN, HidCommand, MAX_BYTECODE, USB_READY};
 
+use super::DisplayPalette;
 use super::page_common::{TEXT_PAD, update_line};
 use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
-use super::{DisplayConfig, DisplayPalette};
 
 const EXEC_TICKS: u8 = 6;
 const GREEN_HOLD_TICKS: u8 = 6;
@@ -158,11 +158,11 @@ impl PayloadsPageState {
     }
 
     pub fn tick(&mut self, palette: &DisplayPalette, idle_bg: Rgb565) -> bool {
-        if let Some(idx) = self.pending_payload {
-            if USB_READY.load(Ordering::SeqCst) {
-                self.pending_payload = None;
-                return self.start_payload(idx, palette, idle_bg);
-            }
+        if let Some(idx) = self.pending_payload
+            && USB_READY.load(Ordering::SeqCst)
+        {
+            self.pending_payload = None;
+            return self.start_payload(idx, palette, idle_bg);
         }
         match self.status_phase {
             StatusPhase::Idle => false,
@@ -231,32 +231,31 @@ impl Page for PayloadsPageState {
         args: PageRenderArgs<'_, D>,
         _data: PageRenderData<'_>,
     ) {
-        render(
-            args.disp,
-            args.line_x,
-            args.y_pos,
-            args.clear_w,
-            args.content_width,
-            args.content_height,
-            args.bg_color,
-            args.config,
-            args.title_style,
-            args.body_style,
-            self,
-        );
+        render(args, self);
     }
+}
+
+struct DetailLayout {
+    line_x: i32,
+    y_pos: i32,
+    clear_w: u32,
+    bg_color: Rgb565,
+    content_height: u32,
 }
 
 fn render_details(
     disp: &mut impl DrawTarget<Color = Rgb565>,
-    line_x: i32,
-    mut y_pos: i32,
-    clear_w: u32,
-    bg_color: Rgb565,
-    content_height: u32,
+    layout: DetailLayout,
     body_style: &MonoTextStyle<Rgb565>,
     state: &mut PayloadsPageState,
 ) {
+    let DetailLayout {
+        line_x,
+        mut y_pos,
+        clear_w,
+        bg_color,
+        content_height,
+    } = layout;
     // Clear detail area first.
     let header_gap = 4u32;
     let detail_height = content_height.saturating_sub((y_pos as u32).saturating_sub(header_gap));
@@ -311,10 +310,8 @@ fn render_details(
     for (idx, line) in lines.iter().enumerate() {
         update_line(
             disp,
-            line_x,
-            y_pos,
-            clear_w,
-            line_h as u32,
+            Point::new(line_x, y_pos),
+            Size::new(clear_w, line_h as u32),
             bg_color,
             line.as_str(),
             &mut state.detail_prev_lines[idx],
@@ -324,19 +321,22 @@ fn render_details(
     }
 }
 
-pub fn render(
-    disp: &mut impl DrawTarget<Color = Rgb565>,
-    line_x: i32,
-    mut y_pos: i32,
-    clear_w: u32,
-    content_width: u32,
-    content_height: u32,
-    bg_color: Rgb565,
-    config: &DisplayConfig,
-    title_style: &MonoTextStyle<Rgb565>,
-    body_style: &MonoTextStyle<Rgb565>,
+fn render<D: DrawTarget<Color = Rgb565>>(
+    args: PageRenderArgs<'_, D>,
     state: &mut PayloadsPageState,
 ) {
+    let PageRenderArgs {
+        disp,
+        line_x,
+        mut y_pos,
+        clear_w,
+        content_width,
+        content_height,
+        bg_color,
+        config,
+        title_style,
+        body_style,
+    } = args;
     let palette = config.palette;
     let header_height = 18;
     let _ = Rectangle::new(
@@ -372,11 +372,13 @@ pub fn render(
     if state.details_open {
         render_details(
             disp,
-            line_x,
-            y_pos,
-            clear_w,
-            bg_color,
-            content_height,
+            DetailLayout {
+                line_x,
+                y_pos,
+                clear_w,
+                bg_color,
+                content_height,
+            },
             body_style,
             state,
         );
@@ -404,10 +406,8 @@ pub fn render(
         .build();
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         state.status_bg,
         status_text,
         &mut state.prev_status,

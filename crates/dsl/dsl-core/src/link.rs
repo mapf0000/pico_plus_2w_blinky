@@ -23,17 +23,9 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct CompileOptions {
     pub preprocess: PreprocessOptions,
-}
-
-impl Default for CompileOptions {
-    fn default() -> Self {
-        Self {
-            preprocess: PreprocessOptions::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -73,8 +65,8 @@ pub fn compile(
 
 /// Compile `entry_dsl`, resolve & inline all `call`s using `provider`,
 /// and return an **owned** program with no `Call` ops.
-pub fn compile_and_link<'a>(
-    entry_dsl: &'a str,
+pub fn compile_and_link(
+    entry_dsl: &str,
     provider: &impl ScriptProvider,
 ) -> Result<ProgramOwned, CompileError> {
     compile(entry_dsl, provider, &CompileOptions::default()).map(|out| out.program)

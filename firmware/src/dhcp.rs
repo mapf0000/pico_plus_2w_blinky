@@ -14,7 +14,7 @@ pub async fn server_task(stack: &'static net::Stack<'static>) {
 
     // Up to 16 leases, up to 2 DNS servers
     let mut dhcp: leasehund::DhcpServer<16, 2> =
-        leasehund::DhcpServer::new_with_dns(server_ip, mask, router, dns, pool_start, pool_end);
+        leasehund::DhcpServer::new(server_ip, mask, router, dns, pool_start, pool_end);
 
     log::info!(
         "dhcp: server started on {} with pool {}-{}",

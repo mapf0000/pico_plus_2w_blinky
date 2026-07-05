@@ -134,12 +134,11 @@ pub async fn select_port(config: &Config) -> Result<String> {
         return Ok(usb_candidates[0].port_name.clone());
     }
 
-    if usb_candidates.len() > 1 {
-        if let Some(selected) = probe_control_port(&usb_candidates, config.probe_timeout_ms).await?
-        {
-            store_cached_port(&selected);
-            return Ok(selected);
-        }
+    if usb_candidates.len() > 1
+        && let Some(selected) = probe_control_port(&usb_candidates, config.probe_timeout_ms).await?
+    {
+        store_cached_port(&selected);
+        return Ok(selected);
     }
 
     if let Some(selected) = pick_port(&candidates) {
@@ -265,15 +264,15 @@ fn filter_ports(
         .iter()
         .filter(|info| match &info.port_type {
             SerialPortType::UsbPort(usb) => {
-                if let Some(vid) = vid {
-                    if usb.vid != vid {
-                        return false;
-                    }
+                if let Some(vid) = vid
+                    && usb.vid != vid
+                {
+                    return false;
                 }
-                if let Some(pid) = pid {
-                    if usb.pid != pid {
-                        return false;
-                    }
+                if let Some(pid) = pid
+                    && usb.pid != pid
+                {
+                    return false;
                 }
                 true
             }
@@ -508,10 +507,10 @@ fn store_cached_port(port: &str) {
     let Some(path) = cache_path() else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return;
     }
     let _ = std::fs::write(path, port.as_bytes());
 }

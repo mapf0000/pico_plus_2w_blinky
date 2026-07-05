@@ -13,7 +13,7 @@ use mipidsi::dcs::{
 };
 use mipidsi::dcs::{DcsCommand, InterfaceExt};
 use mipidsi::interface::SpiInterface;
-use mipidsi::models::Model;
+use mipidsi::models::{Model, ModelInitError};
 use mipidsi::options::{
     ColorOrder, HorizontalRefreshOrder, ModelOptions, Orientation, RefreshOrder, Rotation,
     VerticalRefreshOrder,
@@ -48,7 +48,7 @@ impl Model for St7789Pico28 {
         di: &mut DI,
         delay: &mut DELAY,
         options: &ModelOptions,
-    ) -> Result<SetAddressMode, DI::Error>
+    ) -> Result<SetAddressMode, ModelInitError<DI::Error>>
     where
         DELAY: DelayNs,
         DI: mipidsi::interface::Interface,
@@ -139,7 +139,7 @@ pub(super) fn init(
                 .init(&mut delay)
             {
                 Ok(disp) => {
-                    let _ = backlight.set_high();
+                    backlight.set_high();
                     let bbox = disp.bounding_box();
                     log::info!(
                         "display: ST7789 init ok (mode0, 62.5MHz, bbox {}x{} @ rot0)",
@@ -153,14 +153,14 @@ pub(super) fn init(
                         "display: ST7789 init failed: {:?}; continuing with buttons only",
                         e
                     );
-                    let _ = backlight.set_high(); // at least turn on backlight
+                    backlight.set_high(); // at least turn on backlight
                     None
                 }
             }
         }
         Err(_) => {
             log::warn!("display: SPI device setup failed; continuing with buttons only");
-            let _ = backlight.set_high();
+            backlight.set_high();
             None
         }
     }

@@ -74,20 +74,6 @@ pub enum FileResultCode {
     Unknown(u8),
 }
 
-impl FileResultCode {
-    #[cfg(test)]
-    pub fn as_u8(self) -> u8 {
-        match self {
-            Self::Ok => 0,
-            Self::HashMismatch => 1,
-            Self::SizeMismatch => 2,
-            Self::Aborted => 3,
-            Self::InternalError => 4,
-            Self::Unknown(code) => code,
-        }
-    }
-}
-
 impl From<u8> for FileResultCode {
     fn from(value: u8) -> Self {
         match value {
@@ -314,32 +300,6 @@ pub fn encode_file_close(message: &FileClose) -> Bytes {
     buf.freeze()
 }
 
-#[cfg(test)]
-pub fn decode_file_close(payload: &[u8]) -> Result<FileClose, ProtocolError> {
-    let mut cursor = payload;
-    Ok(FileClose {
-        transfer_id: TransferId(take_u64(&mut cursor)?),
-        sent_chunk_count: take_u32(&mut cursor)?,
-        sent_total_size: ByteCount(take_u64(&mut cursor)?),
-    })
-}
-
-#[cfg(test)]
-pub fn encode_file_result(message: &FileResult) -> Result<Bytes, ProtocolError> {
-    let detail = message.detail.as_bytes();
-    let detail_len: u16 = detail
-        .len()
-        .try_into()
-        .map_err(|_| ProtocolError::InvalidField("detail_len"))?;
-
-    let mut buf = BytesMut::with_capacity(8 + 1 + 2 + detail.len());
-    buf.put_u64_le(message.transfer_id.0);
-    buf.put_u8(message.result_code.as_u8());
-    buf.put_u16_le(detail_len);
-    buf.extend_from_slice(detail);
-    Ok(buf.freeze())
-}
-
 pub fn decode_file_result(payload: &[u8]) -> Result<FileResult, ProtocolError> {
     let mut cursor = payload;
     let transfer_id = TransferId(take_u64(&mut cursor)?);
@@ -412,7 +372,7 @@ async fn send_single_file(
 
     while highest_acked.map_or(0, |value| value.saturating_add(1)) < open.chunk_count {
         while next_chunk_to_send < open.chunk_count
-            && in_flight.len() < window_credit.max(1).min(MAX_WINDOW_CREDIT) as usize
+            && in_flight.len() < window_credit.clamp(1, MAX_WINDOW_CREDIT) as usize
         {
             send_chunk(outbound, &mut file, &open, next_chunk_to_send).await?;
             in_flight.insert(next_chunk_to_send, 0);
@@ -423,7 +383,7 @@ async fn send_single_file(
 
         match feedback {
             Ok(Some(TransferFeedback::Ack(ack))) if ack.transfer_id == open.transfer_id => {
-                window_credit = ack.window_credit.max(1).min(MAX_WINDOW_CREDIT);
+                window_credit = ack.window_credit.clamp(1, MAX_WINDOW_CREDIT);
                 let acked = ack
                     .highest_contiguous_chunk
                     .map(|value| value.0)
@@ -588,7 +548,7 @@ async fn build_open_message(path: &Path) -> Result<FileOpen> {
     let chunk_count = if total_size == 0 {
         0
     } else {
-        ((total_size + chunk_size as u64 - 1) / chunk_size as u64) as u32
+        total_size.div_ceil(chunk_size as u64) as u32
     };
 
     let sha256 = compute_sha256(path).await?;

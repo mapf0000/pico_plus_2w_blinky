@@ -15,7 +15,7 @@ pub fn decode_hex(input: &str) -> Result<Vec<u8>, &'static str> {
         return Err("empty");
     }
     let chars = trimmed.as_bytes();
-    if chars.len() % 2 != 0 {
+    if !chars.len().is_multiple_of(2) {
         return Err("odd-length");
     }
     let mut out = Vec::with_capacity(chars.len() / 2);

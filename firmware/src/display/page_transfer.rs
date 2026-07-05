@@ -16,9 +16,9 @@ use crate::usb::ctrl::{
     TransferViewState,
 };
 
+use super::DisplayPalette;
 use super::page_common::{TEXT_PAD, update_line};
 use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
-use super::{DisplayConfig, DisplayPalette};
 
 const ACTION_START_TRANSFER: usize = 0;
 const ACTION_TOGGLE_MODE: usize = 1;
@@ -254,19 +254,7 @@ impl Page for TransferPageState {
         args: PageRenderArgs<'_, D>,
         _data: PageRenderData<'_>,
     ) {
-        render(
-            args.disp,
-            args.line_x,
-            args.y_pos,
-            args.clear_w,
-            args.content_width,
-            args.content_height,
-            args.bg_color,
-            args.config,
-            args.title_style,
-            args.body_style,
-            self,
-        );
+        render(args, self);
     }
 }
 
@@ -288,53 +276,69 @@ fn state_name(state: TransferViewState) -> &'static str {
     }
 }
 
-fn draw_action_row(
-    disp: &mut impl DrawTarget<Color = Rgb565>,
+struct ActionRowContext<'a> {
     line_x: i32,
     clear_w: u32,
+    bg_color: Rgb565,
+    body_style: &'a MonoTextStyle<'a, Rgb565>,
+    palette: &'a DisplayPalette,
+}
+
+fn draw_action_row(
+    disp: &mut impl DrawTarget<Color = Rgb565>,
+    context: &ActionRowContext<'_>,
     row_y: i32,
     label: &str,
     selected: bool,
-    bg_color: Rgb565,
-    body_style: &MonoTextStyle<Rgb565>,
-    palette: &DisplayPalette,
 ) {
     let row_h: i32 = 16;
-    let row_bg = if selected { palette.white } else { bg_color };
-    let row_fg = if selected {
-        palette.black
+    let row_bg = if selected {
+        context.palette.white
     } else {
-        palette.white
+        context.bg_color
+    };
+    let row_fg = if selected {
+        context.palette.black
+    } else {
+        context.palette.white
     };
 
     let _ = Rectangle::new(
-        Point::new(line_x, row_y - 11),
-        Size::new(clear_w, row_h as u32),
+        Point::new(context.line_x, row_y - 11),
+        Size::new(context.clear_w, row_h as u32),
     )
     .into_styled(PrimitiveStyle::with_fill(row_bg))
     .draw(disp);
 
     let row_style = MonoTextStyleBuilder::new()
-        .font(body_style.font)
+        .font(context.body_style.font)
         .text_color(row_fg)
         .background_color(row_bg)
         .build();
-    let _ = Text::new(label, Point::new(line_x + TEXT_PAD, row_y), row_style).draw(disp);
+    let _ = Text::new(
+        label,
+        Point::new(context.line_x + TEXT_PAD, row_y),
+        row_style,
+    )
+    .draw(disp);
 }
 
-pub fn render(
-    disp: &mut impl DrawTarget<Color = Rgb565>,
-    line_x: i32,
-    mut y_pos: i32,
-    clear_w: u32,
-    content_width: u32,
-    _content_height: u32,
-    bg_color: Rgb565,
-    config: &DisplayConfig,
-    title_style: &MonoTextStyle<Rgb565>,
-    body_style: &MonoTextStyle<Rgb565>,
+fn render<D: DrawTarget<Color = Rgb565>>(
+    args: PageRenderArgs<'_, D>,
     state: &mut TransferPageState,
 ) {
+    let PageRenderArgs {
+        disp,
+        line_x,
+        mut y_pos,
+        clear_w,
+        content_width,
+        bg_color,
+        config,
+        title_style,
+        body_style,
+        ..
+    } = args;
     let palette = config.palette;
     let snapshot: TransferViewSnapshot = ctrl::transfer_view_snapshot();
     let usb_ready = CTRL_READY.load(Ordering::Acquire);
@@ -376,10 +380,8 @@ pub fn render(
         .build();
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         state.status_bg,
         status_text,
         &mut state.prev_status,
@@ -396,10 +398,8 @@ pub fn render(
     );
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         usb_line.as_str(),
         &mut state.prev_usb_line,
@@ -415,10 +415,8 @@ pub fn render(
     );
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         ws_line.as_str(),
         &mut state.prev_ws_line,
@@ -430,10 +428,8 @@ pub fn render(
     let _ = write!(mode_line, "Mode: {}", mode_name(snapshot.mode));
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         mode_line.as_str(),
         &mut state.prev_mode_line,
@@ -443,10 +439,8 @@ pub fn render(
 
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         "Source: host default path",
         &mut state.prev_source_line,
@@ -458,10 +452,8 @@ pub fn render(
     let _ = write!(transfer_state_line, "State: {}", state_name(snapshot.state));
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         transfer_state_line.as_str(),
         &mut state.prev_state_line,
@@ -477,10 +469,8 @@ pub fn render(
     }
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         id_line.as_str(),
         &mut state.prev_id_line,
@@ -496,10 +486,8 @@ pub fn render(
     );
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         bytes_line.as_str(),
         &mut state.prev_bytes_line,
@@ -515,10 +503,8 @@ pub fn render(
     );
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         chunks_line.as_str(),
         &mut state.prev_chunks_line,
@@ -527,16 +513,19 @@ pub fn render(
     y_pos += line_h + 8;
 
     let start_selected = state.selected == ACTION_START_TRANSFER;
-    draw_action_row(
-        disp,
+    let action_context = ActionRowContext {
         line_x,
         clear_w,
+        bg_color,
+        body_style,
+        palette: &palette,
+    };
+    draw_action_row(
+        disp,
+        &action_context,
         y_pos,
         "Start Transfer (default)",
         start_selected,
-        bg_color,
-        body_style,
-        &palette,
     );
     y_pos += 16;
 
@@ -547,13 +536,9 @@ pub fn render(
     };
     draw_action_row(
         disp,
-        line_x,
-        clear_w,
+        &action_context,
         y_pos,
         mode_action_label,
         mode_selected,
-        bg_color,
-        body_style,
-        &palette,
     );
 }

@@ -17,10 +17,17 @@ pub const TRANSFER_BINARY_MAX: usize = 2049;
 pub const WS_BINARY_KIND_TRANSFER: u8 = 1;
 pub const WS_BINARY_KIND_FILESYSTEM: u8 = 2;
 const WS_COMMAND_MAX: usize = 2048;
+const _: () = assert!(TRANSFER_TEXT_MAX <= TRANSFER_BINARY_MAX);
 
-pub enum TransferWsEvent {
-    Text(String<TRANSFER_TEXT_MAX>),
-    Binary(Vec<u8, TRANSFER_BINARY_MAX>),
+#[derive(Clone, Copy)]
+enum TransferWsEventKind {
+    Text,
+    Binary,
+}
+
+pub struct TransferWsEvent {
+    kind: TransferWsEventKind,
+    payload: Vec<u8, TRANSFER_BINARY_MAX>,
 }
 
 pub static TRANSFER_WS_EVENTS: Channel<ThreadModeRawMutex, TransferWsEvent, 16> = Channel::new();
@@ -46,13 +53,23 @@ impl TransferQueueError {
 }
 
 pub fn queue_transfer_text(event: String<TRANSFER_TEXT_MAX>) -> Result<(), TransferQueueError> {
-    queue_transfer_event(TransferWsEvent::Text(event))
+    let mut payload = Vec::new();
+    payload
+        .extend_from_slice(event.as_bytes())
+        .expect("text capacity is bounded by the WebSocket payload capacity");
+    queue_transfer_event(TransferWsEvent {
+        kind: TransferWsEventKind::Text,
+        payload,
+    })
 }
 
 pub fn queue_transfer_binary(
     event: Vec<u8, TRANSFER_BINARY_MAX>,
 ) -> Result<(), TransferQueueError> {
-    queue_transfer_event(TransferWsEvent::Binary(event))
+    queue_transfer_event(TransferWsEvent {
+        kind: TransferWsEventKind::Binary,
+        payload: event,
+    })
 }
 
 fn queue_transfer_event(event: TransferWsEvent) -> Result<(), TransferQueueError> {
@@ -168,9 +185,13 @@ async fn send_transfer_event<W: embedded_io_async::Write>(
     event: TransferWsEvent,
     tx: &mut ws::SocketTx<W>,
 ) -> Result<(), W::Error> {
-    match event {
-        TransferWsEvent::Text(json) => tx.send_text(json.as_str()).await,
-        TransferWsEvent::Binary(data) => tx.send_binary(data.as_slice()).await,
+    match event.kind {
+        TransferWsEventKind::Text => {
+            let text = core::str::from_utf8(event.payload.as_slice())
+                .expect("text WebSocket events originate from UTF-8 strings");
+            tx.send_text(text).await
+        }
+        TransferWsEventKind::Binary => tx.send_binary(event.payload.as_slice()).await,
     }
 }
 
@@ -284,11 +305,11 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
         match usb_supervisor::start(run_assistant).await {
             Ok(()) => {
                 let _ = response.push_str("{\"ok\":true}");
-                return response;
+                response
             }
             Err(_) => {
                 let _ = response.push_str("{\"error\":\"usb start failed\"}");
-                return response;
+                response
             }
         }
     } else if cmd.eq_ignore_ascii_case("USB_UNREGISTER") {
@@ -296,11 +317,11 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
         match usb_supervisor::stop(150).await {
             Ok(()) => {
                 let _ = response.push_str("{\"ok\":true}");
-                return response;
+                response
             }
             Err(_) => {
                 let _ = response.push_str("{\"error\":\"usb stop failed\"}");
-                return response;
+                response
             }
         }
     } else if let Some(hex) = cmd.strip_prefix("SCRIPT_RUN_HEX ") {
@@ -323,10 +344,10 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
     } else if let Some(rest) = cmd.strip_prefix("TRANSFER_START ") {
         let mut path = None;
         for pair in rest.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                if k == "path" {
-                    path = percent_decode_str::<{ MAX_TRANSFER_PATH_LEN }>(v);
-                }
+            if let Some((k, v)) = pair.split_once('=')
+                && k == "path"
+            {
+                path = percent_decode_str::<{ MAX_TRANSFER_PATH_LEN }>(v);
             }
         }
 
@@ -348,10 +369,10 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
     } else if let Some(rest) = cmd.strip_prefix("TRANSFER_DEFAULT_SET ") {
         let mut path = None;
         for pair in rest.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                if k == "path" {
-                    path = percent_decode_str::<{ MAX_TRANSFER_PATH_LEN }>(v);
-                }
+            if let Some((k, v)) = pair.split_once('=')
+                && k == "path"
+            {
+                path = percent_decode_str::<{ MAX_TRANSFER_PATH_LEN }>(v);
             }
         }
 
@@ -463,10 +484,10 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
     } else if let Some(rest) = cmd.strip_prefix("TRANSFER_MODE_SET ") {
         let mut mode = None;
         for pair in rest.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                if k == "mode" {
-                    mode = Some(v);
-                }
+            if let Some((k, v)) = pair.split_once('=')
+                && k == "mode"
+            {
+                mode = Some(v);
             }
         }
         match mode {
@@ -498,7 +519,7 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
 
 fn decode_hex(input: &str) -> Result<Vec<u8, { MAX_BYTECODE }>, ()> {
     let trimmed = input.trim();
-    if trimmed.is_empty() || trimmed.len() % 2 != 0 {
+    if trimmed.is_empty() || !trimmed.len().is_multiple_of(2) {
         return Err(());
     }
     let max_bytes = trimmed.len() / 2;

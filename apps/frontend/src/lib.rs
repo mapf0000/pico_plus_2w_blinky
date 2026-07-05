@@ -41,11 +41,11 @@ fn app() -> Html {
     let transfer_path = use_state(String::new);
     let filesystem_store = use_mut_ref(filesystem::BrowserStore::new);
     let filesystem_view = use_state(filesystem::BrowserView::default);
-    let dsl_text = use_state(|| String::new());
+    let dsl_text = use_state(String::new);
     let selected_os = use_state(|| String::from("mac"));
     let selected_layout = use_state(|| dsl_core::DEFAULT_LAYOUT_ID.to_string());
     let busy_count = use_state(|| 0u32);
-    let log_lines = use_state(|| Vec::<String>::new());
+    let log_lines = use_state(Vec::<String>::new);
     let ws_connected = use_state(|| false);
     let toast = use_state(|| None::<(String, bool)>); // (message, ok?)
     // All WebSocket API calls are handled in api.rs via a single connection
@@ -719,7 +719,7 @@ fn identity_card(props: &IdentityProps) -> Html {
                   disabled={fields_disabled} />
                 <div class="row between">
                   <span class="hint">{"ASCII only, max 32 bytes."}</span>
-                  <span class="hint">{ format!("{}/32", (*man).as_bytes().len()) }</span>
+                  <span class="hint">{ format!("{}/32", (*man).len()) }</span>
                 </div>
               </div>
             </label>
@@ -732,7 +732,7 @@ fn identity_card(props: &IdentityProps) -> Html {
                   disabled={fields_disabled} />
                 <div class="row between">
                   <span class="hint">{"ASCII only, max 48 bytes."}</span>
-                  <span class="hint">{ format!("{}/48", (*prod).as_bytes().len()) }</span>
+                  <span class="hint">{ format!("{}/48", (*prod).len()) }</span>
                 </div>
               </div>
             </label>
@@ -1255,10 +1255,9 @@ fn format_modified(modified_secs: Option<u64>) -> String {
     #[cfg(target_arch = "wasm32")]
     {
         let date = js_sys::Date::new(&JsValue::from_f64(modified_secs as f64 * 1000.0));
-        return date
-            .to_locale_string("en-GB", &JsValue::UNDEFINED)
+        date.to_locale_string("en-GB", &JsValue::UNDEFINED)
             .as_string()
-            .unwrap_or_else(|| modified_secs.to_string());
+            .unwrap_or_else(|| modified_secs.to_string())
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -33,7 +33,7 @@ pub async fn init(
         *PSRAM_INIT.lock().await = false;
         return;
     };
-    let total = psram.size() as usize;
+    let total = psram.size();
     let base = psram.base_address();
     unsafe {
         // Create a slice covering the entire PSRAM; then split for our buffers

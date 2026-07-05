@@ -32,7 +32,7 @@ use input::InputDebouncer;
 use page_common::{build_text_line, format_hms};
 use page_system::SystemMetrics;
 use pages::{PageContext, PageId, PageInput, PageRegistry, PageRenderData};
-use renderer::Renderer;
+use renderer::{PageRenderRequest, Renderer};
 use ui::{UiState, apply_input};
 
 bind_interrupts!(struct AdcIrqs {
@@ -64,7 +64,6 @@ pub struct DisplayPalette {
     pub white: Rgb565,
     pub yellow: Rgb565,
     pub teal: Rgb565,
-    pub blue: Rgb565,
     pub black: Rgb565,
     pub green: Rgb565,
 }
@@ -75,7 +74,6 @@ impl DisplayPalette {
             white: Rgb565::from(Rgb888::new(0xFF, 0xFF, 0xFF)),
             yellow: Rgb565::from(Rgb888::new(0xF9, 0xDB, 0x6D)),
             teal: Rgb565::from(Rgb888::new(0x36, 0x82, 0x7F)),
-            blue: Rgb565::from(Rgb888::new(0x46, 0x4D, 0x77)),
             black: Rgb565::from(Rgb888::new(0x00, 0x00, 0x00)),
             green: Rgb565::from(Rgb888::new(0x00, 0x87, 0x61)),
         }
@@ -169,7 +167,7 @@ fn psram_status_line() -> String<32> {
         } else {
             "not detected"
         };
-        return build_text_line("PSRAM: ", status);
+        build_text_line("PSRAM: ", status)
     }
 
     #[cfg(not(feature = "psram"))]
@@ -220,7 +218,10 @@ fn format_bytes_mb_one_decimal(bytes: usize) -> String<16> {
 
 fn flash_status_line(total: usize, free: usize) -> String<48> {
     let used = total.saturating_sub(free);
-    let pct_free = if total > 0 { (free * 100) / total } else { 0 };
+    let pct_free = free
+        .saturating_mul(100)
+        .checked_div(total)
+        .unwrap_or_default();
     let total_s = format_bytes_mb_one_decimal(total);
     let used_s = format_bytes_mb_one_decimal(used);
     let free_s = format_bytes_mb_one_decimal(free);
@@ -321,9 +322,21 @@ fn apply_led(
     b: &mut Output<'static>,
 ) {
     // Active-low LED: low = on, high = off.
-    let _ = if color.r { r.set_low() } else { r.set_high() };
-    let _ = if color.g { g.set_low() } else { g.set_high() };
-    let _ = if color.b { b.set_low() } else { b.set_high() };
+    if color.r {
+        r.set_low()
+    } else {
+        r.set_high()
+    };
+    if color.g {
+        g.set_low()
+    } else {
+        g.set_high()
+    };
+    if color.b {
+        b.set_low()
+    } else {
+        b.set_high()
+    };
 }
 
 #[embassy_executor::task]
@@ -480,7 +493,15 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
 
                 let menu_items = pages.menu_items();
                 renderer.render_with_plan(
-                    disp, &ui_state, page, menu_items, &mut pages, plan, page_data,
+                    disp,
+                    &ui_state,
+                    menu_items,
+                    &mut pages,
+                    plan,
+                    PageRenderRequest {
+                        id: page,
+                        data: page_data,
+                    },
                 );
             }
         } else if !display_fail_logged {

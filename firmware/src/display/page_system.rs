@@ -1,11 +1,9 @@
-use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::Text;
 use heapless::String;
 
-use super::DisplayConfig;
 use super::page_common::{TEXT_PAD, build_text_line, update_line};
 use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
 
@@ -78,37 +76,28 @@ impl Page for SystemPageState {
             }
         };
 
-        render(
-            args.disp,
-            args.line_x,
-            args.y_pos,
-            args.content_width,
-            args.clear_w,
-            args.bg_color,
-            args.config,
-            ap_ssid,
-            metrics,
-            args.title_style,
-            args.body_style,
-            self,
-        );
+        render(args, ap_ssid, metrics, self);
     }
 }
 
-pub fn render(
-    disp: &mut impl DrawTarget<Color = Rgb565>,
-    line_x: i32,
-    mut y_pos: i32,
-    content_width: u32,
-    clear_w: u32,
-    bg_color: Rgb565,
-    config: &DisplayConfig,
+fn render<D: DrawTarget<Color = Rgb565>>(
+    args: PageRenderArgs<'_, D>,
     ap_ssid: &str,
     metrics: SystemMetrics<'_>,
-    title_style: &MonoTextStyle<Rgb565>,
-    body_style: &MonoTextStyle<Rgb565>,
     state: &mut SystemPageState,
 ) {
+    let PageRenderArgs {
+        disp,
+        line_x,
+        mut y_pos,
+        clear_w,
+        content_width,
+        bg_color,
+        config,
+        title_style,
+        body_style,
+        ..
+    } = args;
     let header_height = 18;
     let _ = Rectangle::new(
         Point::new(line_x, y_pos - 12),
@@ -130,98 +119,82 @@ pub fn render(
 
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         ap_line.as_str(),
         &mut state.prev_ap_line,
-        &body_style,
+        body_style,
     );
     y_pos += line_h;
 
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         metrics.uptime,
         &mut state.prev_uptime_line,
-        &body_style,
+        body_style,
     );
     y_pos += line_h;
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         metrics.cpu,
         &mut state.prev_cpu_line,
-        &body_style,
+        body_style,
     );
     y_pos += line_h;
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         metrics.temp,
         &mut state.prev_temp_line,
-        &body_style,
+        body_style,
     );
     y_pos += line_h;
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         metrics.heap,
         &mut state.prev_heap_line,
-        &body_style,
+        body_style,
     );
     y_pos += line_h;
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         metrics.stack,
         &mut state.prev_stack_line,
-        &body_style,
+        body_style,
     );
     y_pos += line_h;
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         metrics.psram,
         &mut state.prev_psram_line,
-        &body_style,
+        body_style,
     );
     y_pos += line_h;
     update_line(
         disp,
-        line_x,
-        y_pos,
-        clear_w,
-        line_h as u32,
+        Point::new(line_x, y_pos),
+        Size::new(clear_w, line_h as u32),
         bg_color,
         metrics.flash,
         &mut state.prev_flash_line,
-        &body_style,
+        body_style,
     );
 }

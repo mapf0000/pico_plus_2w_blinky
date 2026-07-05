@@ -18,20 +18,18 @@ pub fn build_text_line<const N: usize>(prefix: &str, value: &str) -> String<N> {
 
 pub fn update_line<const N: usize>(
     disp: &mut impl DrawTarget<Color = Rgb565>,
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
+    position: Point,
+    size: Size,
     bg: Rgb565,
     text: &str,
     prev: &mut String<N>,
     style: &MonoTextStyle<Rgb565>,
 ) {
     if prev.as_str() != text {
-        let _ = Rectangle::new(Point::new(x, y - 11), Size::new(w, h))
+        let _ = Rectangle::new(Point::new(position.x, position.y - 11), size)
             .into_styled(PrimitiveStyle::with_fill(bg))
             .draw(disp);
-        let _ = Text::new(text, Point::new(x + TEXT_PAD, y), *style).draw(disp);
+        let _ = Text::new(text, Point::new(position.x + TEXT_PAD, position.y), *style).draw(disp);
         prev.clear();
         let _ = prev.push_str(text);
     }

@@ -222,10 +222,8 @@ mod frontend {
         let dist = cfg.frontend_dir.join(DIST_DIR);
         let need_trunk = !dist.exists() || prev_fp.as_deref() != Some(&cur_fp);
 
-        if need_trunk {
-            if !try_trunk_build(cfg)? {
-                bail!("frontend: dist is missing/stale and Trunk is not available or failed");
-            }
+        if need_trunk && !try_trunk_build(cfg)? {
+            bail!("frontend: dist is missing/stale and Trunk is not available or failed");
         }
 
         // Always embed; will fail if dist missing
@@ -334,14 +332,14 @@ mod frontend {
                 wasm_len, cfg.warn_bytes
             ));
         }
-        if let Some(max) = cfg.max_bytes {
-            if wasm_len > max {
-                bail!(
-                    "frontend WASM size {} exceeds PICO_WASM_MAX_BYTES={} bytes",
-                    wasm_len,
-                    max
-                );
-            }
+        if let Some(max) = cfg.max_bytes
+            && wasm_len > max
+        {
+            bail!(
+                "frontend WASM size {} exceeds PICO_WASM_MAX_BYTES={} bytes",
+                wasm_len,
+                max
+            );
         }
 
         // Generate include file
@@ -558,7 +556,7 @@ mod msc_image {
     const MEDIA_DESCRIPTOR: u8 = 0xF8;
     const VOLUME_LABEL_DEFAULT: &str = "PICO_AGENT";
 
-    const ROOT_DIR_SECTORS: usize = (ROOT_ENTRIES * 32 + BYTES_PER_SECTOR - 1) / BYTES_PER_SECTOR;
+    const ROOT_DIR_SECTORS: usize = (ROOT_ENTRIES * 32).div_ceil(BYTES_PER_SECTOR);
 
     const HOST_AGENT_NAME: &str = "HOSTAGNT";
     const README_NAME: &str = "README";
@@ -617,7 +615,6 @@ mod msc_image {
     }
 
     struct TargetStatus {
-        label: &'static str,
         volume_dir: &'static str,
         file_name: &'static str,
         file_ext: &'static str,
@@ -659,7 +656,6 @@ mod msc_image {
                         data,
                     });
                     status.push(TargetStatus {
-                        label: spec.label,
                         volume_dir: spec.volume_dir,
                         file_name: spec.volume_file_name,
                         file_ext: spec.volume_file_ext,
@@ -682,7 +678,6 @@ mod msc_image {
                         data: msg.into_bytes(),
                     });
                     status.push(TargetStatus {
-                        label: spec.label,
                         volume_dir: spec.volume_dir,
                         file_name: spec.volume_file_name,
                         file_ext: spec.volume_file_ext,
@@ -793,7 +788,7 @@ mod msc_image {
     }
 
     fn compute_layout() -> Result<Layout> {
-        if IMAGE_BYTES % BYTES_PER_SECTOR != 0 {
+        if !IMAGE_BYTES.is_multiple_of(BYTES_PER_SECTOR) {
             bail!("MSC image size must be sector-aligned");
         }
         let total_sectors = IMAGE_BYTES / BYTES_PER_SECTOR;
@@ -804,7 +799,7 @@ mod msc_image {
                 .saturating_sub(RESERVED_SECTORS + ROOT_DIR_SECTORS + NUM_FATS * sectors_per_fat);
             let clusters = data_sectors / SECTORS_PER_CLUSTER;
             let fat_bytes = (clusters + 2) * 2;
-            let new_spf = (fat_bytes + BYTES_PER_SECTOR - 1) / BYTES_PER_SECTOR;
+            let new_spf = fat_bytes.div_ceil(BYTES_PER_SECTOR);
             if new_spf == sectors_per_fat {
                 cluster_count = clusters;
                 break;
@@ -812,7 +807,7 @@ mod msc_image {
             sectors_per_fat = new_spf;
         }
 
-        if cluster_count < 4085 || cluster_count > 65524 {
+        if !(4085..=65524).contains(&cluster_count) {
             bail!("MSC image cluster count out of FAT16 range");
         }
 
@@ -958,7 +953,7 @@ mod msc_image {
             if size == 0 {
                 return Ok((0, 0));
             }
-            let clusters = (data.len() + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
+            let clusters = data.len().div_ceil(CLUSTER_SIZE);
             let cluster = self.alloc_clusters(clusters)?;
             Ok((cluster, size))
         }

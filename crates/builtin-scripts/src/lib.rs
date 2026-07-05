@@ -3,9 +3,6 @@
 mod common;
 #[cfg(feature = "macos")]
 mod macos;
-#[cfg(feature = "windows")]
-mod windows;
-
 pub struct BuiltinScript {
     pub id: &'static str,
     pub name: &'static str,

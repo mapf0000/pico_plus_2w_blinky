@@ -27,6 +27,12 @@ pub struct Program<'a> {
     pub ops: Vec<Op<'a>>,
 }
 
+impl<'a> Default for Program<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> Program<'a> {
     pub fn new() -> Self {
         Self { ops: Vec::new() }
@@ -45,6 +51,12 @@ pub enum OpOwned {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramOwned {
     pub ops: Vec<OpOwned>,
+}
+
+impl Default for ProgramOwned {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProgramOwned {
@@ -67,6 +79,12 @@ pub enum FlatProgramError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlatProgram {
     pub ops: Vec<FlatOp>,
+}
+
+impl Default for FlatProgram {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FlatProgram {

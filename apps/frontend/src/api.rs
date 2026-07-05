@@ -48,7 +48,7 @@ struct EventTypeEnvelope {
 // ----- WebSocket state -----
 
 thread_local! {
-    static WS: RefCell<Option<WsState>> = RefCell::new(None);
+    static WS: RefCell<Option<WsState>> = const { RefCell::new(None) };
     static NEXT_FILESYSTEM_REQUEST_ID: Cell<u64> = const { Cell::new(1) };
 }
 
@@ -313,10 +313,10 @@ pub async fn usb_register(assistant: bool, os: Option<&str>) -> Result<(), Strin
     if assistant {
         params.push("assistant=1".to_string());
     }
-    if let Some(os) = os {
-        if !os.is_empty() {
-            params.push(format!("os={}", os));
-        }
+    if let Some(os) = os
+        && !os.is_empty()
+    {
+        params.push(format!("os={}", os));
     }
     if let Some(first) = params.first() {
         cmd.push(' ');

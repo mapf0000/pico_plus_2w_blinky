@@ -75,7 +75,7 @@ fn host_agent_cmd() -> io::Result<std::process::Command> {
             .map(|err| err.to_string())
     });
     if let Some(message) = build_error.as_ref() {
-        return Err(io::Error::new(io::ErrorKind::Other, message.clone()));
+        return Err(io::Error::other(message.clone()));
     }
 
     if !bin_path.exists() {
@@ -141,10 +141,7 @@ fn build_host_agent(target: &str, target_dir: &PathBuf) -> io::Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            "cargo build failed for host-agent",
-        ))
+        Err(io::Error::other("cargo build failed for host-agent"))
     }
 }
 
@@ -249,7 +246,7 @@ fn request_agent_status_with_timeout(
             } else {
                 format!("host-agent exited: {status}\nstdout/stderr:\n{logs}")
             };
-            return Err(io::Error::new(io::ErrorKind::Other, message));
+            return Err(io::Error::other(message));
         }
         if let Err(err) = write_frame(master, TAG_REQUEST_AGENT_STATUS, &[]) {
             if err.raw_os_error() == Some(libc::EIO) {
@@ -304,7 +301,7 @@ fn send_frame_with_retry(
             } else {
                 format!("host-agent exited: {status}\nstdout/stderr:\n{logs}")
             };
-            return Err(io::Error::new(io::ErrorKind::Other, message));
+            return Err(io::Error::other(message));
         }
         match write_frame(master, tag, payload) {
             Ok(()) => return Ok(()),
@@ -348,7 +345,7 @@ fn read_execute_results(
             } else {
                 format!("host-agent exited: {status}\nstdout/stderr:\n{logs}")
             };
-            return Err(io::Error::new(io::ErrorKind::Other, message));
+            return Err(io::Error::other(message));
         }
         match read_frame(
             master.as_raw_fd(),
@@ -432,12 +429,12 @@ fn wait_for_debug_log(
             } else {
                 format!("host-agent exited: {status}\nstdout/stderr:\n{logs}")
             };
-            return Err(io::Error::new(io::ErrorKind::Other, message));
+            return Err(io::Error::other(message));
         }
-        if let Ok(contents) = std::fs::read_to_string(debug_log) {
-            if contents.contains(expected) {
-                return Ok(());
-            }
+        if let Ok(contents) = std::fs::read_to_string(debug_log)
+            && contents.contains(expected)
+        {
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -459,10 +456,10 @@ fn e2e_agent_status_roundtrip() -> io::Result<()> {
     let (mut child, log_path) = spawn_agent(slave_fd, None)?;
     drop(slave);
 
-    let result = (|| {
+    let result = {
         std::thread::sleep(Duration::from_millis(WAIT_CONNECT_MS));
         request_agent_status(&mut master, &mut child, &log_path)
-    })();
+    };
 
     let _ = child.kill();
     let _ = child.wait();

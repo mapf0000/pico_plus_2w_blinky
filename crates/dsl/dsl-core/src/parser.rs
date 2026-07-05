@@ -76,7 +76,7 @@ pub fn compile_dsl_with_diag<'a>(
             }
         } else if eq_ci(cmd, "text") {
             let (text, delay_ms) = parse_text_args(rest).map_err(|k| parser_error(k, line_no))?;
-            let delay_ms = core::cmp::min(delay_ms as u64, MAX_DSL_DELAY_MS) as u16;
+            let delay_ms = core::cmp::min(delay_ms, MAX_DSL_DELAY_MS) as u16;
             if !text.is_empty() {
                 prog.ops.push(Op::Text { s: text, delay_ms });
             }
@@ -129,12 +129,12 @@ fn parse_text_args(rest: &str) -> Result<(&str, u64), &'static str> {
     if let Some(idx) = r.rfind(char::is_whitespace) {
         let (lhs, rhs) = r.split_at(idx);
         let maybe = rhs.trim();
-        if !maybe.is_empty() {
-            if let Ok(n) = maybe.parse::<u64>() {
-                delay_ms = core::cmp::min(n, MAX_DSL_DELAY_MS);
-                let text = lhs.trim_end();
-                return Ok((text, delay_ms));
-            }
+        if !maybe.is_empty()
+            && let Ok(n) = maybe.parse::<u64>()
+        {
+            delay_ms = core::cmp::min(n, MAX_DSL_DELAY_MS);
+            let text = lhs.trim_end();
+            return Ok((text, delay_ms));
         }
     }
     Ok((r, delay_ms))

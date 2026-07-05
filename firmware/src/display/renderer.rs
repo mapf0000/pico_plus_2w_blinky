@@ -85,6 +85,11 @@ pub struct RenderPlan {
     menu_changed: bool,
 }
 
+pub struct PageRenderRequest<'a> {
+    pub id: PageId,
+    pub data: PageRenderData<'a>,
+}
+
 impl RenderPlan {
     pub fn should_draw(&self) -> bool {
         self.dirty.any()
@@ -178,12 +183,15 @@ impl Renderer {
         &mut self,
         disp: &mut D,
         ui: &UiState,
-        page: PageId,
         menu_items: &[MenuItem],
         registry: &mut PageRegistry,
         plan: RenderPlan,
-        page_data: PageRenderData<'_>,
+        page_request: PageRenderRequest<'_>,
     ) {
+        let PageRenderRequest {
+            id: page,
+            data: page_data,
+        } = page_request;
         if !plan.dirty.any() {
             return;
         }
@@ -191,6 +199,13 @@ impl Renderer {
         let bg_color = self.palette.black;
         let menu_bg = self.palette.black;
         let layout = plan.layout;
+        let menu_item_layout = MenuItemLayout {
+            x: layout.menu_rect.top_left.x,
+            width: layout.menu_rect.size.width,
+            base_y: 20,
+            item_height: 18,
+            background: menu_bg,
+        };
         let screen_h = layout
             .content_rect
             .size
@@ -212,13 +227,13 @@ impl Renderer {
         }
 
         if plan.dirty.menu {
-            if let Some(prev_layout) = self.state.last_layout {
-                if self.state.prev_menu_open {
-                    let _ = prev_layout
-                        .menu_clear_rect
-                        .into_styled(PrimitiveStyle::with_fill(bg_color))
-                        .draw(disp);
-                }
+            if let Some(prev_layout) = self.state.last_layout
+                && self.state.prev_menu_open
+            {
+                let _ = prev_layout
+                    .menu_clear_rect
+                    .into_styled(PrimitiveStyle::with_fill(bg_color))
+                    .draw(disp);
             }
             if ui.menu_open {
                 let _ = layout
@@ -230,19 +245,13 @@ impl Renderer {
                         .into_styled(PrimitiveStyle::with_fill(self.palette.white))
                         .draw(disp);
                 }
-                let menu_base_y = 20;
-                let menu_item_h: i32 = 18;
                 for (idx, item) in menu_items.iter().enumerate() {
                     draw_menu_item(
                         disp,
-                        layout.menu_rect.top_left.x,
-                        layout.menu_rect.size.width,
-                        menu_base_y,
-                        menu_item_h,
+                        menu_item_layout,
                         idx,
                         item.label,
                         idx == ui.menu_selected,
-                        menu_bg,
                         &self.palette,
                     );
                 }
@@ -253,37 +262,28 @@ impl Renderer {
                     .into_styled(PrimitiveStyle::with_fill(self.palette.white))
                     .draw(disp);
             }
-        } else if plan.menu_changed && ui.menu_open && self.state.bg_drawn {
-            if self.state.prev_menu_selected != usize::MAX
-                && self.state.prev_menu_selected < menu_items.len()
-            {
-                let menu_base_y = 20;
-                let menu_item_h: i32 = 18;
-                draw_menu_item(
-                    disp,
-                    layout.menu_rect.top_left.x,
-                    layout.menu_rect.size.width,
-                    menu_base_y,
-                    menu_item_h,
-                    self.state.prev_menu_selected,
-                    menu_items[self.state.prev_menu_selected].label,
-                    false,
-                    menu_bg,
-                    &self.palette,
-                );
-                draw_menu_item(
-                    disp,
-                    layout.menu_rect.top_left.x,
-                    layout.menu_rect.size.width,
-                    menu_base_y,
-                    menu_item_h,
-                    ui.menu_selected,
-                    menu_items[ui.menu_selected].label,
-                    true,
-                    menu_bg,
-                    &self.palette,
-                );
-            }
+        } else if plan.menu_changed
+            && ui.menu_open
+            && self.state.bg_drawn
+            && self.state.prev_menu_selected != usize::MAX
+            && self.state.prev_menu_selected < menu_items.len()
+        {
+            draw_menu_item(
+                disp,
+                menu_item_layout,
+                self.state.prev_menu_selected,
+                menu_items[self.state.prev_menu_selected].label,
+                false,
+                &self.palette,
+            );
+            draw_menu_item(
+                disp,
+                menu_item_layout,
+                ui.menu_selected,
+                menu_items[ui.menu_selected].label,
+                true,
+                &self.palette,
+            );
         }
 
         if plan.dirty.content {
@@ -347,28 +347,37 @@ impl Renderer {
     }
 }
 
+#[derive(Clone, Copy)]
+struct MenuItemLayout {
+    x: i32,
+    width: u32,
+    base_y: i32,
+    item_height: i32,
+    background: Rgb565,
+}
+
 fn draw_menu_item(
     disp: &mut impl DrawTarget<Color = Rgb565>,
-    menu_x: i32,
-    menu_w: u32,
-    base_y: i32,
-    item_h: i32,
+    layout: MenuItemLayout,
     idx: usize,
     label: &str,
     selected: bool,
-    menu_bg: Rgb565,
     palette: &DisplayPalette,
 ) {
-    let y = base_y + (idx as i32 * item_h);
-    let sel_bg = if selected { palette.white } else { menu_bg };
+    let y = layout.base_y + (idx as i32 * layout.item_height);
+    let sel_bg = if selected {
+        palette.white
+    } else {
+        layout.background
+    };
     let sel_fg = if selected {
         palette.black
     } else {
         palette.white
     };
     let _ = Rectangle::new(
-        Point::new(menu_x + 2, y - 9),
-        Size::new(menu_w.saturating_sub(4), item_h as u32),
+        Point::new(layout.x + 2, y - 9),
+        Size::new(layout.width.saturating_sub(4), layout.item_height as u32),
     )
     .into_styled(PrimitiveStyle::with_fill(sel_bg))
     .draw(disp);
@@ -377,5 +386,5 @@ fn draw_menu_item(
         .text_color(sel_fg)
         .background_color(sel_bg)
         .build();
-    let _ = Text::new(label, Point::new(menu_x + 8, y), menu_style).draw(disp);
+    let _ = Text::new(label, Point::new(layout.x + 8, y), menu_style).draw(disp);
 }

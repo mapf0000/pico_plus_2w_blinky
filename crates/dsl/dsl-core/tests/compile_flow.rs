@@ -1,6 +1,6 @@
 use dsl_core::{FlatProgram, bytecode, compile_and_link, lower_to_flat_us};
 
-fn empty_provider<'a>(_: &'a str) -> Option<&'a str> {
+fn empty_provider(_: &str) -> Option<&str> {
     None
 }
 

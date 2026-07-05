@@ -143,6 +143,8 @@ pub async fn usb_task(
             request_handler: None,
             poll_ms: HID_POLL_MS,
             max_packet_size: 64,
+            hid_subclass: embassy_usb::class::hid::HidSubclass::Boot,
+            hid_boot_protocol: embassy_usb::class::hid::HidBootProtocol::Keyboard,
         };
         let hid_writer: UsbHidWriter<'_, _, 8> =
             UsbHidWriter::new(&mut builder, &mut hid_state, hid_cfg);

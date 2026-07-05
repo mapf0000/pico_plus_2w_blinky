@@ -178,10 +178,8 @@ const TAG_FS_LIST_CANCEL: u8 = 31;
 const FS_PROTOCOL_VERSION: u16 = 1;
 
 const FILE_RESULT_OK: u8 = 0;
-const FILE_RESULT_HASH_MISMATCH: u8 = 1;
 const FILE_RESULT_SIZE_MISMATCH: u8 = 2;
 const FILE_RESULT_ABORTED: u8 = 3;
-const FILE_RESULT_INTERNAL_ERROR: u8 = 4;
 
 const FILE_ABORT_REASON_PROTOCOL: u8 = 1;
 const FILE_ABORT_REASON_METADATA_MISMATCH: u8 = 2;
@@ -1347,7 +1345,7 @@ where
         offset += chunk_len;
     }
 
-    if payload.len() % max_packet == 0 {
+    if payload.len().is_multiple_of(max_packet) {
         class.write_packet(&[]).await?;
     }
 

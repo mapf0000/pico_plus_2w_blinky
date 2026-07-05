@@ -122,6 +122,21 @@ struct LegacyHintFlags {
     tap: bool,
 }
 
+struct ExpansionContext<'a, 'src> {
+    lines: &'a [&'src str],
+    opts: &'a PreprocessOptions,
+    functions: &'a mut FunctionRegistry,
+    stack: &'a mut Vec<String>,
+    hints: &'a mut LegacyHintFlags,
+}
+
+struct EmitOutputs<'a> {
+    lines: &'a mut Vec<String>,
+    source_map: &'a mut Vec<OrigLoc>,
+    diagnostics: &'a mut Vec<CompileError>,
+    hints: &'a mut LegacyHintFlags,
+}
+
 pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutput, CompileError> {
     let mut out_lines: Vec<String> = Vec::new();
     let mut sm: Vec<OrigLoc> = Vec::new();
@@ -141,15 +156,16 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
 
     let mut i = 0usize;
     while i < lines.len() {
-        if let Some((start, end)) = current_skip {
-            if i >= start && i <= end {
-                if i == end {
-                    skip_idx += 1;
-                    current_skip = skip_ranges.get(skip_idx).copied();
-                }
-                i += 1;
-                continue;
+        if let Some((start, end)) = current_skip
+            && i >= start
+            && i <= end
+        {
+            if i == end {
+                skip_idx += 1;
+                current_skip = skip_ranges.get(skip_idx).copied();
             }
+            i += 1;
+            continue;
         }
 
         let raw = lines[i];
@@ -232,15 +248,16 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
             let mut depth: i32 = 1;
             let mut j = i + 1;
             while j < lines.len() {
-                if let Some((s, e)) = current_skip {
-                    if j >= s && j <= e {
-                        if j == e {
-                            skip_idx += 1;
-                            current_skip = skip_ranges.get(skip_idx).copied();
-                        }
-                        j += 1;
-                        continue;
+                if let Some((s, e)) = current_skip
+                    && j >= s
+                    && j <= e
+                {
+                    if j == e {
+                        skip_idx += 1;
+                        current_skip = skip_ranges.get(skip_idx).copied();
                     }
+                    j += 1;
+                    continue;
                 }
                 let t = lines[j].trim();
                 if t.is_empty() || t.starts_with('#') {
@@ -248,10 +265,10 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
                     continue;
                 }
                 if let Some(r2) = repeat_rest(t) {
-                    if let Ok((_cn, has)) = parse_repeat_header(r2) {
-                        if has {
-                            depth += 1;
-                        }
+                    if let Ok((_cn, has)) = parse_repeat_header(r2)
+                        && has
+                    {
+                        depth += 1;
                     }
                 } else if t == "}" {
                     depth -= 1;
@@ -273,14 +290,16 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
 
             let child_env = LetEnv::clone_from_parent(&env);
             let body = preprocess_block(
-                &lines,
+                &mut ExpansionContext {
+                    lines: &lines,
+                    opts,
+                    functions: &mut functions,
+                    stack: &mut fn_stack,
+                    hints: &mut hints,
+                },
                 body_start,
                 body_end,
-                opts,
                 child_env,
-                &mut functions,
-                &mut fn_stack,
-                &mut hints,
             )?;
 
             if out_lines.len() + body.lines.len().saturating_mul(n as usize)
@@ -317,14 +336,16 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
                         call.name,
                         &args,
                         line_no,
-                        &lines,
-                        opts,
                         &env,
-                        &mut functions,
-                        &mut fn_stack,
+                        &mut ExpansionContext {
+                            lines: &lines,
+                            opts,
+                            functions: &mut functions,
+                            stack: &mut fn_stack,
+                            hints: &mut hints,
+                        },
                         &mut out_lines,
                         &mut sm,
-                        &mut hints,
                     )?;
                     if out_lines.len() > opts.max_expanded_lines {
                         return Err(pre_error(
@@ -352,10 +373,12 @@ pub fn preprocess(src: &str, opts: &PreprocessOptions) -> Result<PreprocessOutpu
             trimmed,
             line_no,
             &env,
-            &mut out_lines,
-            &mut sm,
-            &mut diags,
-            &mut hints,
+            &mut EmitOutputs {
+                lines: &mut out_lines,
+                source_map: &mut sm,
+                diagnostics: &mut diags,
+                hints: &mut hints,
+            },
             true,
         ) {
             Ok(()) => {}
@@ -416,21 +439,17 @@ struct PreBlock {
 }
 
 fn preprocess_block(
-    lines: &Vec<&str>,
+    context: &mut ExpansionContext<'_, '_>,
     start: usize,
     end: usize,
-    opts: &PreprocessOptions,
     mut env: LetEnv,
-    functions: &mut FunctionRegistry,
-    stack: &mut Vec<String>,
-    hints: &mut LegacyHintFlags,
 ) -> Result<PreBlock, CompileError> {
     let mut out: Vec<String> = Vec::new();
     let mut sm: Vec<OrigLoc> = Vec::new();
     let mut diags: Vec<CompileError> = Vec::new();
     let mut i = start;
     while i < end {
-        let raw = lines[i];
+        let raw = context.lines[i];
         let t = raw.trim();
         let line_no = (i + 1) as u16;
         if t.is_empty() || t.starts_with('#') {
@@ -479,10 +498,13 @@ fn preprocess_block(
                     1,
                 ));
             }
-            if n > opts.max_repeat_n {
+            if n > context.opts.max_repeat_n {
                 return Err(pre_error(
                     "RepeatNTooLarge",
-                    format!("repeat count {} exceeds cap {}", n, opts.max_repeat_n),
+                    format!(
+                        "repeat count {} exceeds cap {}",
+                        n, context.opts.max_repeat_n
+                    ),
                     line_no,
                     1,
                 ));
@@ -492,16 +514,16 @@ fn preprocess_block(
             let mut j = i + 1;
             let body_start = i + 1;
             while j < end {
-                let tt = lines[j].trim();
+                let tt = context.lines[j].trim();
                 if tt.is_empty() || tt.starts_with('#') {
                     j += 1;
                     continue;
                 }
                 if let Some(r2) = repeat_rest(tt) {
-                    if let Ok((_cn, hb)) = parse_repeat_header(r2) {
-                        if hb {
-                            depth += 1;
-                        }
+                    if let Ok((_cn, hb)) = parse_repeat_header(r2)
+                        && hb
+                    {
+                        depth += 1;
                     }
                 } else if tt == "}" {
                     depth -= 1;
@@ -519,17 +541,10 @@ fn preprocess_block(
                     1,
                 ));
             }
-            let body = preprocess_block(
-                lines,
-                body_start,
-                j,
-                opts,
-                LetEnv::clone_from_parent(&env),
-                functions,
-                stack,
-                hints,
-            )?;
-            if out.len() + body.lines.len().saturating_mul(n as usize) > opts.max_expanded_lines {
+            let body = preprocess_block(context, body_start, j, LetEnv::clone_from_parent(&env))?;
+            if out.len() + body.lines.len().saturating_mul(n as usize)
+                > context.opts.max_expanded_lines
+            {
                 return Err(pre_error(
                     "RepeatExpansionTooLarge",
                     "expanded lines exceed cap",
@@ -555,11 +570,8 @@ fn preprocess_block(
                 } else {
                     let args = parse_call_args(call.args, &env)
                         .map_err(|(code, msg)| pre_error(code, msg, line_no, 1))?;
-                    expand_function(
-                        call.name, &args, line_no, lines, opts, &env, functions, stack, &mut out,
-                        &mut sm, hints,
-                    )?;
-                    if out.len() > opts.max_expanded_lines {
+                    expand_function(call.name, &args, line_no, &env, context, &mut out, &mut sm)?;
+                    if out.len() > context.opts.max_expanded_lines {
                         return Err(pre_error(
                             "ExpandedLinesTooLarge",
                             "expanded lines exceed cap",
@@ -577,13 +589,24 @@ fn preprocess_block(
             }
         }
         // Regular line
-        match substitute_and_emit(t, line_no, &env, &mut out, &mut sm, &mut diags, hints, true) {
+        match substitute_and_emit(
+            t,
+            line_no,
+            &env,
+            &mut EmitOutputs {
+                lines: &mut out,
+                source_map: &mut sm,
+                diagnostics: &mut diags,
+                hints: context.hints,
+            },
+            true,
+        ) {
             Ok(()) => {}
             Err(pe) => {
                 return Err(pre_error(pe.0, pe.1, line_no, 1));
             }
         }
-        if out.len() > opts.max_expanded_lines {
+        if out.len() > context.opts.max_expanded_lines {
             return Err(pre_error(
                 "ExpandedLinesTooLarge",
                 "expanded lines exceed cap",
@@ -624,15 +647,11 @@ fn is_ident(s: &str) -> bool {
     }
     let mut it = bytes.iter();
     let b0 = *it.next().unwrap();
-    if !(b'a'..=b'z').contains(&b0) && !(b'A'..=b'Z').contains(&b0) && b0 != b'_' {
+    if !b0.is_ascii_lowercase() && !b0.is_ascii_uppercase() && b0 != b'_' {
         return false;
     }
     for &b in it {
-        if !(b'a'..=b'z').contains(&b)
-            && !(b'A'..=b'Z').contains(&b)
-            && !(b'0'..=b'9').contains(&b)
-            && b != b'_'
-        {
+        if !b.is_ascii_lowercase() && !b.is_ascii_uppercase() && !b.is_ascii_digit() && b != b'_' {
             return false;
         }
     }
@@ -640,11 +659,11 @@ fn is_ident(s: &str) -> bool {
 }
 
 fn is_ident_start(b: u8) -> bool {
-    (b'a'..=b'z').contains(&b) || (b'A'..=b'Z').contains(&b) || b == b'_'
+    b.is_ascii_lowercase() || b.is_ascii_uppercase() || b == b'_'
 }
 
 fn is_ident_continue(b: u8) -> bool {
-    is_ident_start(b) || (b'0'..=b'9').contains(&b)
+    is_ident_start(b) || b.is_ascii_digit()
 }
 
 fn repeat_rest(line: &str) -> Option<&str> {
@@ -666,7 +685,7 @@ fn repeat_rest(line: &str) -> Option<&str> {
 }
 
 fn gather_functions(
-    lines: &Vec<&str>,
+    lines: &[&str],
 ) -> Result<(FunctionRegistry, Vec<(usize, usize)>), CompileError> {
     let mut functions: FunctionRegistry = BTreeMap::new();
     let mut skips: Vec<(usize, usize)> = Vec::new();
@@ -811,7 +830,7 @@ fn gather_functions(
         i += 1;
     }
     if block_depth != 0 {
-        let line = block_stack.pop().unwrap_or_else(|| lines.len() as u16);
+        let line = block_stack.pop().unwrap_or(lines.len() as u16);
         return Err(pre_error(
             "RepeatMissingBrace",
             "missing closing '}'",
@@ -826,16 +845,12 @@ fn expand_function(
     name: &str,
     args: &[ConstVal],
     call_line: u16,
-    lines: &Vec<&str>,
-    opts: &PreprocessOptions,
     env: &LetEnv,
-    functions: &mut FunctionRegistry,
-    stack: &mut Vec<String>,
+    context: &mut ExpansionContext<'_, '_>,
     out_lines: &mut Vec<String>,
     sm: &mut Vec<OrigLoc>,
-    hints: &mut LegacyHintFlags,
 ) -> Result<(), CompileError> {
-    if stack.iter().any(|n| n == name) {
+    if context.stack.iter().any(|n| n == name) {
         return Err(pre_error(
             "FnRecursion",
             format!("recursive call of '{}'", name),
@@ -844,7 +859,7 @@ fn expand_function(
         ));
     }
 
-    let def = match functions.get(name) {
+    let def = match context.functions.get(name) {
         Some(def) => def.clone(),
         None => {
             return Err(pre_error(
@@ -870,31 +885,22 @@ fn expand_function(
         ));
     }
 
-    stack.push(name.to_string());
+    context.stack.push(name.to_string());
     let mut call_env = LetEnv::clone_from_parent(env);
     for (param, value) in def.params.iter().zip(args.iter()) {
         call_env.insert_shadow(param.clone(), value.clone());
     }
 
-    let block = match preprocess_block(
-        lines,
-        def.body_start,
-        def.body_end,
-        opts,
-        call_env,
-        functions,
-        stack,
-        hints,
-    ) {
+    let block = match preprocess_block(context, def.body_start, def.body_end, call_env) {
         Ok(b) => b,
         Err(e) => {
-            stack.pop();
+            context.stack.pop();
             return Err(e);
         }
     };
-    stack.pop();
+    context.stack.pop();
 
-    if out_lines.len() + block.lines.len() > opts.max_expanded_lines {
+    if out_lines.len() + block.lines.len() > context.opts.max_expanded_lines {
         return Err(pre_error(
             "ExpandedLinesTooLarge",
             "expanded lines exceed cap",
@@ -904,7 +910,7 @@ fn expand_function(
     }
 
     append_block(&block, out_lines, sm);
-    if let Some(def_mut) = functions.get_mut(name) {
+    if let Some(def_mut) = context.functions.get_mut(name) {
         def_mut.used = true;
     }
     Ok(())
@@ -917,11 +923,11 @@ fn is_upper_name(s: &str) -> bool {
     }
     let mut it = bytes.iter();
     let b0 = *it.next().unwrap();
-    if !(b'A'..=b'Z').contains(&b0) && b0 != b'_' {
+    if !b0.is_ascii_uppercase() && b0 != b'_' {
         return false;
     }
     for &b in it {
-        if !(b'A'..=b'Z').contains(&b) && !(b'0'..=b'9').contains(&b) && b != b'_' {
+        if !b.is_ascii_uppercase() && !b.is_ascii_digit() && b != b'_' {
             return false;
         }
     }
@@ -959,13 +965,13 @@ fn parse_let(rest: &str) -> Result<(String, ConstVal), (&'static str, String)> {
         }
         let inner = &rhs[1..rhs.len() - 1];
         let s = unescape_string(inner).map_err(|e| ("InvalidStringEscape", e))?;
-        return Ok((lhs.to_string(), ConstVal::Str(s)));
+        Ok((lhs.to_string(), ConstVal::Str(s)))
     } else {
         // number
         let n = rhs
             .parse::<u64>()
             .map_err(|_| ("LetValueNotNumber", "expected number".into()))?;
-        return Ok((lhs.to_string(), ConstVal::Num(n)));
+        Ok((lhs.to_string(), ConstVal::Num(n)))
     }
 }
 
@@ -991,8 +997,8 @@ fn unescape_string(s: &str) -> Result<String, String> {
 
 fn parse_repeat_header(rest: &str) -> Result<(u32, bool), (&'static str, String)> {
     let trimmed = rest.trim();
-    if trimmed.starts_with('(') {
-        let close = trimmed[1..]
+    if let Some(without_open) = trimmed.strip_prefix('(') {
+        let close = without_open
             .find(')')
             .ok_or(("RepeatMissingParen", "missing ')' in repeat".into()))?
             + 1;
@@ -1276,15 +1282,19 @@ fn substitute_and_emit(
     trimmed: &str,
     orig_line: u16,
     env: &LetEnv,
-    out_lines: &mut Vec<String>,
-    sm: &mut Vec<OrigLoc>,
-    diags: &mut Vec<CompileError>,
-    hints: &mut LegacyHintFlags,
+    outputs: &mut EmitOutputs<'_>,
     allow_hint: bool,
 ) -> Result<(), (&'static str, String)> {
+    let EmitOutputs {
+        lines: out_lines,
+        source_map: sm,
+        diagnostics: diags,
+        hints,
+    } = outputs;
+
     if let Ok(Some(call)) = parse_function_call_line(trimmed) {
         if call.name.eq_ignore_ascii_case("delay") {
-            let args = parse_call_args(call.args, env).map_err(|(code, msg)| (code, msg))?;
+            let args = parse_call_args(call.args, env)?;
             if args.len() != 1 {
                 return Err((
                     "DelayArgCount",
@@ -1305,14 +1315,16 @@ fn substitute_and_emit(
                 &normalized,
                 orig_line,
                 env,
-                out_lines,
-                sm,
-                diags,
-                hints,
+                &mut EmitOutputs {
+                    lines: out_lines,
+                    source_map: sm,
+                    diagnostics: diags,
+                    hints,
+                },
                 false,
             );
         } else if call.name.eq_ignore_ascii_case("text") {
-            let args = parse_call_args(call.args, env).map_err(|(code, msg)| (code, msg))?;
+            let args = parse_call_args(call.args, env)?;
             if args.is_empty() || args.len() > 2 {
                 return Err(("TextArgCount", "text() expects one or two arguments".into()));
             }
@@ -1350,7 +1362,7 @@ fn substitute_and_emit(
             });
             return Ok(());
         } else if call.name.eq_ignore_ascii_case("layout") {
-            let args = parse_call_args(call.args, env).map_err(|(code, msg)| (code, msg))?;
+            let args = parse_call_args(call.args, env)?;
             if args.len() != 1 {
                 return Err((
                     "LayoutArgCount",
@@ -1371,10 +1383,12 @@ fn substitute_and_emit(
                 &normalized,
                 orig_line,
                 env,
-                out_lines,
-                sm,
-                diags,
-                hints,
+                &mut EmitOutputs {
+                    lines: out_lines,
+                    source_map: sm,
+                    diagnostics: diags,
+                    hints,
+                },
                 false,
             );
         } else if call.name.eq_ignore_ascii_case("modtap") {
@@ -1416,10 +1430,12 @@ fn substitute_and_emit(
                 &normalized,
                 orig_line,
                 env,
-                out_lines,
-                sm,
-                diags,
-                hints,
+                &mut EmitOutputs {
+                    lines: out_lines,
+                    source_map: sm,
+                    diagnostics: diags,
+                    hints,
+                },
                 false,
             );
         } else if call.name.eq_ignore_ascii_case("tap") {
@@ -1458,10 +1474,12 @@ fn substitute_and_emit(
                 &normalized,
                 orig_line,
                 env,
-                out_lines,
-                sm,
-                diags,
-                hints,
+                &mut EmitOutputs {
+                    lines: out_lines,
+                    source_map: sm,
+                    diagnostics: diags,
+                    hints,
+                },
                 false,
             );
         }
@@ -1716,9 +1734,8 @@ fn substitute_and_emit(
 }
 
 fn split2(s: &str) -> Option<(&str, &str)> {
-    let mut it = s.splitn(2, char::is_whitespace);
-    let a = it.next()?;
-    let b = it.next()?;
+    let (a, b) = s.split_once(char::is_whitespace)?;
+
     Some((a, b))
 }
 
@@ -1730,7 +1747,7 @@ mod tests {
         compile_and_link, lower_to_flat_us,
     };
 
-    fn empty_provider<'a>(_: &'a str) -> Option<&'a str> {
+    fn empty_provider(_: &str) -> Option<&str> {
         None
     }
 

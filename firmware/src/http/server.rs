@@ -45,9 +45,7 @@ static mut FALLBACK_HTTP_REQ_BUFS: [[u8; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
 /// Spawn the HTTP worker pool (call this from your init).
 pub fn spawn_http_server_pool(spawner: &embassy_executor::Spawner, stack: net::Stack<'static>) {
     for id in 0..WEB_TASK_POOL_SIZE {
-        if let Err(e) = spawner.spawn(server_task(id, stack)) {
-            log::error!("http: spawn worker {id} failed: {:?}", e);
-        } else {
+        if crate::log_spawn(spawner, "http::server_task", server_task(id, stack)) {
             log::info!("http: spawned worker {id} (port {SERVER_PORT})");
         }
     }
@@ -63,10 +61,10 @@ pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
 
     // Keep connections alive so WS upgrade stays open.
     let cfg = picoserve::Config::new(picoserve::Timeouts {
-        start_read_request: Some(TimerDuration::from_secs(5)),
-        persistent_start_read_request: Some(TimerDuration::from_secs(3)),
-        read_request: Some(TimerDuration::from_secs(2)),
-        write: Some(TimerDuration::from_secs(3)),
+        start_read_request: TimerDuration::from_secs(5),
+        persistent_start_read_request: TimerDuration::from_secs(3),
+        read_request: TimerDuration::from_secs(2),
+        write: TimerDuration::from_secs(3),
     })
     .keep_connection_alive();
 

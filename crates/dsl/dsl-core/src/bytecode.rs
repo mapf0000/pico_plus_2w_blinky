@@ -62,7 +62,7 @@ impl<'a> Reader<'a> {
         if data.len() < 4 + 1 + 4 {
             return Err(DecodeError::UnexpectedEof);
         }
-        if &data[0..4] != &MAGIC {
+        if data[0..4] != MAGIC {
             return Err(DecodeError::BadMagic);
         }
         // flags = data[4], ignore for now

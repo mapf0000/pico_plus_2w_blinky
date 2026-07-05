@@ -5,7 +5,7 @@ use dsl_core::{
     LayoutId, MOD_LALT, MOD_LSHIFT, Mods, compile_and_link, lower_to_flat_with_layout,
 };
 
-fn empty_provider<'a>(_: &'a str) -> Option<&'a str> {
+fn empty_provider(_: &str) -> Option<&str> {
     None
 }
 

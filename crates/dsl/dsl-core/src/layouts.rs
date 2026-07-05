@@ -38,8 +38,9 @@ pub enum CharMapping {
     Seq(&'static [crate::KeyTap]),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LayoutId {
+    #[default]
     Us,
     #[cfg(feature = "layout_win_en_gb")]
     WinEnGb,
@@ -53,12 +54,6 @@ pub enum LayoutId {
     MacPtBr,
     #[cfg(feature = "layout_mac_de_de")]
     MacDeDe,
-}
-
-impl Default for LayoutId {
-    fn default() -> Self {
-        LayoutId::Us
-    }
 }
 
 impl LayoutId {
@@ -259,7 +254,7 @@ mod tests_win_de_de {
         preprocess,
     };
 
-    fn empty_provider<'a>(_: &'a str) -> Option<&'a str> {
+    fn empty_provider(_: &str) -> Option<&str> {
         None
     }
 
@@ -295,7 +290,7 @@ mod tests_mac_de_de {
         lower_to_flat_with_layout, preprocess,
     };
 
-    fn empty_provider<'a>(_: &'a str) -> Option<&'a str> {
+    fn empty_provider(_: &str) -> Option<&str> {
         None
     }
 

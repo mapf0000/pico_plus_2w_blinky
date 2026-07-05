@@ -1,4 +1,3 @@
-use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
@@ -7,7 +6,6 @@ use heapless::{String, Vec};
 
 use crate::log_buffer;
 
-use super::DisplayConfig;
 use super::page_common::{TEXT_PAD, update_line};
 use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData};
 
@@ -51,37 +49,27 @@ impl Page for LogsPageState {
             }
         };
 
-        render(
-            args.disp,
-            args.line_x,
-            args.y_pos,
-            args.clear_w,
-            args.content_width,
-            args.content_height,
-            args.config,
-            log_gen,
-            args.bg_color,
-            args.title_style,
-            args.body_style,
-            self,
-        );
+        render(args, log_gen, self);
     }
 }
 
-pub fn render(
-    disp: &mut impl DrawTarget<Color = Rgb565>,
-    line_x: i32,
-    mut y_pos: i32,
-    clear_w: u32,
-    content_width: u32,
-    content_height: u32,
-    config: &DisplayConfig,
+fn render<D: DrawTarget<Color = Rgb565>>(
+    args: PageRenderArgs<'_, D>,
     log_gen: u32,
-    bg_color: Rgb565,
-    title_style: &MonoTextStyle<Rgb565>,
-    body_style: &MonoTextStyle<Rgb565>,
     state: &mut LogsPageState,
 ) {
+    let PageRenderArgs {
+        disp,
+        line_x,
+        mut y_pos,
+        clear_w,
+        content_width,
+        content_height,
+        bg_color,
+        config,
+        title_style,
+        body_style,
+    } = args;
     let mut lines: Vec<String<{ log_buffer::LOG_LINE_MAX }>, { log_buffer::LOG_CAPACITY }> =
         Vec::new();
     log_buffer::snapshot(&mut lines);
@@ -114,10 +102,8 @@ pub fn render(
     for (idx, line) in display_slice.iter().enumerate() {
         update_line(
             disp,
-            line_x,
-            y_pos,
-            clear_w,
-            line_h as u32,
+            Point::new(line_x, y_pos),
+            Size::new(clear_w, line_h as u32),
             bg_color,
             line.as_str(),
             &mut state.prev_lines[idx],

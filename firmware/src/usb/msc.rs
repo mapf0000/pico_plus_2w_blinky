@@ -177,7 +177,7 @@ impl<'d, D: Driver<'d>> MscClass<'d, D> {
     }
 
     pub async fn run(&mut self, image: &'static [u8]) {
-        if image.len() % BLOCK_SIZE != 0 {
+        if !image.len().is_multiple_of(BLOCK_SIZE) {
             warn!(
                 "usb: MSC image length {} is not aligned to block size {}",
                 image.len(),

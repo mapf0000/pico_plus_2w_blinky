@@ -40,18 +40,23 @@ const MAX_PROMPT_LABEL_LEN: usize = 80;
 const MAX_TRANSFER_PATH_LEN: usize = 1024;
 static DB_CREDENTIALS_PROMPT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+struct DispatchState {
+    outbound: mpsc::Sender<Frame>,
+    debug_sink: DebugSink,
+    handshake_ok: bool,
+    transfer_feedback: mpsc::Sender<TransferFeedback>,
+    transfer_request: mpsc::Sender<PathBuf>,
+    default_transfer_path: Option<PathBuf>,
+    filesystem_cancellations: filesystem::CancellationRegistry,
+}
+
 pub async fn run(
     mut inbound: mpsc::Receiver<Event>,
     outbound: mpsc::Sender<Frame>,
     config: &Config,
 ) -> Result<()> {
-    let mut outbound = outbound;
-    let mut debug_sink = DebugSink::new(config.debug_log.as_deref())?;
-    let mut handshake_ok = false;
-    let mut default_transfer_path = config.send_files.first().cloned();
     let (transfer_feedback_tx, transfer_feedback_rx) = mpsc::channel::<TransferFeedback>(128);
     let (transfer_request_tx, transfer_request_rx) = mpsc::channel::<PathBuf>(32);
-    let filesystem_cancellations = filesystem::CancellationRegistry::default();
     spawn_transfer_worker(outbound.clone(), transfer_feedback_rx, transfer_request_rx);
 
     for path in config.send_files.clone() {
@@ -60,6 +65,16 @@ pub async fn run(
             break;
         }
     }
+
+    let mut state = DispatchState {
+        outbound,
+        debug_sink: DebugSink::new(config.debug_log.as_deref())?,
+        handshake_ok: false,
+        transfer_feedback: transfer_feedback_tx,
+        transfer_request: transfer_request_tx,
+        default_transfer_path: config.send_files.first().cloned(),
+        filesystem_cancellations: filesystem::CancellationRegistry::default(),
+    };
 
     let mut last_activity_at = Instant::now();
     let enable_keepalive = should_send_handshake(config);
@@ -74,7 +89,7 @@ pub async fn run(
             TAG_REQUEST_AGENT_STATUS,
             Bytes::from_static(HANDSHAKE_PAYLOAD),
         );
-        if outbound.send(frame).await.is_ok() {
+        if state.outbound.send(frame).await.is_ok() {
             info!("handshake request sent");
         } else {
             warn!("handshake request failed");
@@ -96,17 +111,7 @@ pub async fn run(
                     }
                     Event::Frame(frame) => {
                         last_activity_at = Instant::now();
-                        handle_frame(
-                            frame,
-                            &mut outbound,
-                            &mut debug_sink,
-                            &mut handshake_ok,
-                            &transfer_feedback_tx,
-                            &transfer_request_tx,
-                            &mut default_transfer_path,
-                            &filesystem_cancellations,
-                        )
-                        .await?;
+                        handle_frame(frame, &mut state).await?;
                     }
                 }
             }
@@ -117,11 +122,11 @@ pub async fn run(
                     break;
                 }
                 let frame = Frame::new(TAG_REQUEST_AGENT_STATUS, Bytes::new());
-                if outbound.send(frame).await.is_err() {
+                if state.outbound.send(frame).await.is_err() {
                     warn!("keepalive send failed");
                     break;
                 }
-                if outbound.is_closed() {
+                if state.outbound.is_closed() {
                     warn!("serial writer closed");
                     break;
                 }
@@ -132,16 +137,7 @@ pub async fn run(
     Ok(())
 }
 
-async fn handle_frame(
-    frame: Frame,
-    outbound: &mut mpsc::Sender<Frame>,
-    debug_sink: &mut DebugSink,
-    handshake_ok: &mut bool,
-    transfer_feedback: &mpsc::Sender<TransferFeedback>,
-    transfer_request: &mpsc::Sender<PathBuf>,
-    default_transfer_path: &mut Option<PathBuf>,
-    filesystem_cancellations: &filesystem::CancellationRegistry,
-) -> Result<()> {
+async fn handle_frame(frame: Frame, state: &mut DispatchState) -> Result<()> {
     match frame.tag {
         TAG_REQUEST_AGENT_STATUS => {
             let handshake = frame.payload.as_ref() == HANDSHAKE_PAYLOAD;
@@ -151,13 +147,13 @@ async fn handle_frame(
             let hostname = hostname::get().unwrap_or_else(|_| "unknown".into());
             let payload = Bytes::from(hostname.to_string_lossy().into_owned());
             let response = Frame::new(TAG_AGENT_STATUS, payload);
-            outbound.send(response).await?;
+            state.outbound.send(response).await?;
             info!("sent agent status");
             if handshake {
                 info!("handshake response sent");
-                if !*handshake_ok {
+                if !state.handshake_ok {
                     info!("handshake ok");
-                    *handshake_ok = true;
+                    state.handshake_ok = true;
                 }
             }
         }
@@ -168,31 +164,31 @@ async fn handle_frame(
                 return Ok(());
             }
             info!(message = %message, "device debug");
-            debug_sink.write_line(&message)?;
-            if message == HANDSHAKE_OK_MSG && !*handshake_ok {
+            state.debug_sink.write_line(&message)?;
+            if message == HANDSHAKE_OK_MSG && !state.handshake_ok {
                 info!("handshake ok");
-                *handshake_ok = true;
+                state.handshake_ok = true;
             }
         }
         TAG_EXECUTE => {
-            handle_execute(frame, outbound).await?;
+            handle_execute(frame, &mut state.outbound).await?;
         }
         TAG_DB_CREDENTIALS_REQUEST => {
-            let outbound = outbound.clone();
+            let outbound = state.outbound.clone();
             tokio::spawn(async move {
                 handle_db_credentials_request_in_background(frame, outbound).await;
             });
         }
         TAG_FILE_START_REQUEST => {
             if let Some(path) = transfer_path_from_payload(&frame.payload) {
-                if transfer_request.send(path.clone()).await.is_ok() {
+                if state.transfer_request.send(path.clone()).await.is_ok() {
                     info!(path = %path.display(), "queued transfer start request");
                 } else {
                     warn!("transfer request worker is not running");
                 }
             } else if frame.payload.is_empty() {
-                if let Some(path) = default_transfer_path.as_ref() {
-                    if transfer_request.send(path.clone()).await.is_ok() {
+                if let Some(path) = state.default_transfer_path.as_ref() {
+                    if state.transfer_request.send(path.clone()).await.is_ok() {
                         info!(
                             path = %path.display(),
                             "queued default transfer start request"
@@ -212,16 +208,16 @@ async fn handle_frame(
         TAG_FILE_SET_DEFAULT_PATH => {
             if let Some(path) = transfer_path_from_payload(&frame.payload) {
                 info!(path = %path.display(), "updated default transfer path");
-                *default_transfer_path = Some(path);
+                state.default_transfer_path = Some(path);
             } else {
                 warn!("received invalid default transfer path payload");
             }
         }
         filesystem::TAG_FS_LIST_REQUEST => match filesystem::decode_list_request(&frame.payload) {
             Ok(request) => {
-                filesystem_cancellations.begin(request.request_id);
-                let outbound = outbound.clone();
-                let cancellations = filesystem_cancellations.clone();
+                state.filesystem_cancellations.begin(request.request_id);
+                let outbound = state.outbound.clone();
+                let cancellations = state.filesystem_cancellations.clone();
                 tokio::spawn(filesystem::send_list_page(outbound, request, cancellations));
             }
             Err(err) => {
@@ -230,7 +226,7 @@ async fn handle_frame(
         },
         filesystem::TAG_FS_LIST_CANCEL => match filesystem::decode_cancel_request(&frame.payload) {
             Ok(request_id) => {
-                let active = filesystem_cancellations.cancel(request_id);
+                let active = state.filesystem_cancellations.cancel(request_id);
                 debug!(request_id, active, "filesystem list cancellation");
             }
             Err(err) => {
@@ -241,7 +237,7 @@ async fn handle_frame(
         | file_transfer::TAG_FILE_RESULT
         | file_transfer::TAG_FILE_ABORT => match file_transfer::decode_feedback(&frame) {
             Ok(Some(feedback)) => {
-                if transfer_feedback.send(feedback).await.is_err() {
+                if state.transfer_feedback.send(feedback).await.is_err() {
                     debug!("transfer feedback dropped (worker not active)");
                 }
             }

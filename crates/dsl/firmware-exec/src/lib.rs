@@ -138,7 +138,7 @@ mod bytecode {
             if data.len() < 9 {
                 return Err(DecodeError::UnexpectedEof);
             }
-            if &data[0..4] != &MAGIC {
+            if data[0..4] != MAGIC {
                 return Err(DecodeError::BadMagic);
             }
             let crc_range_end = data

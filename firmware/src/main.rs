@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![recursion_limit = "256"]
 
 // ===== Imports =====
 
@@ -11,6 +12,7 @@ use embassy_executor::Spawner;
 use embassy_net::{self as net, Config, StackResources};
 use embassy_rp::bind_interrupts;
 use embassy_rp::clocks::RoscRng;
+use embassy_rp::dma;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::pio::Pio;
@@ -30,6 +32,8 @@ bind_interrupts!(pub struct Irqs {
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<USB>;
     // PIO interrupt for CYW43 PIO-SPI
     PIO0_IRQ_0  => embassy_rp::pio::InterruptHandler<PIO0>;
+    // DMA channel used by the CYW43 PIO-SPI transport.
+    DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<DMA_CH0>;
 });
 
 // ===== Globals =====
@@ -48,18 +52,22 @@ const AP_CHANNEL: u8 = 6;
 // ===== Small utilities =====
 
 #[inline]
-pub fn log_spawn<S>(spawner: &Spawner, name: &str, token: embassy_executor::SpawnToken<S>) -> bool {
-    match spawner.spawn(token) {
-        Ok(()) => true,
+pub fn log_spawn<S>(
+    spawner: &Spawner,
+    name: &str,
+    token: Result<embassy_executor::SpawnToken<S>, embassy_executor::SpawnError>,
+) -> bool {
+    match token {
+        Ok(token) => {
+            spawner.spawn(token);
+            true
+        }
         Err(e) => {
             log::error!("spawn {} failed: {:?}", name, e);
             false
         }
     }
 }
-
-/// Start early USB (CDC logger + HID) for immediate logging at boot.
-// Early-USB removed: USB is started on demand via WS USB_REGISTER
 
 /// Seed RNG and log the value; returns the seed.
 fn seed_rng() -> u64 {
@@ -128,7 +136,7 @@ fn spawn_http(spawner: &Spawner, stack: &'static net::Stack<'static>) -> bool {
 /// Drives low-level CYW43 events
 #[embassy_executor::task]
 async fn cyw43_task(
-    runner: cyw43::Runner<'static, Output<'static>, PioSpi<'static, PIO0, 0, DMA_CH0>>,
+    runner: cyw43::Runner<'static, cyw43::SpiBus<Output<'static>, PioSpi<'static, PIO0, 0>>>,
 ) -> ! {
     runner.run().await
 }
@@ -187,8 +195,9 @@ async fn main(spawner: Spawner) {
     crate::device_config::set_flash_driver(flash_drv).await;
 
     // --- CYW43 bring-up via PIO-SPI ---
-    let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
+    let fw = cyw43::aligned_bytes!("../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
+    let nvram = cyw43::aligned_bytes!("../cyw43-firmware/nvram_rp2040.bin");
 
     let pwr = Output::new(p.PIN_23, Level::Low);
     let cs = Output::new(p.PIN_25, Level::High);
@@ -201,16 +210,16 @@ async fn main(spawner: Spawner) {
         RM2_CLOCK_DIVIDER, // important for RM2-based Pico Plus 2 W
         pio.irq0,
         cs,
-        p.PIN_24, // MOSI
-        p.PIN_29, // MISO
-        p.DMA_CH0,
+        p.PIN_24, // bidirectional data
+        p.PIN_29, // clock
+        dma::Channel::new(p.DMA_CH0, Irqs),
     );
 
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
 
     log::info!("cyw43: loading firmware and bringing up chip");
-    let (net_device, mut control, cyw_runner) = cyw43::new(state, pwr, spi, fw).await;
+    let (net_device, mut control, cyw_runner) = cyw43::new(state, pwr, spi, fw, nvram).await;
     log::info!("cyw43: init complete; spawning runner");
     let _ = log_spawn(&spawner, "cyw43_task", cyw43_task(cyw_runner));
 

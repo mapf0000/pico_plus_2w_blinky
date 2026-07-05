@@ -161,7 +161,7 @@ pub const MOD_RGUI: Mods = Mods(0x80);
 fn upper_ascii<const N: usize>(s: &str) -> ArrayString<N> {
     let mut out: ArrayString<N> = ArrayString::new();
     for b in s.bytes() {
-        let up = if b'a' <= b && b <= b'z' { b - 32 } else { b };
+        let up = if b.is_ascii_lowercase() { b - 32 } else { b };
         let _ = out.push(up as char);
     }
     out
@@ -209,28 +209,28 @@ pub(crate) fn parse_key(s: &str) -> Option<Usage> {
 
     if u.len() == 1 {
         let b = u.as_bytes()[0];
-        if b'A' <= b && b <= b'Z' {
+        if b.is_ascii_uppercase() {
             return Some(KEY_A.add(b - b'A'));
         }
     }
-    if let Some(rest) = u.strip_prefix('F') {
-        if let Ok(n) = rest.parse::<u8>() {
-            return match n {
-                1 => Some(KEY_F1),
-                2 => Some(KEY_F2),
-                3 => Some(KEY_F3),
-                4 => Some(KEY_F4),
-                5 => Some(KEY_F5),
-                6 => Some(KEY_F6),
-                7 => Some(KEY_F7),
-                8 => Some(KEY_F8),
-                9 => Some(KEY_F9),
-                10 => Some(KEY_F10),
-                11 => Some(KEY_F11),
-                12 => Some(KEY_F12),
-                _ => None,
-            };
-        }
+    if let Some(rest) = u.strip_prefix('F')
+        && let Ok(n) = rest.parse::<u8>()
+    {
+        return match n {
+            1 => Some(KEY_F1),
+            2 => Some(KEY_F2),
+            3 => Some(KEY_F3),
+            4 => Some(KEY_F4),
+            5 => Some(KEY_F5),
+            6 => Some(KEY_F6),
+            7 => Some(KEY_F7),
+            8 => Some(KEY_F8),
+            9 => Some(KEY_F9),
+            10 => Some(KEY_F10),
+            11 => Some(KEY_F11),
+            12 => Some(KEY_F12),
+            _ => None,
+        };
     }
     if let Some(rest) = u.strip_prefix("KP_") {
         return match rest {
@@ -255,7 +255,7 @@ pub(crate) fn parse_key(s: &str) -> Option<Usage> {
     }
     if u.len() == 1 {
         let b = u.as_bytes()[0];
-        if b'1' <= b && b <= b'9' {
+        if (b'1'..=b'9').contains(&b) {
             return Some(KEY_1.add(b - b'1'));
         }
         if b == b'0' {
@@ -309,6 +309,12 @@ pub struct ArrayString<const N: usize> {
     len: usize,
 }
 
+impl<const N: usize> Default for ArrayString<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> ArrayString<N> {
     pub fn new() -> Self {
         Self {
@@ -316,13 +322,13 @@ impl<const N: usize> ArrayString<N> {
             len: 0,
         }
     }
-    pub fn push(&mut self, ch: char) -> Result<(), ()> {
+    pub fn push(&mut self, ch: char) -> bool {
         if self.len < N {
             self.buf[self.len] = ch as u8;
             self.len += 1;
-            Ok(())
+            true
         } else {
-            Err(())
+            false
         }
     }
     pub fn as_str(&self) -> &str {

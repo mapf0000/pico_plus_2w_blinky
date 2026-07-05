@@ -739,10 +739,10 @@ fn js_error_to_string(value: JsValue) -> String {
 fn web_now_ms() -> f64 {
     #[cfg(target_arch = "wasm32")]
     {
-        return web_sys::window()
+        web_sys::window()
             .and_then(|window| window.performance())
             .map(|perf| perf.now())
-            .unwrap_or(0.0);
+            .unwrap_or(0.0)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
