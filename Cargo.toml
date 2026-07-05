@@ -21,6 +21,3 @@ codegen-units = 1
 strip = true
 opt-level = "z"
 codegen-units = 1
-
-[patch.crates-io]
-picoserve = { path = "crates/vendor/picoserve" }

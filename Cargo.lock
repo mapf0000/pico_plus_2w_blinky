@@ -2212,6 +2212,8 @@ dependencies = [
 [[package]]
 name = "picoserve"
 version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e4976908c758efc04289ad266181f22e252b67daac2710581da9f5aa7a3207a"
 dependencies = [
  "const-sha1",
  "data-encoding",
