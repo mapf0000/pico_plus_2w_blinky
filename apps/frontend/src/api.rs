@@ -79,12 +79,19 @@ struct WsState {
     _onclose: Closure<dyn FnMut(CloseEvent)>,
 }
 
-fn hostname() -> String {
+fn websocket_url() -> String {
     let window = web_sys::window().expect("window");
-    window
-        .location()
-        .hostname()
-        .unwrap_or_else(|_| "192.168.4.1".into())
+    let location = window.location();
+    let scheme = match location.protocol().as_deref() {
+        Ok("https:") => "wss",
+        _ => "ws",
+    };
+    let host = location
+        .host()
+        .ok()
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| "192.168.4.1".into());
+    format!("{scheme}://{host}/ws")
 }
 
 pub fn init_ws(
@@ -123,7 +130,7 @@ fn connect_ws() {
         return;
     };
 
-    let url = format!("ws://{}/ws", hostname());
+    let url = websocket_url();
     let Ok(ws) = WebSocket::new(&url) else {
         (callbacks.on_log)("WS connection failed; retrying".into());
         (callbacks.on_state)(false);
@@ -183,9 +190,9 @@ fn connect_ws() {
         Closure::wrap(Box::new(move |_e: Event| {
             let canceled = cancel_pending_requests();
             if canceled > 0 {
-                (callbacks.on_log)(format!("WS error; canceled {canceled} pending request(s)"));
-            } else {
-                (callbacks.on_log)("WS error".into());
+                (callbacks.on_log)(format!(
+                    "Connection interrupted; canceled {canceled} pending request(s)"
+                ));
             }
             (callbacks.on_state)(false);
             schedule_ws_reconnect();
@@ -195,11 +202,8 @@ fn connect_ws() {
         let callbacks = callbacks.clone();
         Closure::wrap(Box::new(move |_e: CloseEvent| {
             let canceled = cancel_pending_requests();
-            if canceled > 0 {
-                (callbacks.on_log)(format!("WS closed; canceled {canceled} pending request(s)"));
-            } else {
-                (callbacks.on_log)("WS closed".into());
-            }
+            let _ = canceled;
+            (callbacks.on_log)("Device connection lost; retrying".into());
             (callbacks.on_state)(false);
             schedule_ws_reconnect();
         }) as Box<dyn FnMut(_)>)

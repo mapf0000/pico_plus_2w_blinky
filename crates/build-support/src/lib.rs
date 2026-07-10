@@ -304,12 +304,13 @@ mod frontend {
 
         let js = pick_one_with_ext(&dist, "js")?;
         let wasm = pick_one_with_ext(&dist, "wasm")?;
+        let css = pick_one_with_ext(&dist, "css")?;
 
         // Rewrite index.html references to stable /ui paths
         let index_src = dist.join("index.html");
         let mut index = fs::read_to_string(&index_src)
             .with_context(|| format!("read {}", index_src.display()))?;
-        rewrite_paths(&mut index, &js, &wasm);
+        rewrite_paths(&mut index, &js, &wasm, &css);
 
         // Copy to OUT_DIR with stable names
         fs::write(cfg.out_dir.join("frontend_index.html"), index)?;
@@ -387,15 +388,17 @@ mod frontend {
     }
 
     /// Normalize hashed asset names in `index.html` to stable `/ui/*` paths.
-    fn rewrite_paths(index: &mut String, js: &Path, wasm: &Path) {
+    fn rewrite_paths(index: &mut String, js: &Path, wasm: &Path, css: &Path) {
         let js_name = js.file_name().unwrap().to_string_lossy();
         let wasm_name = wasm.file_name().unwrap().to_string_lossy();
+        let css_name = css.file_name().unwrap().to_string_lossy();
 
         *index = index.replace(&*js_name, "ui/app.js");
         *index = index.replace(&*wasm_name, "ui/app.wasm");
         *index = index.replace(&format!("/{}", js_name), "/ui/app.js");
         *index = index.replace(&format!("/{}", wasm_name), "/ui/app.wasm");
-        *index = index.replace("/style.css", "/ui/style.css");
+        *index = index.replace(&*css_name, "ui/style.css");
+        *index = index.replace(&format!("/{}", css_name), "/ui/style.css");
         if index.contains("/ui/ui/") {
             *index = index.replace("/ui/ui/", "/ui/");
         }

@@ -1,21 +1,9 @@
 [[proxy]]
-rewrite = "/status"
-backend = "http://192.168.4.1/status"
+rewrite = "/ws"
+backend = "ws://192.168.4.1/ws"
+ws = true
 
-[[proxy]]
-rewrite = "/config"
-backend = "http://192.168.4.1/config"
-
-[[proxy]]
-rewrite = "/usb"
-backend = "http://192.168.4.1/usb"
-
-[[proxy]]
-rewrite = "/kb"
-backend = "http://192.168.4.1/kb"
-
-
-# No need to proxy UI assets; Trunk serves them locally during dev.
+# UI assets are served locally. All device commands share the WebSocket above.
 
 [watch]
 watch  = ["src", "index.html", "ui"]

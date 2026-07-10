@@ -31,6 +31,43 @@ struct BrowseRequest {
     show_hidden: bool,
 }
 
+const STARTER_SCRIPT: &str = "layout(\"mac_de-DE\")\nmodtap(\"LGUI+SPACE\")\ndelay(400)\ntext(\"Terminal\", 10)\ntap(\"ENTER\")";
+
+#[derive(Clone, Copy, PartialEq)]
+enum AppSection {
+    Overview,
+    Scripts,
+    Transfers,
+    Diagnostics,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ConnectionState {
+    Connecting,
+    Connected,
+    Reconnecting,
+    Unavailable,
+}
+
+impl ConnectionState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Connecting => "Connecting",
+            Self::Connected => "Connected",
+            Self::Reconnecting => "Reconnecting",
+            Self::Unavailable => "Unavailable",
+        }
+    }
+
+    fn class(self) -> &'static str {
+        match self {
+            Self::Connected => "is-good",
+            Self::Connecting | Self::Reconnecting => "is-warn",
+            Self::Unavailable => "is-bad",
+        }
+    }
+}
+
 #[function_component(App)]
 fn app() -> Html {
     let status: UseStateHandle<Option<StatusState>> = use_state(|| None);
@@ -41,12 +78,15 @@ fn app() -> Html {
     let transfer_path = use_state(String::new);
     let filesystem_store = use_mut_ref(filesystem::BrowserStore::new);
     let filesystem_view = use_state(filesystem::BrowserView::default);
-    let dsl_text = use_state(String::new);
+    let dsl_text = use_state(|| STARTER_SCRIPT.to_string());
     let selected_os = use_state(|| String::from("mac"));
+    let active_section = use_state(|| AppSection::Overview);
     let busy_count = use_mut_ref(|| 0u32);
     let busy_state = use_state(|| false);
     let log_lines = use_state(Vec::<String>::new);
     let ws_connected = use_state(|| false);
+    let connection_state = use_state(|| ConnectionState::Connecting);
+    let was_connected = use_mut_ref(|| false);
     let toast = use_state(|| None::<(String, bool)>); // (message, ok?)
     // All WebSocket API calls are handled in api.rs via a single connection
 
@@ -68,6 +108,9 @@ fn app() -> Html {
         let log_lines = log_lines.clone();
         Callback::from(move |line: String| {
             let mut v = (*log_lines).clone();
+            if v.last() == Some(&line) {
+                return;
+            }
             v.push(line);
             if v.len() > 300 {
                 let _ = v.drain(0..v.len() - 300);
@@ -135,52 +178,35 @@ fn app() -> Html {
         })
     };
 
-    // Initial fetches
+    // Built-in scripts are compiled into the frontend and do not depend on the device.
     {
-        let status = status.clone();
-        let config = config.clone();
         let scripts_state = scripts.clone();
-        let set_busy = set_busy.clone();
         let push_log = push_log.clone();
         use_effect_with((), move |_| {
             wasm_bindgen_futures::spawn_local(async move {
-                // Small delay to allow WS to connect first
-                gloo_timers::future::TimeoutFuture::new(200).await;
-                set_busy.emit(true);
-                match api::get_status().await {
-                    Ok(s) => status.set(Some(StatusState {
-                        usb_enabled: s.usb_enabled,
-                        usb_ready: s.usb_ready,
-                        host_os: s.host_os,
-                    })),
-                    Err(e) => push_log.emit(format!("status error: {e}")),
-                }
-                match api::get_config().await {
-                    Ok(c) => config.set(Some(ConfigState {
-                        usb_manufacturer: c.usb_manufacturer,
-                        usb_product: c.usb_product,
-                    })),
-                    Err(e) => push_log.emit(format!("config error: {e}")),
-                }
                 match api::list_scripts().await {
                     Ok(list) => scripts_state.set(Some(list)),
                     Err(e) => push_log.emit(format!("scripts error: {e}")),
                 }
-                set_busy.emit(false);
             });
             || ()
         });
     }
 
-    // Poll status every 5s
+    // Refresh device data whenever the socket opens or reconnects.
     {
         let status = status.clone();
+        let config = config.clone();
+        let set_busy = set_busy.clone();
         let push_log = push_log.clone();
-        use_effect_with((), move |_| {
-            let handle = gloo_timers::callback::Interval::new(5000, move || {
+        use_effect_with(*ws_connected, move |connected| {
+            if *connected {
                 let status = status.clone();
+                let config = config.clone();
+                let set_busy = set_busy.clone();
                 let push_log = push_log.clone();
                 wasm_bindgen_futures::spawn_local(async move {
+                    set_busy.emit(true);
                     match api::get_status().await {
                         Ok(s) => status.set(Some(StatusState {
                             usb_enabled: s.usb_enabled,
@@ -189,7 +215,40 @@ fn app() -> Html {
                         })),
                         Err(e) => push_log.emit(format!("status error: {e}")),
                     }
+                    match api::get_config().await {
+                        Ok(c) => config.set(Some(ConfigState {
+                            usb_manufacturer: c.usb_manufacturer,
+                            usb_product: c.usb_product,
+                        })),
+                        Err(e) => push_log.emit(format!("config error: {e}")),
+                    }
+                    set_busy.emit(false);
                 });
+            }
+            || ()
+        });
+    }
+
+    // Poll status only while connected; reconnecting does its own refresh.
+    {
+        let status = status.clone();
+        let push_log = push_log.clone();
+        use_effect_with(*ws_connected, move |connected| {
+            let handle = connected.then(|| {
+                gloo_timers::callback::Interval::new(5000, move || {
+                    let status = status.clone();
+                    let push_log = push_log.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        match api::get_status().await {
+                            Ok(s) => status.set(Some(StatusState {
+                                usb_enabled: s.usb_enabled,
+                                usb_ready: s.usb_ready,
+                                host_os: s.host_os,
+                            })),
+                            Err(e) => push_log.emit(format!("status error: {e}")),
+                        }
+                    });
+                })
             });
             move || drop(handle)
         });
@@ -199,6 +258,8 @@ fn app() -> Html {
     {
         let push_log = push_log.clone();
         let ws_connected = ws_connected.clone();
+        let connection_state = connection_state.clone();
+        let was_connected = was_connected.clone();
         let transfer_store = transfer_store.clone();
         let transfers_state = transfers.clone();
         let filesystem_store = filesystem_store.clone();
@@ -211,7 +272,19 @@ fn app() -> Html {
                 },
                 {
                     let ws_connected = ws_connected.clone();
-                    move |b| ws_connected.set(b)
+                    let connection_state = connection_state.clone();
+                    let was_connected = was_connected.clone();
+                    move |connected| {
+                        ws_connected.set(connected);
+                        if connected {
+                            *was_connected.borrow_mut() = true;
+                            connection_state.set(ConnectionState::Connected);
+                        } else if *was_connected.borrow() {
+                            connection_state.set(ConnectionState::Reconnecting);
+                        } else {
+                            connection_state.set(ConnectionState::Unavailable);
+                        }
+                    }
                 },
                 {
                     let push_log = push_log.clone();
@@ -307,6 +380,10 @@ fn app() -> Html {
                 // client-side validation similar to firmware
                 if man.len() > 32 || prod.len() > 48 || !man.is_ascii() || !prod.is_ascii() {
                     push_log.emit("invalid identity (length/ascii)".to_string());
+                    show_toast.emit((
+                        "Identity must use ASCII and fit the byte limits".into(),
+                        false,
+                    ));
                     return;
                 }
                 set_busy.emit(true);
@@ -391,6 +468,7 @@ fn app() -> Html {
             let txt = (*dsl_text).clone();
             if txt.trim().is_empty() {
                 push_log.emit("empty script".to_string());
+                toast_cb.emit(("Add commands before running the script".into(), false));
                 return;
             }
             let set_busy = set_busy.clone();
@@ -476,6 +554,10 @@ fn app() -> Html {
             let path = path.trim().to_string();
             if path.is_empty() {
                 push_log.emit("transfer path is empty".into());
+                toast_cb.emit((
+                    "Choose a host path before starting a transfer".into(),
+                    false,
+                ));
                 return;
             }
             let set_busy = set_busy.clone();
@@ -513,6 +595,10 @@ fn app() -> Html {
             let path = (*transfer_path).trim().to_string();
             if path.is_empty() {
                 push_log.emit("transfer path is empty".into());
+                toast_cb.emit((
+                    "Choose a host path before setting the default".into(),
+                    false,
+                ));
                 return;
             }
             let set_busy = set_busy.clone();
@@ -535,96 +621,173 @@ fn app() -> Html {
         })
     };
 
+    let on_usb_stop = {
+        let set_busy = set_busy.clone();
+        let push_log = push_log.clone();
+        let toast_cb = show_toast.clone();
+        Callback::from(move |_| {
+            let set_busy = set_busy.clone();
+            let push_log = push_log.clone();
+            let show_toast = toast_cb.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                set_busy.emit(true);
+                match api::usb_unregister().await {
+                    Ok(()) => {
+                        push_log.emit("USB disabling request sent".into());
+                        show_toast.emit(("USB disabling…".into(), true));
+                    }
+                    Err(e) => {
+                        push_log.emit(format!("usb stop error: {e}"));
+                        show_toast.emit((format!("USB stop failed: {e}"), false));
+                    }
+                }
+                set_busy.emit(false);
+            });
+        })
+    };
+
     // UI pieces
     let st = (*status).clone();
     let conf = (*config).clone();
     let scr = (*scripts).clone();
     let busy = *busy_state;
+    let connected = *ws_connected;
+    let current_section = *active_section;
+    let select_section = |section: AppSection| {
+        let active_section = active_section.clone();
+        Callback::from(move |_| active_section.set(section))
+    };
+    let section_title = match current_section {
+        AppSection::Overview => ("Overview", "Device health, identity, and USB bring-up"),
+        AppSection::Scripts => ("Scripts", "Compose and run keyboard automation"),
+        AppSection::Transfers => ("Transfers", "Browse the host and receive files securely"),
+        AppSection::Diagnostics => ("Diagnostics", "Connection events and device activity"),
+    };
 
     html! {
-        <div class="container">
+        <div class="app-shell">
             <ToastBar toast={(*toast).clone()} />
-            <div class="hero">
-                <div class="hero-text">
-                    <h1>{"Pico Endpoint"}</h1>
-                    <p class="sub">{"A compact control surface for bring-up and scripting."}</p>
+            <aside class="sidebar">
+                <div class="brand">
+                    <div class="brand-mark" aria-hidden="true">{"P"}</div>
+                    <div>
+                        <div class="brand-name">{"Pico Endpoint"}</div>
+                        <div class="brand-subtitle">{"Device console"}</div>
+                    </div>
                 </div>
-            </div>
+                <nav class="primary-nav" aria-label="Main navigation">
+                    <button class={classes!("nav-item", (current_section == AppSection::Overview).then_some("active"))} onclick={select_section(AppSection::Overview)}>
+                        <span class="nav-icon" aria-hidden="true">{"◫"}</span><span>{"Overview"}</span>
+                    </button>
+                    <button class={classes!("nav-item", (current_section == AppSection::Scripts).then_some("active"))} onclick={select_section(AppSection::Scripts)}>
+                        <span class="nav-icon" aria-hidden="true">{"⌁"}</span><span>{"Scripts"}</span>
+                    </button>
+                    <button class={classes!("nav-item", (current_section == AppSection::Transfers).then_some("active"))} onclick={select_section(AppSection::Transfers)}>
+                        <span class="nav-icon" aria-hidden="true">{"⇄"}</span><span>{"Transfers"}</span>
+                    </button>
+                    <button class={classes!("nav-item", (current_section == AppSection::Diagnostics).then_some("active"))} onclick={select_section(AppSection::Diagnostics)}>
+                        <span class="nav-icon" aria-hidden="true">{"⌘"}</span><span>{"Diagnostics"}</span>
+                    </button>
+                </nav>
+                <div class="sidebar-footer">
+                    <span class={classes!("device-dot", connection_state.class())}></span>
+                    <div><strong>{"RP2350 console"}</strong><span>{"Desktop interface"}</span></div>
+                </div>
+            </aside>
 
-            <div class="grid">
-                <StatusCard status={st.clone()} busy={busy} ws_connected={*ws_connected} />
-                <IdentityCard
-                    config={conf.clone()}
-                    usb_enabled={st.as_ref().map(|s| s.usb_enabled).unwrap_or(false)}
-                    on_save={on_save_identity.clone()} />
-                <UsbCard
-                    selected_os={(*selected_os).clone()}
-                    on_select_os={
-                        let selected_os = selected_os.clone();
-                        Callback::from(move |os: String| selected_os.set(os))
-                    }
-                    usb_enabled={st.as_ref().map(|s| s.usb_enabled).unwrap_or(false)}
-                    on_start={on_usb_start.clone()}
-                    on_stop={
-                        let set_busy = set_busy.clone();
-                        let push_log = push_log.clone();
-                        let toast_cb = show_toast.clone();
-                        Callback::from(move |_| {
-                            let set_busy = set_busy.clone();
-                            let push_log = push_log.clone();
-                            let show_toast = toast_cb.clone();
-                            wasm_bindgen_futures::spawn_local(async move {
-                                set_busy.emit(true);
-                                match api::usb_unregister().await {
-                                    Ok(()) => { push_log.emit("USB disabling request sent".into()); show_toast.emit(("USB disabling…".into(), true)); }
-                                    Err(e) => { push_log.emit(format!("usb stop error: {e}")); show_toast.emit((format!("USB stop failed: {e}"), false)); }
-                                }
-                                set_busy.emit(false);
-                            });
-                        })
-                    }
-                />
-                <ScriptingCard
-                    dsl_text={(*dsl_text).clone()}
-                    on_change={
-                        let dsl_text = dsl_text.clone();
-                        Callback::from(move |s: String| dsl_text.set(s))
-                    }
-                    on_select_layout={
-                        let dsl_text = dsl_text.clone();
-                        Callback::from(move |layout: String| {
-                            dsl_text.set(dsl::set_entry_layout(&dsl_text, &layout));
-                        })
-                    }
-                    scripts={scr.clone()}
-                    on_run={on_run_dsl.clone()} />
-                <DownloadManagerCard
-                    transfers={(*transfers).clone()}
-                    on_download={on_download_transfer.clone()} />
-                <FileBrowserCard
-                    view={(*filesystem_view).clone()}
-                    connected={*ws_connected}
-                    on_browse={on_browse.clone()}
-                    on_select={{
-                        let transfer_path = transfer_path.clone();
-                        Callback::from(move |path: String| transfer_path.set(path))
-                    }}
-                    on_transfer={queue_transfer_path.clone()} />
-                <TransferStartCard
-                    path={(*transfer_path).clone()}
-                    on_change={
-                        let transfer_path = transfer_path.clone();
-                        Callback::from(move |value: String| transfer_path.set(value))
-                    }
-                    on_start={on_start_transfer.clone()}
-                    on_set_default={on_set_transfer_default.clone()} />
-                <LogCard
-                    lines={(*log_lines).clone()}
-                    on_clear={
-                        let log_lines = log_lines.clone();
-                        Callback::from(move |_| log_lines.set(Vec::new()))
-                    } />
-            </div>
+            <main class="workspace">
+                <header class="topbar">
+                    <div>
+                        <h1>{section_title.0}</h1>
+                        <p>{section_title.1}</p>
+                    </div>
+                    <div class="topbar-status">
+                        <span class={classes!("connection-pill", connection_state.class())}>
+                            <span class="status-dot"></span>{connection_state.label()}
+                        </span>
+                        <span class="topbar-metric"><span>{"USB"}</span><strong>{st.as_ref().map(|s| if s.usb_ready { "Ready" } else if s.usb_enabled { "Starting" } else { "Off" }).unwrap_or("Checking")}</strong></span>
+                        <span class="topbar-metric"><span>{"Host"}</span><strong>{st.as_ref().map(|s| s.host_os.as_str()).unwrap_or("Unknown")}</strong></span>
+                    </div>
+                </header>
+
+                <div class="content-area">
+                    { match current_section {
+                        AppSection::Overview => html! {
+                            <div class="overview-grid">
+                                <div class="overview-stack">
+                                    <StatusCard status={st.clone()} busy={busy} connection={*connection_state} />
+                                    <UsbCard
+                                        selected_os={(*selected_os).clone()}
+                                        on_select_os={{
+                                            let selected_os = selected_os.clone();
+                                            Callback::from(move |os: String| selected_os.set(os))
+                                        }}
+                                        usb_enabled={st.as_ref().map(|s| s.usb_enabled).unwrap_or(false)}
+                                        connected={connected}
+                                        busy={busy}
+                                        on_start={on_usb_start.clone()}
+                                        on_stop={on_usb_stop.clone()} />
+                                </div>
+                                <IdentityCard
+                                    config={conf.clone()}
+                                    usb_enabled={st.as_ref().map(|s| s.usb_enabled).unwrap_or(false)}
+                                    connected={connected}
+                                    busy={busy}
+                                    on_save={on_save_identity.clone()} />
+                            </div>
+                        },
+                        AppSection::Scripts => html! {
+                            <ScriptingCard
+                                dsl_text={(*dsl_text).clone()}
+                                on_change={{
+                                    let dsl_text = dsl_text.clone();
+                                    Callback::from(move |s: String| dsl_text.set(s))
+                                }}
+                                on_select_layout={{
+                                    let dsl_text = dsl_text.clone();
+                                    Callback::from(move |layout: String| dsl_text.set(dsl::set_entry_layout(&dsl_text, &layout)))
+                                }}
+                                scripts={scr.clone()}
+                                connected={connected}
+                                busy={busy}
+                                on_run={on_run_dsl.clone()} />
+                        },
+                        AppSection::Transfers => html! {
+                            <div class="transfer-workspace">
+                                <TransferStartCard
+                                    path={(*transfer_path).clone()}
+                                    connected={connected}
+                                    busy={busy}
+                                    on_change={{
+                                        let transfer_path = transfer_path.clone();
+                                        Callback::from(move |value: String| transfer_path.set(value))
+                                    }}
+                                    on_start={on_start_transfer.clone()}
+                                    on_set_default={on_set_transfer_default.clone()} />
+                                <FileBrowserCard
+                                    view={(*filesystem_view).clone()}
+                                    connected={connected}
+                                    on_browse={on_browse.clone()}
+                                    on_select={{
+                                        let transfer_path = transfer_path.clone();
+                                        Callback::from(move |path: String| transfer_path.set(path))
+                                    }}
+                                    on_transfer={queue_transfer_path.clone()} />
+                                <DownloadManagerCard transfers={(*transfers).clone()} on_download={on_download_transfer.clone()} />
+                            </div>
+                        },
+                        AppSection::Diagnostics => html! {
+                            <LogCard
+                                lines={(*log_lines).clone()}
+                                connection={*connection_state}
+                                on_clear={{
+                                    let log_lines = log_lines.clone();
+                                    Callback::from(move |_| log_lines.set(Vec::new()))
+                                }} />
+                        },
+                    } }
+                </div>
+            </main>
         </div>
     }
 }
@@ -633,31 +796,25 @@ fn app() -> Html {
 struct StatusProps {
     pub status: Option<StatusState>,
     pub busy: bool,
-    pub ws_connected: bool,
+    pub connection: ConnectionState,
 }
 #[function_component(StatusCard)]
 fn status_card(props: &StatusProps) -> Html {
     let st = &props.status;
-    let usb_enabled = st.as_ref().map(|s| s.usb_enabled).unwrap_or(false);
-    let usb_ready = st.as_ref().map(|s| s.usb_ready).unwrap_or(false);
-    let host_os = st
-        .as_ref()
-        .map(|s| s.host_os.clone())
-        .unwrap_or_else(|| "unknown".into());
     html! {
-        <div class="card" aria-busy={props.busy.to_string()}>
-            <div class="row between items-center">
-                <h2>{"Status"}</h2>
-                <div id="spinner" class="hide-sm" style={format!("display:{}", if props.busy {"inline-flex"} else {"none"})}>{"Working…"}</div>
+        <section class="card status-card" aria-busy={props.busy.to_string()}>
+            <div class="card-header">
+                <div><span class="eyebrow">{"Live telemetry"}</span><h2>{"Device status"}</h2></div>
+                if props.busy { <span class="spinner-label"><span class="spinner"></span>{"Updating"}</span> }
             </div>
-            <div id="status" class="status-bar my-1">
-                <span id="stUsbEnabled" class={classes!("badge", if usb_enabled {"on"} else {"off"})} title="USB device registration">{"🔌 USB: "}{ if usb_enabled {"on"} else {"off"} }</span>
-                <span id="stUsbReady" class={classes!("badge", if usb_ready {"on"} else {"off"})} title="USB host ready">{"⌨️ Ready: "}{ if usb_ready {"yes"} else {"no"} }</span>
-                <span id="stHostOs" class={classes!("badge", match host_os.as_str() {"mac"=>"mac","windows"=>"windows",_=>"neutral"})} title="Host OS">{"🖥️ OS: "}{host_os}</span>
-                <span id="stWs" class={classes!("badge", if props.ws_connected {"on"} else {"off"})} title="WebSocket">{"🔗 WS: "}{ if props.ws_connected {"connected"} else {"disconnected"} }</span>
+            <div class="metric-grid">
+                <div class="metric"><span>{"Connection"}</span><strong class={props.connection.class()}>{props.connection.label()}</strong></div>
+                <div class="metric"><span>{"USB device"}</span><strong>{st.as_ref().map(|s| if s.usb_enabled { "Enabled" } else { "Off" }).unwrap_or("Checking…")}</strong></div>
+                <div class="metric"><span>{"Host ready"}</span><strong>{st.as_ref().map(|s| if s.usb_ready { "Ready" } else { "Not ready" }).unwrap_or("Checking…")}</strong></div>
+                <div class="metric"><span>{"Detected host"}</span><strong>{st.as_ref().map(|s| s.host_os.as_str()).unwrap_or("Unknown")}</strong></div>
             </div>
-            <div class="hint">{"Refreshes every 5s."}</div>
-        </div>
+            <div class="card-footer-note"><span class="pulse-dot"></span>{"Status refreshes every five seconds while connected"}</div>
+        </section>
     }
 }
 
@@ -665,6 +822,8 @@ fn status_card(props: &StatusProps) -> Html {
 struct IdentityProps {
     pub config: Option<ConfigState>,
     pub usb_enabled: bool,
+    pub connected: bool,
+    pub busy: bool,
     pub on_save: Callback<(String, String)>,
 }
 #[function_component(IdentityCard)]
@@ -710,8 +869,9 @@ fn identity_card(props: &IdentityProps) -> Html {
         .map(|c| c.usb_product.clone())
         .unwrap_or_default();
     let dirty = *man != orig_man || *prod != orig_prod;
-    let fields_disabled = props.usb_enabled;
-    let disabled = props.usb_enabled || !dirty; // for Save button only
+    let valid = man.is_ascii() && prod.is_ascii();
+    let fields_disabled = props.usb_enabled || props.config.is_none() || !props.connected;
+    let disabled = fields_disabled || props.busy || !dirty || !valid;
     let on_save = {
         let man = man.clone();
         let prod = prod.clone();
@@ -719,39 +879,47 @@ fn identity_card(props: &IdentityProps) -> Html {
         Callback::from(move |_| cb.emit(((*man).clone(), (*prod).clone())))
     };
     html! {
-        <div class="card" id="identityCard">
-          <h2>{"Device Identity"}</h2>
-          <div class="row gap-4 items-end wrap">
+        <section class="card identity-card" id="identityCard">
+          <div class="card-header">
+            <div><span class="eyebrow">{"USB descriptor"}</span><h2>{"Device identity"}</h2></div>
+            <span class={classes!("lock-state", props.usb_enabled.then_some("locked"))}>{if props.usb_enabled { "Locked while USB is active" } else if !props.connected { "Unavailable" } else if props.config.is_none() { "Loading" } else { "Editable" }}</span>
+          </div>
+          if props.config.is_none() {
+            <div class="inline-notice">{if props.connected { "Loading device configuration…" } else { "Connect to the device to load its identity." }}</div>
+          }
+          <div class="identity-fields">
             <label class="field flex-1">
               <div>
                 <span>{"USB manufacturer"}</span>
-                <input id="usbManufacturer" type="text" placeholder="Pico 2W" maxlength="32"
+                <input id="usbManufacturer" type="text" placeholder={if props.config.is_some() { "Pico 2W" } else { "Waiting for device…" }} maxlength="32"
                   value={(*man).clone()}
                   oninput={{ let man=man.clone(); Callback::from(move |e: InputEvent| man.set(e.target_unchecked_into::<web_sys::HtmlInputElement>().value())) }}
                   disabled={fields_disabled} />
                 <div class="row between">
                   <span class="hint">{"ASCII only, max 32 bytes."}</span>
-                  <span class="hint">{ format!("{}/32", (*man).len()) }</span>
+                  <span class="hint">{ if props.config.is_some() { format!("{}/32", (*man).len()) } else { "—".into() } }</span>
                 </div>
               </div>
             </label>
             <label class="field flex-2">
               <div>
                 <span>{"USB product string"}</span>
-                <input id="usbProduct" type="text" placeholder="Logger + Keyboard" maxlength="48"
+                <input id="usbProduct" type="text" placeholder={if props.config.is_some() { "Logger + Keyboard" } else { "Waiting for device…" }} maxlength="48"
                   value={(*prod).clone()}
                   oninput={{ let prod=prod.clone(); Callback::from(move |e: InputEvent| prod.set(e.target_unchecked_into::<web_sys::HtmlInputElement>().value())) }}
                   disabled={fields_disabled} />
                 <div class="row between">
                   <span class="hint">{"ASCII only, max 48 bytes."}</span>
-                  <span class="hint">{ format!("{}/48", (*prod).len()) }</span>
+                  <span class="hint">{ if props.config.is_some() { format!("{}/48", (*prod).len()) } else { "—".into() } }</span>
                 </div>
               </div>
             </label>
-            <button id="btnSaveIdentity" class="btn-accent" {disabled} onclick={on_save}>{"Save"}</button>
           </div>
-          <div class="hint">{"Applies when you start USB. Changes are blocked after USB is enabled."}</div>
-        </div>
+          <div class="card-actions">
+            <span class={classes!("form-note", (!valid).then_some("error"))}>{if valid { "Changes apply the next time USB starts." } else { "Only ASCII characters are supported." }}</span>
+            <button id="btnSaveIdentity" class="btn-primary" {disabled} onclick={on_save}>{if props.busy { "Saving…" } else { "Save identity" }}</button>
+          </div>
+        </section>
     }
 }
 
@@ -762,6 +930,8 @@ struct UsbProps {
     pub on_start: Callback<bool>,
     pub on_stop: Callback<()>,
     pub usb_enabled: bool,
+    pub connected: bool,
+    pub busy: bool,
 }
 #[function_component(UsbCard)]
 fn usb_card(props: &UsbProps) -> Html {
@@ -778,27 +948,28 @@ fn usb_card(props: &UsbProps) -> Html {
         Callback::from(move |_| cb.emit(false))
     };
     html! {
-        <div class="card" id="usbCard">
-          <h2>{"USB Bring-up"}</h2>
+        <section class="card usb-card" id="usbCard">
+          <div class="card-header"><div><span class="eyebrow">{"Composite device"}</span><h2>{"USB bring-up"}</h2></div></div>
           if !props.usb_enabled {
             <>
+              <p class="card-copy">{"Choose the target host before registering the keyboard and storage interfaces."}</p>
               <div class="row radio-bar mb-1">
                 <label class="radio"><input type="radio" name="os" value="mac" checked={props.selected_os=="mac"} onclick={set_mac}/>{" macOS"}</label>
                 <label class="radio"><input type="radio" name="os" value="windows" checked={props.selected_os=="windows"} onclick={set_win}/>{" Windows"}</label>
               </div>
-              <div class="row gap-3">
-                <button id="btnUsbAssistant" class="btn-accent" onclick={start_assist} disabled={props.selected_os=="windows"}>{"Start USB on macOS (Assistant)"}</button>
-                <button id="btnUsbNoAssistant" class="btn-secondary" onclick={start_noassist}>{"Start USB"}</button>
+              <div class="card-actions left">
+                <button id="btnUsbAssistant" class="btn-primary" onclick={start_assist} disabled={!props.connected || props.busy || props.selected_os=="windows"}>{"Start with Assistant"}</button>
+                <button id="btnUsbNoAssistant" class="btn-secondary" onclick={start_noassist} disabled={!props.connected || props.busy}>{"Start USB"}</button>
               </div>
-              <div class="hint">{"Assistant forces macOS Keyboard Setup Assistant sequence when enabled."}</div>
+              <div class="card-footer-note">{"Assistant runs the macOS keyboard identification sequence after registration."}</div>
             </>
           } else {
-            <div class="row gap-3">
-              <button id="btnUsbStop" class="btn-danger" onclick={{ let cb = props.on_stop.clone(); Callback::from(move |_| cb.emit(())) }}>{"Stop USB"}</button>
+            <div class="active-state"><span class="active-state-icon">{"✓"}</span><div><strong>{"USB is active"}</strong><span>{"The device is registered with the host."}</span></div></div>
+            <div class="card-actions left">
+              <button id="btnUsbStop" class="btn-danger" disabled={!props.connected || props.busy} onclick={{ let cb = props.on_stop.clone(); Callback::from(move |_| cb.emit(())) }}>{"Stop USB"}</button>
             </div>
-            <div class="hint">{"Stops the composite USB device until you start it again."}</div>
           }
-        </div>
+        </section>
     }
 }
 
@@ -808,10 +979,13 @@ struct ScriptProps {
     pub on_change: Callback<String>,
     pub on_select_layout: Callback<String>,
     pub scripts: Option<Vec<api::ScriptMeta>>,
+    pub connected: bool,
+    pub busy: bool,
     pub on_run: Callback<()>,
 }
 #[function_component(ScriptingCard)]
 fn scripting_card(props: &ScriptProps) -> Html {
+    let search = use_state(String::new);
     let on_text = {
         let cb = props.on_change.clone();
         Callback::from(move |e: InputEvent| {
@@ -832,10 +1006,18 @@ fn scripting_card(props: &ScriptProps) -> Html {
         })
     };
 
+    let layouts = dsl_core::available_layouts();
+    let selected_layout = dsl::entry_layout(&props.dsl_text).unwrap_or("");
+    let line_count = props.dsl_text.lines().count();
+    let can_run = props.connected
+        && !props.busy
+        && !selected_layout.is_empty()
+        && line_count <= MAX_DSL_LINES;
+
     let on_keydown = {
         let cb = props.on_run.clone();
         Callback::from(move |e: KeyboardEvent| {
-            if (e.ctrl_key() || e.meta_key()) && e.key() == "Enter" {
+            if can_run && (e.ctrl_key() || e.meta_key()) && e.key() == "Enter" {
                 e.prevent_default();
                 cb.emit(());
             }
@@ -849,49 +1031,57 @@ fn scripting_card(props: &ScriptProps) -> Html {
         }
     };
 
-    let layouts = dsl_core::available_layouts();
-    let selected_layout = dsl::entry_layout(&props.dsl_text).unwrap_or("");
+    let query = search.trim().to_ascii_lowercase();
 
     html! {
-      <div class="card full">
-        <h2>{"Scripting"}</h2>
-        <div class="row column gap-2 mb-1">
-          <textarea id="scriptDsl" rows="6" cols="60" placeholder={"layout(\"win_en-US\")\ntap(\"ENTER\")\nmodtap(\"LGUI+SPACE\")\ndelay(400)\ntext(\"Terminal\", 10)"}
-            value={props.dsl_text.clone()} oninput={on_text} onkeydown={on_keydown} />
-          <div class="row gap-2 items-center">
-            <label class="hint" for="scriptLayout">{"Layout"}</label>
-            <select id="scriptLayout" required=true value={selected_layout.to_string()} onchange={on_layout}>
-              <option value="" disabled=true>{"Select layout…"}</option>
-              { for layouts.iter().map(|id| html!{ <option value={id.to_string()}>{ *id }</option> }) }
-            </select>
-            <span class="hint">{"Required; updates the script’s leading layout(\"...\") command."}</span>
+      <div class="script-workspace">
+        <section class="card editor-card">
+          <div class="card-header editor-header">
+            <div><span class="eyebrow">{"DSL editor"}</span><h2>{"Automation script"}</h2></div>
+            <div class="editor-meta">
+              <label for="scriptLayout">{"Keyboard layout"}</label>
+              <select id="scriptLayout" required=true value={selected_layout.to_string()} onchange={on_layout}>
+                <option value="" disabled=true selected={selected_layout.is_empty()}>{"Select layout…"}</option>
+                { for layouts.iter().map(|id| html!{ <option value={id.to_string()}>{ *id }</option> }) }
+              </select>
+              <span class={classes!("line-count", (line_count > MAX_DSL_LINES).then_some("error"))}>{format!("{line_count} / {MAX_DSL_LINES} lines")}</span>
+            </div>
           </div>
-          <div class="row">
-            <button id="btnRunDsl" class="btn-accent" disabled={selected_layout.is_empty()} onclick={{ let cb=props.on_run.clone(); Callback::from(move |_| cb.emit(())) }}>{"Run Script"}</button>
-            <span class="hint">{"Commands: "}<code>{"tap(\"KEY\")"}</code>{"; "}<code>{"modtap(\"MOD+KEY\")"}</code>{"; "}<code>{"delay(MS)"}</code>{"; "}<code>{"text(\"STRING\", [DELAY])"}</code>{"; "}<code>{"layout(\"ID\")"}</code>{" — Press Ctrl/⌘+Enter to run."}</span>
-            {{
-              let lines = props.dsl_text.lines().count();
-              let style = if lines > MAX_DSL_LINES { "color: var(--bad)".to_string() } else { String::new() };
-              html! { <span class="hint" style={style}>{ format!("{} lines (max {})", lines, MAX_DSL_LINES) }</span> }
-            }}
+          <textarea id="scriptDsl" spellcheck="false" aria-label="Automation script" value={props.dsl_text.clone()} oninput={on_text} onkeydown={on_keydown} />
+          <div class="command-reference">
+            <span>{"Commands"}</span>
+            <code>{"tap(\"KEY\")"}</code><code>{"modtap(\"MOD+KEY\")"}</code><code>{"delay(MS)"}</code><code>{"text(\"STRING\", DELAY)"}</code>
           </div>
-        </div>
-        if let Some(list) = &props.scripts {
-          <div class="row column gap-2">
-            <div class="hint">{"Built-in scripts:"}</div>
-            { for list.iter().map(|s| html!{
-                <div class="row between gap-2">
-                  <div><strong>{&s.name}</strong>{": "}{&s.description}</div>
-                  <div class="row">
+          <div class="card-actions editor-actions">
+            <span class="form-note">{if props.connected { "Press Ctrl/⌘ + Enter to run" } else { "Connect to the device before running scripts" }}</span>
+            <button id="btnRunDsl" class="btn-primary run-button" disabled={!can_run} onclick={{ let cb=props.on_run.clone(); Callback::from(move |_| cb.emit(())) }}>
+              <span aria-hidden="true">{"▶"}</span>{if props.busy { "Running…" } else { "Run script" }}
+            </button>
+          </div>
+        </section>
+
+        <aside class="card library-card">
+          <div class="card-header"><div><span class="eyebrow">{"On-device library"}</span><h2>{"Examples"}</h2></div></div>
+          <input class="library-search" type="search" placeholder="Search scripts…" value={(*search).clone()}
+            oninput={{ let search=search.clone(); Callback::from(move |e: InputEvent| search.set(e.target_unchecked_into::<web_sys::HtmlInputElement>().value())) }} />
+          <div class="library-list">
+            if let Some(list) = &props.scripts {
+              { for list.iter().filter(|script| query.is_empty() || script.name.to_ascii_lowercase().contains(&query) || script.description.to_ascii_lowercase().contains(&query)).map(|s| html!{
+                <article class="script-item">
+                  <div><strong>{&s.name}</strong><p>{&s.description}</p></div>
+                  <div>
                     if let Some(pre) = &s.dsl {
-                      <button onclick={insert_script(pre.clone())}>{"Use"}</button>
+                      <button class="btn-quiet" onclick={insert_script(pre.clone())}>{"Load"}</button>
                     }
                   </div>
-                </div>
+                </article>
               }) }
-            </div>
-          }
-        </div>
+            } else {
+              <div class="inline-notice">{"Loading script library…"}</div>
+            }
+          </div>
+        </aside>
+      </div>
     }
 }
 
@@ -987,24 +1177,25 @@ fn file_browser_card(props: &FileBrowserProps) -> Html {
     };
 
     html! {
-        <div class="card full file-browser">
-          <div class="row between items-center">
-            <h2 class="m-0">{"Source Files"}</h2>
-            <span class="hint">
+        <section class="card file-browser">
+          <div class="card-header">
+            <div><span class="eyebrow">{"Host filesystem"}</span><h2>{"Source files"}</h2></div>
+            <span class={classes!("connection-caption", props.connected.then_some("connected"))}>
               { if props.connected { "Host filesystem via USB agent" } else { "WebSocket disconnected" } }
             </span>
           </div>
 
-          <div class="row gap-2 my-1">
-            <button onclick={browse_home} disabled={!props.connected || props.view.loading}>{"Home"}</button>
-            <button onclick={browse_root} disabled={!props.connected || props.view.loading}>{"/"}</button>
+          <div class="file-toolbar">
+            <button class="btn-quiet" onclick={browse_home} disabled={!props.connected || props.view.loading}>{"Home"}</button>
+            <button class="btn-quiet" onclick={browse_root} disabled={!props.connected || props.view.loading}>{"Root"}</button>
             <button
+                class="btn-quiet"
                 onclick={browse_parent}
                 disabled={!props.connected || props.view.loading || props.view.directory.is_empty() || props.view.directory == "/"}
             >
               {"Up"}
             </button>
-            <button onclick={refresh} disabled={!props.connected || props.view.loading}>{"Refresh"}</button>
+            <button class="btn-quiet" onclick={refresh} disabled={!props.connected || props.view.loading}>{"Refresh"}</button>
             <label class="inline fs-hidden">
               <input type="checkbox" checked={props.view.show_hidden} onchange={toggle_hidden} />
               {"Show hidden"}
@@ -1044,17 +1235,19 @@ fn file_browser_card(props: &FileBrowserProps) -> Html {
               <span>{"Modified"}</span>
               <span>{"Actions"}</span>
             </div>
-            if props.view.entries.is_empty() && !props.view.loading && props.view.error.is_none() {
-              <div class="hint">{"This directory is empty."}</div>
+            if !props.connected {
+              <div class="empty-state"><strong>{"Device connection required"}</strong><span>{"Connect the Pico and host-agent to browse files."}</span></div>
+            } else if props.view.entries.is_empty() && !props.view.loading && props.view.error.is_none() {
+              <div class="empty-state"><strong>{"This directory is empty"}</strong><span>{"Choose another folder or enable hidden files."}</span></div>
             }
             { for props.view.entries.iter().map(|entry| {
                 let full_path = filesystem::join_path(&props.view.directory, &entry.name);
                 let icon = match entry.kind {
-                    filesystem::EntryKind::Directory => "📁",
-                    filesystem::EntryKind::SymlinkDirectory => "🔗📁",
-                    filesystem::EntryKind::File => "📄",
-                    filesystem::EntryKind::SymlinkFile => "🔗📄",
-                    filesystem::EntryKind::Other => "•",
+                    filesystem::EntryKind::Directory => "DIR",
+                    filesystem::EntryKind::SymlinkDirectory => "LNK",
+                    filesystem::EntryKind::File => "FILE",
+                    filesystem::EntryKind::SymlinkFile => "LNK",
+                    filesystem::EntryKind::Other => "—",
                 };
                 let name_action = if entry.kind.is_directory() {
                     let on_browse = props.on_browse.clone();
@@ -1091,7 +1284,7 @@ fn file_browser_card(props: &FileBrowserProps) -> Html {
                         disabled={!entry.readable || (!entry.kind.is_directory() && !entry.kind.is_file())}
                         title={full_path.clone()}
                     >
-                      <span>{icon}</span>
+                      <span class="file-kind">{icon}</span>
                       <span>{&entry.name}</span>
                     </button>
                     <span class="fs-meta">
@@ -1101,7 +1294,7 @@ fn file_browser_card(props: &FileBrowserProps) -> Html {
                     <span class="row gap-1">
                       if entry.kind.is_file() {
                         <button class="btn-secondary" onclick={select} disabled={!entry.readable}>{"Select"}</button>
-                        <button class="btn-accent" onclick={transfer} disabled={!entry.readable}>{"Transfer"}</button>
+                        <button class="btn-primary btn-small" onclick={transfer} disabled={!entry.readable}>{"Transfer"}</button>
                       }
                     </span>
                   </div>
@@ -1114,13 +1307,15 @@ fn file_browser_card(props: &FileBrowserProps) -> Html {
           } else if props.view.has_more {
             <button class="btn-secondary" onclick={load_more}>{"Load more"}</button>
           }
-        </div>
+        </section>
     }
 }
 
 #[derive(Properties, PartialEq, Clone)]
 struct TransferStartProps {
     pub path: String,
+    pub connected: bool,
+    pub busy: bool,
     pub on_change: Callback<String>,
     pub on_start: Callback<()>,
     pub on_set_default: Callback<()>,
@@ -1128,6 +1323,7 @@ struct TransferStartProps {
 
 #[function_component(TransferStartCard)]
 fn transfer_start_card(props: &TransferStartProps) -> Html {
+    let disabled = !props.connected || props.busy || props.path.trim().is_empty();
     let on_input = {
         let on_change = props.on_change.clone();
         Callback::from(move |event: InputEvent| {
@@ -1149,9 +1345,9 @@ fn transfer_start_card(props: &TransferStartProps) -> Html {
     };
 
     html! {
-        <div class="card full">
-          <h2>{"Start Transfer"}</h2>
-          <div class="row gap-2">
+        <section class="card transfer-start-card">
+          <div class="card-header"><div><span class="eyebrow">{"Quick transfer"}</span><h2>{"Queue a host path"}</h2></div></div>
+          <div class="transfer-path-row">
             <input
                 id="transferPath"
                 type="text"
@@ -1159,11 +1355,11 @@ fn transfer_start_card(props: &TransferStartProps) -> Html {
                 value={props.path.clone()}
                 oninput={on_input}
             />
-            <button class="btn-accent" onclick={on_start}>{"Queue Transfer"}</button>
-            <button onclick={on_set_default}>{"Set Default"}</button>
+            <button class="btn-primary" disabled={disabled} onclick={on_start}>{if props.busy { "Queueing…" } else { "Queue transfer" }}</button>
+            <button class="btn-secondary" disabled={disabled} onclick={on_set_default}>{"Set as default"}</button>
           </div>
-          <div class="hint">{"Path is resolved on the host-agent machine. Set Default updates the running host-agent without relaunching it."}</div>
-        </div>
+          <div class="card-footer-note">{if props.connected { "Paths are resolved on the host-agent machine." } else { "Connect to the device before queueing a transfer." }}</div>
+        </section>
     }
 }
 
@@ -1176,15 +1372,15 @@ struct DownloadManagerProps {
 #[function_component(DownloadManagerCard)]
 fn download_manager_card(props: &DownloadManagerProps) -> Html {
     html! {
-        <div class="card full">
-          <div class="row between items-center">
-            <h2 class="m-0">{"Download Manager"}</h2>
-            <span class="hint">{ format!("{} transfer(s)", props.transfers.len()) }</span>
+        <section class="card download-card">
+          <div class="card-header">
+            <div><span class="eyebrow">{"Transfer activity"}</span><h2>{"Downloads"}</h2></div>
+            <span class="count-pill">{ format!("{} transfer(s)", props.transfers.len()) }</span>
           </div>
           if props.transfers.is_empty() {
-            <div class="hint">{"Waiting for host-agent transfer events."}</div>
+            <div class="empty-state compact"><strong>{"No active transfers"}</strong><span>{"Files queued from the browser will appear here."}</span></div>
           } else {
-            <div class="row column gap-2">
+            <div class="transfer-list">
               { for props.transfers.iter().map(|transfer| {
                   let progress_pct = if transfer.total_size == 0 {
                       0.0
@@ -1197,16 +1393,16 @@ fn download_manager_card(props: &DownloadManagerProps) -> Html {
                       Callback::from(move |_| cb.emit(transfer_id))
                   };
                   html! {
-                    <div class="card transfer-row">
-                      <div class="row between items-center">
+                    <div class="transfer-row">
+                      <div class="transfer-row-main">
                         <div>
                           <strong>{ &transfer.file_name }</strong>
-                          <div class="hint">{ format!("id={} • {}", transfer.transfer_id, transfer_status_label(&transfer.status)) }</div>
+                          <div class="transfer-subtitle">{ format!("Transfer {} · {}", transfer.transfer_id, transfer_status_label(&transfer.status)) }</div>
                         </div>
                         <div class="row gap-2 items-center">
-                          <span class="hint">{ format!("{} / {}", format_bytes(transfer.received_size), format_bytes(transfer.total_size)) }</span>
-                          <span class="hint">{ format_rate(transfer.smoothed_rate_bps) }</span>
-                          <span class="hint">{ format_eta(transfer.eta_total_secs) }</span>
+                          <span>{ format!("{} / {}", format_bytes(transfer.received_size), format_bytes(transfer.total_size)) }</span>
+                          <span>{ format_rate(transfer.smoothed_rate_bps) }</span>
+                          <span>{ format_eta(transfer.eta_total_secs) }</span>
                           <button
                             class="btn-secondary"
                             disabled={transfer.status != transfer::TransferState::Finished}
@@ -1216,8 +1412,9 @@ fn download_manager_card(props: &DownloadManagerProps) -> Html {
                           </button>
                         </div>
                       </div>
-                      <div class="hint">{ format!(
-                        "{:.1}% • chunks: total={} finished={} failed={} retrying={}",
+                      <div class="progress-track"><span style={format!("width: {progress_pct:.1}%")}></span></div>
+                      <div class="transfer-details">{ format!(
+                        "{:.1}% · chunks {} · finished {} · failed {} · retrying {}",
                         progress_pct,
                         transfer.chunk_count,
                         transfer.finished_chunks,
@@ -1229,7 +1426,7 @@ fn download_manager_card(props: &DownloadManagerProps) -> Html {
               }) }
             </div>
           }
-        </div>
+        </section>
     }
 }
 
@@ -1304,10 +1501,13 @@ fn format_eta(eta_secs: Option<f64>) -> String {
 #[derive(Properties, PartialEq, Clone)]
 struct LogProps {
     pub lines: Vec<String>,
+    pub connection: ConnectionState,
     pub on_clear: Callback<()>,
 }
 #[function_component(LogCard)]
 fn log_card(props: &LogProps) -> Html {
+    let filter = use_state(String::new);
+    let errors_only = use_state(|| false);
     let node_ref = use_node_ref();
     {
         let node_ref = node_ref.clone();
@@ -1319,14 +1519,35 @@ fn log_card(props: &LogProps) -> Html {
             || ()
         });
     }
+    let query = filter.trim().to_ascii_lowercase();
+    let visible_lines = props.lines.iter().filter(|line| {
+        let normalized = line.to_ascii_lowercase();
+        (query.is_empty() || normalized.contains(&query))
+            && (!*errors_only
+                || normalized.contains("error")
+                || normalized.contains("failed")
+                || normalized.contains("lost"))
+    });
     html! {
-        <div class="card full">
-          <div class="row between items-center">
-            <h2 class="m-0">{"Log"}</h2>
-            <button id="btnClearLog" class="btn-secondary" onclick={{ let cb=props.on_clear.clone(); Callback::from(move |_| cb.emit(())) }}>{"Clear Log"}</button>
+        <section class="card diagnostics-card">
+          <div class="card-header">
+            <div><span class="eyebrow">{"Runtime events"}</span><h2>{"Activity log"}</h2></div>
+            <span class={classes!("connection-pill", props.connection.class())}><span class="status-dot"></span>{props.connection.label()}</span>
           </div>
-          <div id="log" ref={node_ref}>{ for props.lines.iter().map(|l| html!{ <div>{l}</div> }) }</div>
-        </div>
+          <div class="log-toolbar">
+            <input type="search" placeholder="Filter log entries…" value={(*filter).clone()}
+              oninput={{ let filter=filter.clone(); Callback::from(move |e: InputEvent| filter.set(e.target_unchecked_into::<web_sys::HtmlInputElement>().value())) }} />
+            <label class="inline toggle-control"><input type="checkbox" checked={*errors_only} onchange={{ let errors_only=errors_only.clone(); Callback::from(move |e: Event| errors_only.set(e.target_unchecked_into::<web_sys::HtmlInputElement>().checked())) }} />{"Errors only"}</label>
+            <button id="btnClearLog" class="btn-secondary" onclick={{ let cb=props.on_clear.clone(); Callback::from(move |_| cb.emit(())) }}>{"Clear log"}</button>
+          </div>
+          <div id="log" ref={node_ref}>
+            if props.lines.is_empty() {
+              <div class="log-empty">{"No events recorded in this session."}</div>
+            } else {
+              { for visible_lines.enumerate().map(|(index, line)| html!{ <div class="log-entry"><span>{format!("{:03}", index + 1)}</span><code>{line}</code></div> }) }
+            }
+          </div>
+        </section>
     }
 }
 
