@@ -894,7 +894,7 @@ where
 
     if matches!(transfer_relay_mode(), TransferRelayMode::RelayToBrowser) {
         if let Some(binary) = build_ws_chunk_envelope(&chunk) {
-            if let Err(err) = ws::queue_transfer_binary(binary) {
+            if let Err(err) = ws::send_transfer_binary(binary).await {
                 let transfer_id = state.transfer_id;
                 let detail = err.detail();
                 let _ = relay.remove(transfer_id);
@@ -1129,7 +1129,7 @@ async fn emit_transfer_open(state: &RelayTransferState) {
         state.chunk_count,
         sha256_hex.as_str()
     );
-    let _ = ws::queue_transfer_text(event);
+    let _ = ws::send_transfer_text(event).await;
 }
 
 async fn emit_transfer_progress(state: &RelayTransferState) {
@@ -1185,7 +1185,7 @@ async fn emit_transfer_finished(transfer_id: u64) {
         "{{\"event_type\":\"transfer/finished\",\"version\":1,\"transfer_id\":{}}}",
         transfer_id
     );
-    let _ = ws::queue_transfer_text(event);
+    let _ = ws::send_transfer_text(event).await;
 }
 
 async fn emit_transfer_failed(transfer_id: u64, reason: &str) {
@@ -1198,7 +1198,7 @@ async fn emit_transfer_failed(transfer_id: u64, reason: &str) {
         transfer_id,
         reason.as_str(),
     );
-    let _ = ws::queue_transfer_text(event);
+    let _ = ws::send_transfer_text(event).await;
 }
 
 async fn emit_transfer_aborted(transfer_id: u64, reason_code: u8, detail: &str) {
@@ -1211,7 +1211,7 @@ async fn emit_transfer_aborted(transfer_id: u64, reason_code: u8, detail: &str) 
         reason_code,
         detail.as_str(),
     );
-    let _ = ws::queue_transfer_text(event);
+    let _ = ws::send_transfer_text(event).await;
 }
 
 fn build_ws_chunk_envelope(

@@ -1,7 +1,6 @@
 use dsl_core::{self as core, CompileError, Severity, Span};
 use serde_wasm_bindgen::to_value;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::str::FromStr;
 use wasm_bindgen::prelude::*;
 
 struct ScriptStore {
@@ -109,34 +108,16 @@ fn remap_span(span: Span, map: &[core::OrigLoc]) -> Span {
 
 /// Compile a DSL entry script and a set of named scripts (by JSON id→text)
 /// into bytecode suitable for the Pi executor.
-/// - `scripts_json`: a JSON object like {"hello":"text ...", "foo":"..."}
+/// - `scripts_json`: a JSON object whose script values each begin with layout("...")
 #[wasm_bindgen]
 pub fn compile_to_bytecode(entry_dsl: &str, scripts_json: &str) -> Result<Box<[u8]>, JsValue> {
-    compile_to_bytecode_with_layout(entry_dsl, scripts_json, core::DEFAULT_LAYOUT_ID)
-}
-
-/// Same as compile_to_bytecode, but uses a caller-provided default layout id.
-#[wasm_bindgen]
-pub fn compile_to_bytecode_with_layout(
-    entry_dsl: &str,
-    scripts_json: &str,
-    default_layout: &str,
-) -> Result<Box<[u8]>, JsValue> {
     let scripts = ScriptStore::from_json(scripts_json)?;
 
     // 1) compile + link (inline calls)
-    let owned = core::compile_and_link(entry_dsl, &scripts).map_err(diag)?;
+    let owned = core::compile_and_link_with_required_layout(entry_dsl, &scripts).map_err(diag)?;
 
-    let layout = core::LayoutId::from_str(default_layout).map_err(|err| {
-        let msg = match err {
-            core::LayoutParseError::Unknown => "unknown default layout",
-            core::LayoutParseError::NotEnabled => "default layout not enabled",
-        };
-        JsValue::from_str(&format!("{msg}: {default_layout}"))
-    })?;
-
-    // 2) lower to flat ops using layout
-    let flat = core::lower_to_flat_with_layout(&owned, layout).map_err(diag)?;
+    // 2) lower using the entry script's required leading layout declaration.
+    let flat = core::lower_to_flat(&owned).map_err(diag)?;
 
     // 3) encode to bytecode
     let bytes = core::bytecode::encode(&flat)
@@ -148,8 +129,10 @@ pub fn compile_to_bytecode_with_layout(
 #[wasm_bindgen]
 pub fn lint_dsl(dsl: &str) -> Result<(), JsValue> {
     let pre = core::preprocess(dsl, &core::PreprocessOptions::default()).map_err(diag)?;
-    match core::compile_dsl_with_diag(&pre.text, AcceptAll) {
-        Ok(_) => Ok(()),
+    match core::compile_dsl_with_diag(&pre.text, AcceptAll)
+        .and_then(|program| core::validate_leading_layout(&program))
+    {
+        Ok(()) => Ok(()),
         Err(e) => {
             let mut err = e;
             err.span = remap_span(err.span, &pre.sourcemap);
@@ -244,7 +227,9 @@ pub fn lint_dsl_all(entry_dsl: &str, scripts_json: &str) -> Result<JsValue, JsVa
 
     // 3) Parse errors in entry and scripts (with mapping to original lines)
     if let Some(ref txt) = entry_pre_text {
-        if let Err(e) = core::compile_dsl_with_diag(txt, &scripts) {
+        if let Err(e) = core::compile_dsl_with_diag(txt, &scripts)
+            .and_then(|program| core::validate_leading_layout(&program))
+        {
             let mut err = e;
             if let Some(map) = entry_pre_map.as_ref() {
                 err.span = remap_span(err.span, map);
@@ -262,7 +247,9 @@ pub fn lint_dsl_all(entry_dsl: &str, scripts_json: &str) -> Result<JsValue, JsVa
         }
     }
     for (id, txt) in &pre_scripts {
-        if let Err(e) = core::compile_dsl_with_diag(txt, &scripts) {
+        if let Err(e) = core::compile_dsl_with_diag(txt, &scripts)
+            .and_then(|program| core::validate_leading_layout(&program))
+        {
             let mut err = e;
             if let Some(map) = pre_maps.get(id) {
                 err.span = remap_span(err.span, map);
@@ -281,7 +268,7 @@ pub fn lint_dsl_all(entry_dsl: &str, scripts_json: &str) -> Result<JsValue, JsVa
     }
 
     // 4) Attempt compile & link to surface link-time errors
-    if let Err(e) = core::compile_and_link(entry_dsl, &scripts) {
+    if let Err(e) = core::compile_and_link_with_required_layout(entry_dsl, &scripts) {
         out.push(WasmDiagnostic {
             severity: severity_label(e.severity).into(),
             line: e.span.line,

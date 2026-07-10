@@ -10,9 +10,16 @@ let persistError = null;
 let pendingChunkWrites = [];
 let chunkFlushScheduled = false;
 
+function normalizeTransferId(transferId) {
+  // wasm-bindgen passes Rust u64 values as BigInt. IndexedDB values may contain
+  // BigInt, but BigInt is not a valid IndexedDB key and therefore cannot back
+  // the by_transfer index. A decimal string is stable and lossless.
+  return String(transferId);
+}
+
 function keyFor(transferId, chunkIndex) {
   // Keep lexical ordering stable for indexed cursor/debug views.
-  return `${transferId}:${String(chunkIndex).padStart(10, "0")}`;
+  return `${normalizeTransferId(transferId)}:${String(chunkIndex).padStart(10, "0")}`;
 }
 
 function requestToPromise(request) {
@@ -137,7 +144,7 @@ async function clearTransferChunksInternal(db, transferId) {
   const transaction = db.transaction(CHUNK_STORE, "readwrite");
   const store = transaction.objectStore(CHUNK_STORE);
   const index = store.index("by_transfer");
-  const range = IDBKeyRange.only(transferId);
+  const range = IDBKeyRange.only(normalizeTransferId(transferId));
 
   await new Promise((resolve, reject) => {
     const cursorRequest = index.openCursor(range);
@@ -163,7 +170,7 @@ export function queueChunkPersist(transferId, chunkIndex, payload) {
   const data = payload instanceof Uint8Array ? payload.slice() : new Uint8Array(payload);
   pendingChunkWrites.push({
     key: keyFor(transferId, chunkIndex),
-    transferId,
+    transferId: normalizeTransferId(transferId),
     chunkIndex,
     data,
   });

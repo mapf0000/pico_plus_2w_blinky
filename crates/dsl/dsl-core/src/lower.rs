@@ -3,6 +3,24 @@ use crate::{
     message_for_code,
 };
 
+/// Lower a self-contained program using its required leading layout
+/// declaration. Additional layout declarations are rejected.
+pub fn lower_to_flat(p: &ProgramOwned) -> Result<FlatProgram, CompileError> {
+    let Some(OpOwned::Layout(layout)) = p.ops.first() else {
+        return Err(lower_error("LayoutRequired", 1));
+    };
+    if let Some((idx, _)) = p
+        .ops
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, op)| matches!(op, OpOwned::Layout(_)))
+    {
+        return Err(lower_error("LayoutMustBeFirst", (idx as u16) + 1));
+    }
+    lower_to_flat_with_layout(p, *layout)
+}
+
 /// Lower an owned, call-free program into a FlatProgram using a default layout.
 /// - Expands `Text` to Tap+Delay
 /// - Coalesces adjacent delays

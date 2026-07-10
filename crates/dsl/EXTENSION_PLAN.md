@@ -123,7 +123,7 @@ Extend the DSL to improve expressiveness and developer experience while **preser
 
 ## Phase 3: Deferred Features (After Phase 2)
 
-- **Layouts (implemented)**: `layout("ID")` affects compile-time `text` lowering using mapping tables (US default). Bytecode stays layout-agnostic; optional header metadata for layout ID remains future work.
+- **Layouts (implemented)**: Every script declares `layout("ID")` first. The entry layout affects all compile-time `text` lowering, and called scripts inherit it. Bytecode stays layout-agnostic; optional header metadata for layout ID remains future work.
 - **Parametric Scripts**: `call_with <id>(args…)` → compile-time substitution; types: string/number. Caps on expansion; no recursion.
 - **Libraries/Includes**: Namespaces and includes with deterministic linking order.
 

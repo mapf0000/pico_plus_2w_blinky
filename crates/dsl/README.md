@@ -8,19 +8,19 @@ A tiny, portable DSL for authoring keyboard macros that compile in the browser (
 
 - **Web-first authoring**: Validate and compile programs entirely in the frontend via `wasm-bindgen`.
 - **Device-slim execution**: The Pico executes a tiny, versioned bytecode over USB HID—no recursion, no dynamic string handling.
-- **Deterministic & safe**: Fixed caps (lines, delays, ops), CRC-checked transport, and OS/layout stability (default US ANSI; optional compile-time layouts).
+- **Deterministic & safe**: Fixed caps (lines, delays, ops), CRC-checked transport, and an explicit compile-time keyboard layout in every script.
 
 ---
 
 ## Workspace at a glance
 
-- **`dsl-core`** (no_std): DSL parser, line-numbered diagnostics, US ANSI text→HID lowering, flat IR, and bytecode encoder/decoder (`KBD1`, varints, CRC32).
+- **`dsl-core`** (no_std): DSL parser, line-numbered diagnostics, layout-aware text→HID lowering, flat IR, and bytecode encoder/decoder (`KBD1`, varints, CRC32).
 - **`dsl-wasm`**: WASM adapter exposing `compile_to_bytecode(entry_dsl, scripts_json)` and `lint_dsl(dsl)`.
 - **`firmware-exec`** (no_std): Streaming bytecode executor for the Pico using USB HID (Embassy + usbd-hid).
 
 ---
 
-## DSL Overview (default US ANSI)
+## DSL Overview
 
 **Commands (case-insensitive):**
 - `tap("KEY")` — press & release a key (legacy `tap KEY` still works).  
@@ -30,9 +30,9 @@ A tiny, portable DSL for authoring keyboard macros that compile in the browser (
   Example: `modtap("LCTRL+LALT+DELETE")`
 - `delay(ms)` — sleep clamped to `0..=5000`. `delay(0)` is a no-op.  
   Example: `delay(150)`
-- `text("STRING", per_char_delay_ms)` — types a string via US ANSI mapping; optional per-char delay (default 10ms, clamped to `<=5000`).  
+- `text("STRING", per_char_delay_ms)` — types a string via the declared layout; optional per-char delay (default 10ms, clamped to `<=5000`).
   Example: `text("Hello, world!", 20)`
-- `layout("ID")` — sets the active layout for subsequent `text(...)` lowering (compile-time only).  
+- `layout("ID")` — required as the first command in every script and sets its compile-time text mapping. Called scripts inherit the entry script's layout.
   Example: `layout("win_en-GB")`
 - `call <script_id>` — inline another script by id. Resolved at **compile/link** time in the frontend.
 - `fn <name>[ (PARAM, ...) ] { ... }` — define a reusable block at the top level; bodies may include any commands, `repeat`, and `let`. Parameters must be `NAME` constants.
@@ -41,14 +41,14 @@ A tiny, portable DSL for authoring keyboard macros that compile in the browser (
 **Misc:**
 - Blank lines and lines starting with `#` are ignored.
 - Limits: `MAX_DSL_LINES=256`, `MAX_DSL_DELAY_MS=5000`. After lowering, a global safety cap limits total ops.
-- Default layout: `win_en-US`. `tap`/`modtap` always use raw keycodes and bypass layout mapping.
+- There is no implicit layout. `tap`/`modtap` always use raw keycodes and bypass layout mapping.
 
 **Layouts (compile-time):**
 - Enable layouts via cargo features in `dsl-core` and downstream crates:
   - `layout_win_en_gb`, `layout_win_pt_br`, `layout_win_de_de`
   - `layout_mac_en_gb`, `layout_mac_pt_br`, `layout_mac_de_de`
 - Layout IDs: `win_en-US`, `win_en-GB`, `win_pt-BR`, `win_de-DE`, `mac_en-GB`, `mac_pt-BR`, `mac_de-DE`
-- Use `layout("ID")` to switch layouts mid-script; affects `text(...)` only.
+- The entry script's leading `layout("ID")` controls all `text(...)` operations, including text in called scripts.
 
 **Key names (subset):**
 - Letters `A..Z`, number row `0..9`, function keys `F1..F12`
@@ -59,6 +59,7 @@ A tiny, portable DSL for authoring keyboard macros that compile in the browser (
 **Example:**
 ```txt
 # Take a screenshot and log in
+layout("win_en-US")
 tap("F12")
 delay(250)
 modtap("LCTRL+LALT+DELETE")

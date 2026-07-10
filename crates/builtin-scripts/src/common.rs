@@ -1,6 +1,6 @@
 use super::BuiltinScript;
 
-const HELLO_WORLD_DSL: &str = "text(\"Hello, world\", 20)\n";
+const HELLO_WORLD_DSL: &str = concat!("layout(\"win_en-US\")\n", "text(\"Hello, world\", 20)\n",);
 
 pub const HELLO_WORLD: BuiltinScript = BuiltinScript {
     id: "hello_world",

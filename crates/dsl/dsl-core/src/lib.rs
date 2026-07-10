@@ -31,7 +31,10 @@ pub use keycodes::{
 };
 pub use layouts::{CharMapping, DEFAULT_LAYOUT_ID, LayoutId, LayoutParseError, available_layouts};
 pub use limits::{MAX_DSL_DELAY_MS, MAX_DSL_LINES, MAX_TOTAL_FLAT_OPS};
-pub use link::{CompileOptions, CompileOutput, ScriptProvider, compile, compile_and_link};
-pub use lower::{lower_to_flat_us, lower_to_flat_with_layout};
+pub use link::{
+    CompileOptions, CompileOutput, ScriptProvider, compile, compile_and_link,
+    compile_and_link_with_required_layout, validate_leading_layout,
+};
+pub use lower::{lower_to_flat, lower_to_flat_us, lower_to_flat_with_layout};
 pub use parser::{ScriptExists, compile_dsl_with_diag};
 pub use preprocess::{OrigLoc, PreprocessOptions, PreprocessOutput, preprocess};

@@ -43,8 +43,8 @@ fn app() -> Html {
     let filesystem_view = use_state(filesystem::BrowserView::default);
     let dsl_text = use_state(String::new);
     let selected_os = use_state(|| String::from("mac"));
-    let selected_layout = use_state(|| dsl_core::DEFAULT_LAYOUT_ID.to_string());
-    let busy_count = use_state(|| 0u32);
+    let busy_count = use_mut_ref(|| 0u32);
+    let busy_state = use_state(|| false);
     let log_lines = use_state(Vec::<String>::new);
     let ws_connected = use_state(|| false);
     let toast = use_state(|| None::<(String, bool)>); // (message, ok?)
@@ -52,8 +52,15 @@ fn app() -> Html {
 
     let set_busy = {
         let busy_count = busy_count.clone();
+        let busy_state = busy_state.clone();
         Callback::from(move |on: bool| {
-            busy_count.set(busy_count.saturating_add(if on { 1 } else { u32::MAX }));
+            let mut count = busy_count.borrow_mut();
+            *count = if on {
+                count.saturating_add(1)
+            } else {
+                count.saturating_sub(1)
+            };
+            busy_state.set(*count > 0);
         })
     };
 
@@ -322,33 +329,31 @@ fn app() -> Html {
         })
     };
 
-    let on_usb_start = {
-        let selected_os = selected_os.clone();
-        let selected_layout = selected_layout.clone();
-        let set_busy = set_busy.clone();
-        let push_log = push_log.clone();
-        let toast_cb = show_toast.clone();
-        Callback::from(move |assistant: bool| {
-            let selected_os = (*selected_os).clone();
-            let layout_id = (*selected_layout).clone();
+    let on_usb_start =
+        {
+            let selected_os = selected_os.clone();
             let set_busy = set_busy.clone();
             let push_log = push_log.clone();
-            let show_toast = toast_cb.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                set_busy.emit(true);
-                let os_opt = if selected_os == "unknown" {
-                    None
-                } else {
-                    Some(selected_os.as_str())
-                };
-                match api::usb_register(assistant, os_opt).await {
-                    Ok(()) => {
-                        push_log.emit("USB enabling request sent".to_string());
-                        show_toast.emit(("USB enabling…".into(), true));
-                        if assistant {
-                            match scripts::lookup("assistant_us") {
-                                Some(script_dsl) => {
-                                    match dsl::compile(script_dsl, &layout_id) {
+            let toast_cb = show_toast.clone();
+            Callback::from(move |assistant: bool| {
+                let selected_os = (*selected_os).clone();
+                let set_busy = set_busy.clone();
+                let push_log = push_log.clone();
+                let show_toast = toast_cb.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    set_busy.emit(true);
+                    let os_opt = if selected_os == "unknown" {
+                        None
+                    } else {
+                        Some(selected_os.as_str())
+                    };
+                    match api::usb_register(assistant, os_opt).await {
+                        Ok(()) => {
+                            push_log.emit("USB enabling request sent".to_string());
+                            show_toast.emit(("USB enabling…".into(), true));
+                            if assistant {
+                                match scripts::lookup("assistant_us") {
+                                    Some(script_dsl) => match dsl::compile(script_dsl) {
                                         Ok(bytecode) => match api::run_script(&bytecode).await {
                                             Ok(()) => push_log
                                                 .emit("macOS assistant script queued".into()),
@@ -361,33 +366,29 @@ fn app() -> Html {
                                                 err.message
                                             ));
                                         }
-                                    }
-                                }
-                                None => {
-                                    push_log.emit("assistant script unavailable in frontend".into())
+                                    },
+                                    None => push_log
+                                        .emit("assistant script unavailable in frontend".into()),
                                 }
                             }
                         }
+                        Err(e) => {
+                            push_log.emit(format!("usb start error: {e}"));
+                            show_toast.emit((format!("USB start failed: {e}"), false));
+                        }
                     }
-                    Err(e) => {
-                        push_log.emit(format!("usb start error: {e}"));
-                        show_toast.emit((format!("USB start failed: {e}"), false));
-                    }
-                }
-                set_busy.emit(false);
-            });
-        })
-    };
+                    set_busy.emit(false);
+                });
+            })
+        };
 
     let on_run_dsl = {
         let dsl_text = dsl_text.clone();
-        let selected_layout = selected_layout.clone();
         let set_busy = set_busy.clone();
         let push_log = push_log.clone();
         let toast_cb = show_toast.clone();
         Callback::from(move |_| {
             let txt = (*dsl_text).clone();
-            let layout_id = (*selected_layout).clone();
             if txt.trim().is_empty() {
                 push_log.emit("empty script".to_string());
                 return;
@@ -396,7 +397,7 @@ fn app() -> Html {
             let push_log = push_log.clone();
             let show_toast = toast_cb.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let bytecode = match dsl::compile(&txt, &layout_id) {
+                let bytecode = match dsl::compile(&txt) {
                     Ok(bytes) => bytes,
                     Err(err) => {
                         push_log.emit(format!("compile error: {}", err.message));
@@ -424,6 +425,7 @@ fn app() -> Html {
         let transfer_store = transfer_store.clone();
         let transfers_state = transfers.clone();
         let push_log = push_log.clone();
+        let toast_cb = show_toast.clone();
         Callback::from(move |transfer_id: u64| {
             let plan = {
                 let mut store = transfer_store.borrow_mut();
@@ -434,6 +436,7 @@ fn app() -> Html {
                     }
                     Err(err) => {
                         push_log.emit(format!("finalize failed: {err}"));
+                        toast_cb.emit((format!("Download failed: {err}"), false));
                         return;
                     }
                 }
@@ -442,6 +445,8 @@ fn app() -> Html {
             let transfer_store = transfer_store.clone();
             let transfers_state = transfers_state.clone();
             let push_log = push_log.clone();
+            let show_toast = toast_cb.clone();
+            show_toast.emit(("Preparing download…".into(), true));
             wasm_bindgen_futures::spawn_local(async move {
                 let result = transfer::finalize_and_download(&plan).await;
                 {
@@ -450,8 +455,14 @@ fn app() -> Html {
                     transfers_state.set(store.snapshots());
                 }
                 match result {
-                    Ok(()) => push_log.emit(format!("download ready: {}", plan.file_name)),
-                    Err(err) => push_log.emit(format!("download failed: {err}")),
+                    Ok(()) => {
+                        push_log.emit(format!("download ready: {}", plan.file_name));
+                        show_toast.emit(("Download started".into(), true));
+                    }
+                    Err(err) => {
+                        push_log.emit(format!("download failed: {err}"));
+                        show_toast.emit((format!("Download failed: {err}"), false));
+                    }
                 }
             });
         })
@@ -528,7 +539,7 @@ fn app() -> Html {
     let st = (*status).clone();
     let conf = (*config).clone();
     let scr = (*scripts).clone();
-    let busy = *busy_count > 0;
+    let busy = *busy_state;
 
     html! {
         <div class="container">
@@ -579,10 +590,11 @@ fn app() -> Html {
                         let dsl_text = dsl_text.clone();
                         Callback::from(move |s: String| dsl_text.set(s))
                     }
-                    selected_layout={(*selected_layout).clone()}
                     on_select_layout={
-                        let selected_layout = selected_layout.clone();
-                        Callback::from(move |layout: String| selected_layout.set(layout))
+                        let dsl_text = dsl_text.clone();
+                        Callback::from(move |layout: String| {
+                            dsl_text.set(dsl::set_entry_layout(&dsl_text, &layout));
+                        })
                     }
                     scripts={scr.clone()}
                     on_run={on_run_dsl.clone()} />
@@ -794,7 +806,6 @@ fn usb_card(props: &UsbProps) -> Html {
 struct ScriptProps {
     pub dsl_text: String,
     pub on_change: Callback<String>,
-    pub selected_layout: String,
     pub on_select_layout: Callback<String>,
     pub scripts: Option<Vec<api::ScriptMeta>>,
     pub on_run: Callback<()>,
@@ -839,22 +850,24 @@ fn scripting_card(props: &ScriptProps) -> Html {
     };
 
     let layouts = dsl_core::available_layouts();
+    let selected_layout = dsl::entry_layout(&props.dsl_text).unwrap_or("");
 
     html! {
       <div class="card full">
         <h2>{"Scripting"}</h2>
         <div class="row column gap-2 mb-1">
-          <textarea id="scriptDsl" rows="6" cols="60" placeholder={"tap(\"ENTER\")\nmodtap(\"LGUI+SPACE\")\ndelay(400)\ntext(\"Terminal\", 10)"}
+          <textarea id="scriptDsl" rows="6" cols="60" placeholder={"layout(\"win_en-US\")\ntap(\"ENTER\")\nmodtap(\"LGUI+SPACE\")\ndelay(400)\ntext(\"Terminal\", 10)"}
             value={props.dsl_text.clone()} oninput={on_text} onkeydown={on_keydown} />
           <div class="row gap-2 items-center">
             <label class="hint" for="scriptLayout">{"Layout"}</label>
-            <select id="scriptLayout" value={props.selected_layout.clone()} onchange={on_layout}>
+            <select id="scriptLayout" required=true value={selected_layout.to_string()} onchange={on_layout}>
+              <option value="" disabled=true>{"Select layout…"}</option>
               { for layouts.iter().map(|id| html!{ <option value={id.to_string()}>{ *id }</option> }) }
             </select>
-            <span class="hint">{"Default for text(); layout(\"...\") overrides."}</span>
+            <span class="hint">{"Required; updates the script’s leading layout(\"...\") command."}</span>
           </div>
           <div class="row">
-            <button id="btnRunDsl" class="btn-accent" onclick={{ let cb=props.on_run.clone(); Callback::from(move |_| cb.emit(())) }}>{"Run Script"}</button>
+            <button id="btnRunDsl" class="btn-accent" disabled={selected_layout.is_empty()} onclick={{ let cb=props.on_run.clone(); Callback::from(move |_| cb.emit(())) }}>{"Run Script"}</button>
             <span class="hint">{"Commands: "}<code>{"tap(\"KEY\")"}</code>{"; "}<code>{"modtap(\"MOD+KEY\")"}</code>{"; "}<code>{"delay(MS)"}</code>{"; "}<code>{"text(\"STRING\", [DELAY])"}</code>{"; "}<code>{"layout(\"ID\")"}</code>{" — Press Ctrl/⌘+Enter to run."}</span>
             {{
               let lines = props.dsl_text.lines().count();

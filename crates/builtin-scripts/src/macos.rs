@@ -1,6 +1,7 @@
 use super::BuiltinScript;
 
 const OPEN_TERMINAL_DSL: &str = concat!(
+    "layout(\"win_en-US\")\n",
     "modtap(\"LGUI+SPACE\")\n",
     "delay(100)\n",
     "text(\"Terminal\", 5)\n",
@@ -29,6 +30,7 @@ const MACOS_HOST_AGENT_DEBUG_DSL: &str = concat!(
 );
 
 const MAC_ASSISTANT_US_DSL: &str = concat!(
+    "layout(\"win_en-US\")\n",
     "delay(1200)\n",
     "tap(\"ENTER\")\n",
     "delay(800)\n",
@@ -53,7 +55,12 @@ const MAC_ASSISTANT_DE_DSL: &str = concat!(
     "delay(600)\n",
 );
 
-const DEMO_CALL_DSL: &str = concat!("call hello_world\n", "delay(500)\n", "call open_terminal\n",);
+const DEMO_CALL_DSL: &str = concat!(
+    "layout(\"win_en-US\")\n",
+    "call hello_world\n",
+    "delay(500)\n",
+    "call open_terminal\n",
+);
 
 pub const OPEN_TERMINAL: BuiltinScript = BuiltinScript {
     id: "open_terminal",

@@ -26,6 +26,10 @@ where
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CompileOptions {
     pub preprocess: PreprocessOptions,
+    /// Require every entry and named script to declare its layout as its first
+    /// command. Layout declarations in called scripts are then ignored so the
+    /// caller's entry layout is inherited across the linked program.
+    pub require_layout: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -54,9 +58,12 @@ pub fn compile(
             return Err(CompileError::error(e.code, e.message, mapped));
         }
     };
+    if opts.require_layout {
+        validate_leading_layout(&ast)?;
+    }
     let mut out = ProgramOwned::new();
     let mut stack: Vec<String> = Vec::new();
-    inline_into_owned(&ast, provider, &opts.preprocess, &mut out, &mut stack)?;
+    inline_into_owned(&ast, provider, opts, &mut out, &mut stack, true)?;
     Ok(CompileOutput {
         program: out,
         diagnostics,
@@ -72,12 +79,31 @@ pub fn compile_and_link(
     compile(entry_dsl, provider, &CompileOptions::default()).map(|out| out.program)
 }
 
+/// Compile and link a self-contained entry script whose first command declares
+/// its keyboard layout. Every called script must also have a leading layout,
+/// but inherits the entry script's layout when it is inlined.
+pub fn compile_and_link_with_required_layout(
+    entry_dsl: &str,
+    provider: &impl ScriptProvider,
+) -> Result<ProgramOwned, CompileError> {
+    compile(
+        entry_dsl,
+        provider,
+        &CompileOptions {
+            require_layout: true,
+            ..CompileOptions::default()
+        },
+    )
+    .map(|out| out.program)
+}
+
 fn inline_into_owned(
     ast: &Program<'_>,
     provider: &impl ScriptProvider,
-    opts: &PreprocessOptions,
+    opts: &CompileOptions,
     out: &mut ProgramOwned,
     stack: &mut Vec<String>,
+    is_entry: bool,
 ) -> Result<(), CompileError> {
     for (idx, op) in ast.ops.iter().enumerate() {
         match op {
@@ -91,7 +117,11 @@ fn inline_into_owned(
                 s: (*s).to_owned(),
                 delay_ms: *delay_ms,
             }),
-            Op::Layout(layout) => out.ops.push(OpOwned::Layout(*layout)),
+            Op::Layout(layout) => {
+                if !opts.require_layout || is_entry {
+                    out.ops.push(OpOwned::Layout(*layout));
+                }
+            }
             Op::Call { id } => {
                 // cycle detection
                 if stack.iter().any(|s| s == id) {
@@ -102,7 +132,7 @@ fn inline_into_owned(
                     return Err(link_error("UnknownScript", (idx as u16) + 1));
                 };
                 // Preprocess callee independently (file-local scope), then parse and inline.
-                let pre = preprocess(text, opts)?;
+                let pre = preprocess(text, &opts.preprocess)?;
                 let exists = |sid: &str| provider.get(sid).is_some();
                 let sub = match compile_dsl_with_diag(&pre.text, exists) {
                     Ok(p) => p,
@@ -111,7 +141,10 @@ fn inline_into_owned(
                         return Err(CompileError::error(e.code, e.message, mapped));
                     }
                 };
-                inline_into_owned(&sub, provider, opts, out, stack)?;
+                if opts.require_layout {
+                    validate_leading_layout(&sub)?;
+                }
+                inline_into_owned(&sub, provider, opts, out, stack, false)?;
                 stack.pop();
             }
         }
@@ -119,6 +152,22 @@ fn inline_into_owned(
             // reusing the cap for owned too
             return Err(link_error("TooManyLines", 0));
         }
+    }
+    Ok(())
+}
+
+pub fn validate_leading_layout(ast: &Program<'_>) -> Result<(), CompileError> {
+    if !matches!(ast.ops.first(), Some(Op::Layout(_))) {
+        return Err(link_error("LayoutRequired", 1));
+    }
+    if let Some((idx, _)) = ast
+        .ops
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, op)| matches!(op, Op::Layout(_)))
+    {
+        return Err(link_error("LayoutMustBeFirst", (idx as u16) + 1));
     }
     Ok(())
 }
@@ -183,5 +232,36 @@ mod tests {
         let err = compile_and_link(entry, &EmptyProvider).unwrap_err();
         assert_eq!(err.span.line, 1);
         assert!(err.code == "UnknownLayout", "unexpected error: {:?}", err);
+    }
+
+    #[test]
+    fn required_layout_rejects_missing_declaration() {
+        let err = compile_and_link_with_required_layout("text(\"a\")", &EmptyProvider).unwrap_err();
+        assert_eq!(err.code, "LayoutRequired");
+        assert_eq!(err.span.line, 1);
+    }
+
+    #[test]
+    fn required_layout_rejects_later_declaration() {
+        let entry = "layout(\"win_en-US\")\ntext(\"a\")\nlayout(\"win_en-US\")";
+        let err = compile_and_link_with_required_layout(entry, &EmptyProvider).unwrap_err();
+        assert_eq!(err.code, "LayoutMustBeFirst");
+    }
+
+    #[test]
+    fn called_script_inherits_entry_layout() {
+        let provider = LookupProvider {
+            entries: vec![("sub", "layout(\"win_en-US\")\ntext(\"from sub\")")],
+        };
+        let entry = "layout(\"win_en-US\")\ncall sub";
+        let program = compile_and_link_with_required_layout(entry, &provider).unwrap();
+        assert_eq!(
+            program
+                .ops
+                .iter()
+                .filter(|op| matches!(op, OpOwned::Layout(_)))
+                .count(),
+            1
+        );
     }
 }

@@ -281,7 +281,11 @@ fn spawn_transfer_worker(
                     info!(path = %path.display(), "queued transfer finished");
                 }
                 Err(err) => {
-                    warn!(path = %path.display(), error = %err, "queued transfer failed");
+                    warn!(
+                        path = %path.display(),
+                        error = %format!("{err:#}"),
+                        "queued transfer failed"
+                    );
                 }
             }
         }

@@ -1,4 +1,5 @@
 use futures_channel::oneshot;
+use gloo_timers::callback::Timeout;
 use js_sys::{ArrayBuffer, Uint8Array};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
@@ -49,7 +50,22 @@ struct EventTypeEnvelope {
 
 thread_local! {
     static WS: RefCell<Option<WsState>> = const { RefCell::new(None) };
+    static WS_CALLBACKS: RefCell<Option<WsCallbacks>> = const { RefCell::new(None) };
+    static RECONNECT_SCHEDULED: Cell<bool> = const { Cell::new(false) };
+    static RECONNECT_DELAY_MS: Cell<u32> = const { Cell::new(RECONNECT_DELAY_MIN_MS) };
     static NEXT_FILESYSTEM_REQUEST_ID: Cell<u64> = const { Cell::new(1) };
+}
+
+const RECONNECT_DELAY_MIN_MS: u32 = 500;
+const RECONNECT_DELAY_MAX_MS: u32 = 5_000;
+
+#[derive(Clone)]
+struct WsCallbacks {
+    on_log: Rc<dyn Fn(String)>,
+    on_state: Rc<dyn Fn(bool)>,
+    on_transfer_text: Rc<dyn Fn(String)>,
+    on_transfer_binary: Rc<dyn Fn(Vec<u8>)>,
+    on_filesystem_binary: Rc<dyn Fn(Vec<u8>)>,
 }
 
 struct WsState {
@@ -78,101 +94,123 @@ pub fn init_ws(
     on_transfer_binary: impl Fn(Vec<u8>) + 'static,
     on_filesystem_binary: impl Fn(Vec<u8>) + 'static,
 ) {
+    WS_CALLBACKS.with(|cell| {
+        cell.replace(Some(WsCallbacks {
+            on_log: Rc::new(on_log),
+            on_state: Rc::new(on_state),
+            on_transfer_text: Rc::new(on_transfer_text),
+            on_transfer_binary: Rc::new(on_transfer_binary),
+            on_filesystem_binary: Rc::new(on_filesystem_binary),
+        }));
+    });
+    connect_ws();
+}
+
+fn connect_ws() {
+    let already_connected = WS.with(|cell| {
+        cell.borrow().as_ref().is_some_and(|state| {
+            matches!(
+                state.ws.ready_state(),
+                WebSocket::CONNECTING | WebSocket::OPEN
+            )
+        })
+    });
+    if already_connected {
+        return;
+    }
+
+    let Some(callbacks) = WS_CALLBACKS.with(|cell| cell.borrow().clone()) else {
+        return;
+    };
+
+    let url = format!("ws://{}/ws", hostname());
+    let Ok(ws) = WebSocket::new(&url) else {
+        (callbacks.on_log)("WS connection failed; retrying".into());
+        (callbacks.on_state)(false);
+        schedule_ws_reconnect();
+        return;
+    };
+    ws.set_binary_type(BinaryType::Arraybuffer);
+
+    let onopen = {
+        let callbacks = callbacks.clone();
+        Closure::wrap(Box::new(move |_e: Event| {
+            RECONNECT_DELAY_MS.with(|delay| delay.set(RECONNECT_DELAY_MIN_MS));
+            (callbacks.on_log)("WS open".into());
+            (callbacks.on_state)(true);
+        }) as Box<dyn FnMut(_)>)
+    };
+
+    let onmessage = {
+        let callbacks = callbacks.clone();
+        Closure::wrap(Box::new(move |e: MessageEvent| {
+            if let Some(s) = e.data().as_string() {
+                if route_rpc_response(&s) {
+                    return;
+                }
+                if is_transfer_event(&s) {
+                    (callbacks.on_transfer_text)(s);
+                    return;
+                }
+                if route_legacy_response(&s) {
+                    return;
+                }
+                (callbacks.on_log)(format!("WS msg: {s}"));
+                return;
+            }
+
+            if let Ok(array_buffer) = e.data().dyn_into::<ArrayBuffer>() {
+                let bytes = Uint8Array::new(&array_buffer);
+                let mut payload = vec![0u8; bytes.length() as usize];
+                bytes.copy_to(&mut payload);
+                match payload.split_first() {
+                    Some((1, data)) => (callbacks.on_transfer_binary)(data.to_vec()),
+                    Some((2, data)) => (callbacks.on_filesystem_binary)(data.to_vec()),
+                    Some((kind, _)) => {
+                        (callbacks.on_log)(format!("WS msg: unknown binary kind {kind}"));
+                    }
+                    None => (callbacks.on_log)("WS msg: empty binary message".into()),
+                }
+                return;
+            }
+
+            (callbacks.on_log)("WS msg: (non-text/non-binary)".into());
+        }) as Box<dyn FnMut(_)>)
+    };
+
+    let onerror = {
+        let callbacks = callbacks.clone();
+        Closure::wrap(Box::new(move |_e: Event| {
+            let canceled = cancel_pending_requests();
+            if canceled > 0 {
+                (callbacks.on_log)(format!("WS error; canceled {canceled} pending request(s)"));
+            } else {
+                (callbacks.on_log)("WS error".into());
+            }
+            (callbacks.on_state)(false);
+            schedule_ws_reconnect();
+        }) as Box<dyn FnMut(_)>)
+    };
+    let onclose = {
+        let callbacks = callbacks.clone();
+        Closure::wrap(Box::new(move |_e: CloseEvent| {
+            let canceled = cancel_pending_requests();
+            if canceled > 0 {
+                (callbacks.on_log)(format!("WS closed; canceled {canceled} pending request(s)"));
+            } else {
+                (callbacks.on_log)("WS closed".into());
+            }
+            (callbacks.on_state)(false);
+            schedule_ws_reconnect();
+        }) as Box<dyn FnMut(_)>)
+    };
+
+    ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+    ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+    ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+    ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+
     WS.with(|cell| {
-        if cell.borrow().is_some() {
-            return;
-        }
-        let url = format!("ws://{}/ws", hostname());
-        let ws = WebSocket::new(&url).expect("ws connect");
-        ws.set_binary_type(BinaryType::Arraybuffer);
-
-        let on_log = Rc::new(on_log);
-        let on_state = Rc::new(on_state);
-        let on_transfer_text = Rc::new(on_transfer_text);
-        let on_transfer_binary = Rc::new(on_transfer_binary);
-        let on_filesystem_binary = Rc::new(on_filesystem_binary);
-
-        let onopen = {
-            let on_log = on_log.clone();
-            let on_state = on_state.clone();
-            Closure::wrap(Box::new(move |_e: Event| {
-                on_log("WS open".into());
-                on_state(true);
-            }) as Box<dyn FnMut(_)>)
-        };
-
-        let onmessage = {
-            let on_log = on_log.clone();
-            let on_transfer_text = on_transfer_text.clone();
-            let on_transfer_binary = on_transfer_binary.clone();
-            let on_filesystem_binary = on_filesystem_binary.clone();
-            Closure::wrap(Box::new(move |e: MessageEvent| {
-                if let Some(s) = e.data().as_string() {
-                    if route_rpc_response(&s) {
-                        return;
-                    }
-                    if is_transfer_event(&s) {
-                        on_transfer_text(s);
-                        return;
-                    }
-                    if route_legacy_response(&s) {
-                        return;
-                    }
-                    on_log(format!("WS msg: {}", s));
-                    return;
-                }
-
-                if let Ok(array_buffer) = e.data().dyn_into::<ArrayBuffer>() {
-                    let bytes = Uint8Array::new(&array_buffer);
-                    let mut payload = vec![0u8; bytes.length() as usize];
-                    bytes.copy_to(&mut payload);
-                    match payload.split_first() {
-                        Some((1, data)) => on_transfer_binary(data.to_vec()),
-                        Some((2, data)) => on_filesystem_binary(data.to_vec()),
-                        Some((kind, _)) => {
-                            on_log(format!("WS msg: unknown binary kind {kind}"));
-                        }
-                        None => on_log("WS msg: empty binary message".into()),
-                    }
-                    return;
-                }
-
-                on_log("WS msg: (non-text/non-binary)".into());
-            }) as Box<dyn FnMut(_)>)
-        };
-
-        let onerror = {
-            let on_log = on_log.clone();
-            let on_state = on_state.clone();
-            Closure::wrap(Box::new(move |_e: Event| {
-                let canceled = cancel_pending_requests();
-                if canceled > 0 {
-                    on_log(format!("WS error; canceled {canceled} pending request(s)"));
-                } else {
-                    on_log("WS error".into());
-                }
-                on_state(false);
-            }) as Box<dyn FnMut(_)>)
-        };
-        let onclose = {
-            let on_log = on_log.clone();
-            let on_state = on_state.clone();
-            Closure::wrap(Box::new(move |_e: CloseEvent| {
-                let canceled = cancel_pending_requests();
-                if canceled > 0 {
-                    on_log(format!("WS closed; canceled {canceled} pending request(s)"));
-                } else {
-                    on_log("WS closed".into());
-                }
-                on_state(false);
-            }) as Box<dyn FnMut(_)>)
-        };
-
-        ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
-        ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-        ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
-        ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
-
         cell.replace(Some(WsState {
             ws,
             next_request_id: 1,
@@ -183,6 +221,39 @@ pub fn init_ws(
             _onclose: onclose,
         }));
     });
+}
+
+fn schedule_ws_reconnect() {
+    let already_scheduled = RECONNECT_SCHEDULED.with(|scheduled| scheduled.replace(true));
+    if already_scheduled {
+        return;
+    }
+
+    let delay_ms = RECONNECT_DELAY_MS.with(|delay| {
+        let current = delay.get();
+        delay.set(current.saturating_mul(2).min(RECONNECT_DELAY_MAX_MS));
+        current
+    });
+
+    Timeout::new(delay_ms, move || {
+        RECONNECT_SCHEDULED.with(|scheduled| scheduled.set(false));
+        let should_reconnect = WS.with(|cell| {
+            let should_reconnect = cell.borrow().as_ref().is_none_or(|state| {
+                !matches!(
+                    state.ws.ready_state(),
+                    WebSocket::CONNECTING | WebSocket::OPEN
+                )
+            });
+            if should_reconnect {
+                cell.replace(None);
+            }
+            should_reconnect
+        });
+        if should_reconnect {
+            connect_ws();
+        }
+    })
+    .forget();
 }
 
 fn route_rpc_response(text: &str) -> bool {

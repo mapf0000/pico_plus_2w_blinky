@@ -63,6 +63,20 @@ pub fn queue_transfer_text(event: String<TRANSFER_TEXT_MAX>) -> Result<(), Trans
     })
 }
 
+pub async fn send_transfer_text(
+    event: String<TRANSFER_TEXT_MAX>,
+) -> Result<(), TransferQueueError> {
+    let mut payload = Vec::new();
+    payload
+        .extend_from_slice(event.as_bytes())
+        .expect("text capacity is bounded by the WebSocket payload capacity");
+    enqueue_transfer_event(TransferWsEvent {
+        kind: TransferWsEventKind::Text,
+        payload,
+    })
+    .await
+}
+
 pub fn queue_transfer_binary(
     event: Vec<u8, TRANSFER_BINARY_MAX>,
 ) -> Result<(), TransferQueueError> {
@@ -72,8 +86,39 @@ pub fn queue_transfer_binary(
     })
 }
 
+/// Enqueue transfer data without dropping it when USB temporarily outpaces Wi-Fi.
+///
+/// The USB control task awaits this function before acknowledging the chunk to
+/// the host agent, propagating WebSocket backpressure across the whole transfer
+/// pipeline.
+pub async fn send_transfer_binary(
+    event: Vec<u8, TRANSFER_BINARY_MAX>,
+) -> Result<(), TransferQueueError> {
+    enqueue_transfer_event(TransferWsEvent {
+        kind: TransferWsEventKind::Binary,
+        payload: event,
+    })
+    .await
+}
+
+async fn enqueue_transfer_event(event: TransferWsEvent) -> Result<(), TransferQueueError> {
+    if !has_active_client() {
+        return Err(TransferQueueError::NoClient);
+    }
+
+    TRANSFER_WS_EVENTS.send(event).await;
+
+    // A disconnect drains the channel to wake blocked senders. Do not report
+    // that wake-up as a successfully relayed chunk.
+    if !has_active_client() {
+        return Err(TransferQueueError::NoClient);
+    }
+
+    Ok(())
+}
+
 fn queue_transfer_event(event: TransferWsEvent) -> Result<(), TransferQueueError> {
-    if ACTIVE_WS_CLIENTS.load(Ordering::Acquire) == 0 {
+    if !has_active_client() {
         return Err(TransferQueueError::NoClient);
     }
 

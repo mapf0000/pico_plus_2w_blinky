@@ -696,19 +696,6 @@ textarea#scriptDsl {
   background: #0006;
 }
 
-.card[aria-busy="true"]::after {
-  content: "";
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  width: 16px;
-  height: 16px;
-  border: 2px solid #bfd2de;
-  border-right-color: transparent;
-  border-radius: 50%;
-  animation: spin .8s linear infinite;
-}
-
 /* Improve error/off badge contrast */
 .badge.off {
   color: #fee2e2;

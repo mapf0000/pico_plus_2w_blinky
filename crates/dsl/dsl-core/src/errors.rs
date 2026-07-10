@@ -78,6 +78,8 @@ pub fn message_for_code(code: &'static str) -> &'static str {
         "TextEmpty" => "text() requires a non-empty string",
         "UnknownLayout" => "Unknown layout id",
         "LayoutNotEnabled" => "Layout not enabled at build time",
+        "LayoutRequired" => "Script must begin with layout(\"...\")",
+        "LayoutMustBeFirst" => "layout(\"...\") is only allowed as the first command",
         "UnknownScript" => "call refers to unknown script",
         "RecursionTooDeep" => "Recursive call detected",
         _ => code,

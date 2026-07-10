@@ -504,10 +504,10 @@ mod payloads {
             }
         }
 
-        let program = dsl_core::compile_and_link(script.dsl, &Provider)
+        let program = dsl_core::compile_and_link_with_required_layout(script.dsl, &Provider)
             .map_err(|e| compile_err("compile", script.id, e))?;
         let flat =
-            dsl_core::lower_to_flat_us(&program).map_err(|e| compile_err("lower", script.id, e))?;
+            dsl_core::lower_to_flat(&program).map_err(|e| compile_err("lower", script.id, e))?;
         let bytes = dsl_core::bytecode::encode(&flat).map_err(|_| {
             anyhow::anyhow!(
                 "payload {} encode error: program exceeds maximum length",
