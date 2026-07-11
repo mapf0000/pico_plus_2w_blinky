@@ -1,12 +1,18 @@
 # pico_rust — Firmware + Web UI
 
-This workspace builds two artifacts together:
+This workspace contains three cooperating components:
 - RP235x firmware for Raspberry Pi Pico 2 / 2 W (Cortex‑M33)
 - A Yew Web UI compiled to WebAssembly and embedded into the firmware HTTP server
+- A host-side serial agent for commands, filesystem browsing, credentials, and file transfer
 
-The build is wired so a single `cargo run -p pico_rust --release` builds both parts, flashes the board, and opens a serial log.
+The firmware build is wired so a single `cargo run -p pico_rust --release` builds the firmware and Web UI, flashes the board, and opens a serial log. Use `scripts/fw-deploy-with-agent` to package the local host agent as well. Contributors and automated agents should also read [AGENTS.md](AGENTS.md) for architecture constraints, cross-target workflows, and the validation matrix.
 
-See [TRANSFER.md](TRANSFER.md) for the complete USB-to-Wi-Fi file-transfer setup, workflow, protocol, limits, and security model.
+## Documentation
+
+- [System architecture](docs/ARCHITECTURE.md): components, startup, lifecycle, data flow, backpressure, and DSL execution.
+- [Protocol reference](docs/PROTOCOL.md): USB TLV, WebSocket RPC/HELLO, transfer/filesystem layouts, versions, errors, and compatibility.
+- [Hardware and recovery](docs/HARDWARE.md): supported board, pin and memory maps, USB/Wi-Fi configuration, flashing, BOOTSEL, and smoke tests.
+- [Keyboard DSL](crates/dsl/README.md): language syntax, layouts, limits, and bytecode workflow.
 
 ## Overview
 - Primary hardware target: Pimoroni Pico Plus 2 W (RP2350B) with 16 MiB QSPI flash, 8 MiB PSRAM, and 520 KiB SRAM.
@@ -32,7 +38,7 @@ See [TRANSFER.md](TRANSFER.md) for the complete USB-to-Wi-Fi file-transfer setup
 ## Workspace Layout
 - Firmware crate: `firmware/` (package: `pico_rust`)
   - Entry point: `firmware/src/main.rs`
-  - HTTP server + embedded UI: `firmware/src/http.rs` (includes generated `frontend_static.rs`)
+  - HTTP server + embedded UI: `firmware/src/http/` (includes generated `frontend_static.rs`)
   - Linker script: `firmware/memory.x`
   - Build script: `firmware/build.rs` (delegates to `crates/build-support`)
 - Frontend crate: `apps/frontend/`
@@ -103,12 +109,16 @@ See [TRANSFER.md](TRANSFER.md) for the complete USB-to-Wi-Fi file-transfer setup
 - Select a regular file to populate the manual transfer path or queue it directly.
 
 ## Testing
-- Host-only unit tests (skip embedded dependencies):
-  - `cargo test --no-default-features --features "" --target aarch64-apple-darwin`
-    - Disables the default `firmware` feature so crates that expect a Cortex-M target are not pulled in when running on macOS/ARM.
-- Frontend wasm tests:
-  - `cargo test -p frontend --target wasm32-unknown-unknown --no-run`
-  - Then execute the produced `.wasm` with `wasm-bindgen-test-runner target/wasm32-unknown-unknown/debug/deps/<name>.wasm` (install via `cargo install wasm-bindgen-test`).
+- Format the workspace: `cargo fmt --all -- --check`
+- Host-agent unit and platform tests: `cargo test -p host-agent`
+  - On macOS this includes the pseudo-terminal end-to-end suite; those tests are skipped on other platforms.
+- DSL tests with every keyboard layout enabled:
+  - `cargo test -p dsl-core --features "std layout_win_en_gb layout_win_pt_br layout_win_de_de layout_mac_en_gb layout_mac_pt_br layout_mac_de_de"`
+- Compile frontend wasm tests: `cargo test -p frontend --target wasm32-unknown-unknown --no-run`
+  - The integration suite is configured to run in a browser and needs `wasm-bindgen-test-runner` plus a compatible browser/WebDriver setup for execution.
+- Check the embedded target: `cargo check -p pico_rust --release --target thumbv8m.main-none-eabihf`
+
+Avoid bare `cargo test` at the workspace root: the default member is the embedded firmware and its build script also prepares frontend and generated assets. See [AGENTS.md](AGENTS.md#validation-matrix) for change-specific validation.
 
 ## Cargo/Target Configuration
 - Root config: `.cargo/config.toml`

@@ -8,6 +8,7 @@ pub(crate) struct ScriptProps {
     pub scripts: Option<Vec<api::ScriptMeta>>,
     pub connected: bool,
     pub busy: bool,
+    pub supported_layouts: Vec<String>,
     pub on_run: Callback<()>,
 }
 #[function_component(ScriptingCard)]
@@ -33,12 +34,25 @@ pub(crate) fn scripting_card(props: &ScriptProps) -> Html {
         })
     };
 
-    let layouts = dsl_core::available_layouts();
+    let layouts = dsl_core::available_layouts()
+        .iter()
+        .copied()
+        .filter(|layout| {
+            props
+                .supported_layouts
+                .iter()
+                .any(|supported| supported == layout)
+        })
+        .collect::<Vec<_>>();
     let selected_layout = dsl::entry_layout(&props.dsl_text).unwrap_or("");
     let line_count = props.dsl_text.lines().count();
     let can_run = props.connected
         && !props.busy
         && !selected_layout.is_empty()
+        && props
+            .supported_layouts
+            .iter()
+            .any(|layout| layout == selected_layout)
         && line_count <= MAX_DSL_LINES;
 
     let on_keydown = {
@@ -80,7 +94,7 @@ pub(crate) fn scripting_card(props: &ScriptProps) -> Html {
             <code>{"tap(\"KEY\")"}</code><code>{"modtap(\"MOD+KEY\")"}</code><code>{"delay(MS)"}</code><code>{"text(\"STRING\", DELAY)"}</code>
           </div>
           <div class="card-actions editor-actions">
-            <span class="form-note">{if props.connected { "Press Ctrl/⌘ + Enter to run" } else { "Connect to the device before running scripts" }}</span>
+            <span class="form-note">{if !props.connected { "Script execution is unavailable for this firmware" } else if !props.supported_layouts.iter().any(|layout| layout == selected_layout) { "Select a layout supported by the firmware" } else { "Press Ctrl/⌘ + Enter to run" }}</span>
             <button id="btnRunDsl" class="btn-primary run-button" disabled={!can_run} onclick={{ let cb=props.on_run.clone(); Callback::from(move |_| cb.emit(())) }}>
               <span aria-hidden="true">{"▶"}</span>{if props.busy { "Running…" } else { "Run script" }}
             </button>

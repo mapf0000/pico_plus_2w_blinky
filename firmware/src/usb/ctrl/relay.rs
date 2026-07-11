@@ -101,7 +101,7 @@ where
         return Ok(());
     };
 
-    if open.protocol_version != 1 {
+    if open.protocol_version != FILE_TRANSFER_PROTOCOL_VERSION {
         send_file_abort(
             class,
             max_packet,

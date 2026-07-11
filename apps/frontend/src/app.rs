@@ -39,6 +39,42 @@ pub(crate) enum ConnectionState {
     Unavailable,
 }
 
+#[derive(Clone, Copy)]
+enum PendingAction {
+    Refresh,
+    SaveIdentity,
+    UsbStart,
+    UsbStop,
+    RunScript,
+    TransferStart,
+    TransferDefault,
+}
+
+#[derive(Clone, Default, PartialEq)]
+struct PendingActions {
+    refresh: bool,
+    save_identity: bool,
+    usb_start: bool,
+    usb_stop: bool,
+    run_script: bool,
+    transfer_start: bool,
+    transfer_default: bool,
+}
+
+impl PendingActions {
+    fn set(&mut self, action: PendingAction, pending: bool) {
+        match action {
+            PendingAction::Refresh => self.refresh = pending,
+            PendingAction::SaveIdentity => self.save_identity = pending,
+            PendingAction::UsbStart => self.usb_start = pending,
+            PendingAction::UsbStop => self.usb_stop = pending,
+            PendingAction::RunScript => self.run_script = pending,
+            PendingAction::TransferStart => self.transfer_start = pending,
+            PendingAction::TransferDefault => self.transfer_default = pending,
+        }
+    }
+}
+
 impl ConnectionState {
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -71,26 +107,22 @@ pub(crate) fn app() -> Html {
     let dsl_text = use_state(|| STARTER_SCRIPT.to_string());
     let selected_os = use_state(|| String::from("mac"));
     let active_section = use_state(|| AppSection::Overview);
-    let busy_count = use_mut_ref(|| 0u32);
-    let busy_state = use_state(|| false);
+    let pending_actions = use_state(PendingActions::default);
     let log_lines = use_state(Vec::<String>::new);
     let ws_connected = use_state(|| false);
+    let hello = use_state(|| None::<api::Hello>);
+    let handshake_error = use_state(|| None::<String>);
     let connection_state = use_state(|| ConnectionState::Connecting);
     let was_connected = use_mut_ref(|| false);
     let toast = use_state(|| None::<(String, bool)>); // (message, ok?)
     // All WebSocket API calls are handled in api.rs via a single connection
 
-    let set_busy = {
-        let busy_count = busy_count.clone();
-        let busy_state = busy_state.clone();
-        Callback::from(move |on: bool| {
-            let mut count = busy_count.borrow_mut();
-            *count = if on {
-                count.saturating_add(1)
-            } else {
-                count.saturating_sub(1)
-            };
-            busy_state.set(*count > 0);
+    let set_pending = {
+        let pending_actions = pending_actions.clone();
+        Callback::from(move |(action, pending): (PendingAction, bool)| {
+            let mut next = (*pending_actions).clone();
+            next.set(action, pending);
+            pending_actions.set(next);
         })
     };
 
@@ -151,7 +183,7 @@ pub(crate) fn app() -> Html {
                 .await
                 {
                     let mut store = filesystem_store.borrow_mut();
-                    store.fail_request(request_id, error.clone());
+                    store.fail_request(request_id, error.to_string());
                     filesystem_view.set(store.snapshot());
                     push_log.emit(format!("filesystem list error: {error}"));
                     return;
@@ -187,16 +219,34 @@ pub(crate) fn app() -> Html {
     {
         let status = status.clone();
         let config = config.clone();
-        let set_busy = set_busy.clone();
+        let hello = hello.clone();
+        let handshake_error = handshake_error.clone();
+        let set_pending = set_pending.clone();
         let push_log = push_log.clone();
         use_effect_with(*ws_connected, move |connected| {
             if *connected {
                 let status = status.clone();
                 let config = config.clone();
-                let set_busy = set_busy.clone();
+                let hello = hello.clone();
+                let handshake_error = handshake_error.clone();
+                let set_pending = set_pending.clone();
                 let push_log = push_log.clone();
                 wasm_bindgen_futures::spawn_local(async move {
-                    set_busy.emit(true);
+                    set_pending.emit((PendingAction::Refresh, true));
+                    match api::get_hello().await {
+                        Ok(snapshot) => {
+                            handshake_error.set(snapshot.compatibility_error());
+                            hello.set(Some(snapshot));
+                        }
+                        Err(error) => {
+                            let message = format!(
+                                "Capability handshake failed ({}): {error}",
+                                error.category()
+                            );
+                            handshake_error.set(Some(message.clone()));
+                            push_log.emit(message);
+                        }
+                    }
                     match api::get_status().await {
                         Ok(s) => status.set(Some(StatusState {
                             usb_enabled: s.usb_enabled,
@@ -212,8 +262,11 @@ pub(crate) fn app() -> Html {
                         })),
                         Err(e) => push_log.emit(format!("config error: {e}")),
                     }
-                    set_busy.emit(false);
+                    set_pending.emit((PendingAction::Refresh, false));
                 });
+            } else {
+                hello.set(None);
+                handshake_error.set(None);
             }
             || ()
         });
@@ -222,13 +275,27 @@ pub(crate) fn app() -> Html {
     // Poll status only while connected; reconnecting does its own refresh.
     {
         let status = status.clone();
+        let hello = hello.clone();
+        let handshake_error = handshake_error.clone();
         let push_log = push_log.clone();
         use_effect_with(*ws_connected, move |connected| {
             let handle = connected.then(|| {
                 gloo_timers::callback::Interval::new(5000, move || {
                     let status = status.clone();
+                    let hello = hello.clone();
+                    let handshake_error = handshake_error.clone();
                     let push_log = push_log.clone();
                     wasm_bindgen_futures::spawn_local(async move {
+                        match api::get_hello().await {
+                            Ok(snapshot) => {
+                                handshake_error.set(snapshot.compatibility_error());
+                                hello.set(Some(snapshot));
+                            }
+                            Err(error) => push_log.emit(format!(
+                                "HELLO refresh error ({}): {error}",
+                                error.category()
+                            )),
+                        }
                         match api::get_status().await {
                             Ok(s) => status.set(Some(StatusState {
                                 usb_enabled: s.usb_enabled,
@@ -248,6 +315,9 @@ pub(crate) fn app() -> Html {
     {
         let push_log = push_log.clone();
         let ws_connected = ws_connected.clone();
+        let hello_state = hello.clone();
+        let handshake_error = handshake_error.clone();
+        let pending_actions = pending_actions.clone();
         let connection_state = connection_state.clone();
         let was_connected = was_connected.clone();
         let transfer_store = transfer_store.clone();
@@ -264,16 +334,49 @@ pub(crate) fn app() -> Html {
                     let ws_connected = ws_connected.clone();
                     let connection_state = connection_state.clone();
                     let was_connected = was_connected.clone();
+                    let hello_state = hello_state.clone();
+                    let handshake_error = handshake_error.clone();
+                    let pending_actions = pending_actions.clone();
                     move |connected| {
                         ws_connected.set(connected);
                         if connected {
                             *was_connected.borrow_mut() = true;
                             connection_state.set(ConnectionState::Connected);
                         } else if *was_connected.borrow() {
+                            hello_state.set(None);
+                            handshake_error.set(None);
+                            pending_actions.set(PendingActions::default());
                             connection_state.set(ConnectionState::Reconnecting);
                         } else {
+                            hello_state.set(None);
+                            pending_actions.set(PendingActions::default());
                             connection_state.set(ConnectionState::Unavailable);
                         }
+                    }
+                },
+                {
+                    let hello_state = hello_state.clone();
+                    let handshake_error = handshake_error.clone();
+                    let push_log = push_log.clone();
+                    move |snapshot: api::Hello| {
+                        let compatibility_error = snapshot.compatibility_error();
+                        push_log.emit(format!(
+                            "HELLO firmware={} build={} ws={} transfer={} filesystem={} agent={}",
+                            snapshot.firmware.version,
+                            snapshot.firmware.build,
+                            snapshot.protocols.websocket,
+                            snapshot.protocols.transfer,
+                            snapshot.protocols.filesystem,
+                            snapshot.host_agent.version.as_deref().unwrap_or(
+                                if snapshot.host_agent.present {
+                                    "legacy"
+                                } else {
+                                    "absent"
+                                }
+                            )
+                        ));
+                        handshake_error.set(compatibility_error);
+                        hello_state.set(Some(snapshot));
                     }
                 },
                 {
@@ -358,12 +461,12 @@ pub(crate) fn app() -> Html {
     // Actions
     let on_save_identity = {
         let config = config.clone();
-        let set_busy = set_busy.clone();
+        let set_pending = set_pending.clone();
         let push_log = push_log.clone();
         let toast_cb = show_toast.clone();
         Callback::from(move |(man, prod): (String, String)| {
             let config = config.clone();
-            let set_busy = set_busy.clone();
+            let set_pending = set_pending.clone();
             let push_log = push_log.clone();
             let show_toast = toast_cb.clone();
             wasm_bindgen_futures::spawn_local(async move {
@@ -376,7 +479,7 @@ pub(crate) fn app() -> Html {
                     ));
                     return;
                 }
-                set_busy.emit(true);
+                set_pending.emit((PendingAction::SaveIdentity, true));
                 match api::save_config(&man, &prod).await {
                     Ok(()) => {
                         push_log.emit("identity saved".to_string());
@@ -391,7 +494,7 @@ pub(crate) fn app() -> Html {
                         show_toast.emit((format!("Save failed: {e}"), false));
                     }
                 }
-                set_busy.emit(false);
+                set_pending.emit((PendingAction::SaveIdentity, false));
             });
         })
     };
@@ -399,16 +502,16 @@ pub(crate) fn app() -> Html {
     let on_usb_start =
         {
             let selected_os = selected_os.clone();
-            let set_busy = set_busy.clone();
+            let set_pending = set_pending.clone();
             let push_log = push_log.clone();
             let toast_cb = show_toast.clone();
             Callback::from(move |assistant: bool| {
                 let selected_os = (*selected_os).clone();
-                let set_busy = set_busy.clone();
+                let set_pending = set_pending.clone();
                 let push_log = push_log.clone();
                 let show_toast = toast_cb.clone();
                 wasm_bindgen_futures::spawn_local(async move {
-                    set_busy.emit(true);
+                    set_pending.emit((PendingAction::UsbStart, true));
                     let os_opt = if selected_os == "unknown" {
                         None
                     } else {
@@ -444,14 +547,14 @@ pub(crate) fn app() -> Html {
                             show_toast.emit((format!("USB start failed: {e}"), false));
                         }
                     }
-                    set_busy.emit(false);
+                    set_pending.emit((PendingAction::UsbStart, false));
                 });
             })
         };
 
     let on_run_dsl = {
         let dsl_text = dsl_text.clone();
-        let set_busy = set_busy.clone();
+        let set_pending = set_pending.clone();
         let push_log = push_log.clone();
         let toast_cb = show_toast.clone();
         Callback::from(move |_| {
@@ -461,7 +564,7 @@ pub(crate) fn app() -> Html {
                 toast_cb.emit(("Add commands before running the script".into(), false));
                 return;
             }
-            let set_busy = set_busy.clone();
+            let set_pending = set_pending.clone();
             let push_log = push_log.clone();
             let show_toast = toast_cb.clone();
             wasm_bindgen_futures::spawn_local(async move {
@@ -473,7 +576,7 @@ pub(crate) fn app() -> Html {
                         return;
                     }
                 };
-                set_busy.emit(true);
+                set_pending.emit((PendingAction::RunScript, true));
                 match api::run_script(&bytecode).await {
                     Ok(()) => {
                         push_log.emit(format!("queued ({} bytes)", bytecode.len()));
@@ -484,7 +587,7 @@ pub(crate) fn app() -> Html {
                         show_toast.emit((format!("Run failed: {e}"), false));
                     }
                 }
-                set_busy.emit(false);
+                set_pending.emit((PendingAction::RunScript, false));
             });
         })
     };
@@ -537,7 +640,7 @@ pub(crate) fn app() -> Html {
     };
 
     let queue_transfer_path = {
-        let set_busy = set_busy.clone();
+        let set_pending = set_pending.clone();
         let push_log = push_log.clone();
         let toast_cb = show_toast.clone();
         Callback::from(move |path: String| {
@@ -550,11 +653,11 @@ pub(crate) fn app() -> Html {
                 ));
                 return;
             }
-            let set_busy = set_busy.clone();
+            let set_pending = set_pending.clone();
             let push_log = push_log.clone();
             let show_toast = toast_cb.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                set_busy.emit(true);
+                set_pending.emit((PendingAction::TransferStart, true));
                 match api::transfer_start(&path).await {
                     Ok(()) => {
                         push_log.emit(format!("transfer queued for path: {}", path));
@@ -565,7 +668,7 @@ pub(crate) fn app() -> Html {
                         show_toast.emit((format!("Transfer start failed: {err}"), false));
                     }
                 }
-                set_busy.emit(false);
+                set_pending.emit((PendingAction::TransferStart, false));
             });
         })
     };
@@ -578,7 +681,7 @@ pub(crate) fn app() -> Html {
 
     let on_set_transfer_default = {
         let transfer_path = transfer_path.clone();
-        let set_busy = set_busy.clone();
+        let set_pending = set_pending.clone();
         let push_log = push_log.clone();
         let toast_cb = show_toast.clone();
         Callback::from(move |_| {
@@ -591,11 +694,11 @@ pub(crate) fn app() -> Html {
                 ));
                 return;
             }
-            let set_busy = set_busy.clone();
+            let set_pending = set_pending.clone();
             let push_log = push_log.clone();
             let show_toast = toast_cb.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                set_busy.emit(true);
+                set_pending.emit((PendingAction::TransferDefault, true));
                 match api::transfer_set_default(&path).await {
                     Ok(()) => {
                         push_log.emit(format!("default transfer path set: {}", path));
@@ -606,21 +709,21 @@ pub(crate) fn app() -> Html {
                         show_toast.emit((format!("Set default failed: {err}"), false));
                     }
                 }
-                set_busy.emit(false);
+                set_pending.emit((PendingAction::TransferDefault, false));
             });
         })
     };
 
     let on_usb_stop = {
-        let set_busy = set_busy.clone();
+        let set_pending = set_pending.clone();
         let push_log = push_log.clone();
         let toast_cb = show_toast.clone();
         Callback::from(move |_| {
-            let set_busy = set_busy.clone();
+            let set_pending = set_pending.clone();
             let push_log = push_log.clone();
             let show_toast = toast_cb.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                set_busy.emit(true);
+                set_pending.emit((PendingAction::UsbStop, true));
                 match api::usb_unregister().await {
                     Ok(()) => {
                         push_log.emit("USB disabling request sent".into());
@@ -631,7 +734,7 @@ pub(crate) fn app() -> Html {
                         show_toast.emit((format!("USB stop failed: {e}"), false));
                     }
                 }
-                set_busy.emit(false);
+                set_pending.emit((PendingAction::UsbStop, false));
             });
         })
     };
@@ -640,8 +743,59 @@ pub(crate) fn app() -> Html {
     let st = (*status).clone();
     let conf = (*config).clone();
     let scr = (*scripts).clone();
-    let busy = *busy_state;
+    let pending = (*pending_actions).clone();
+    let capabilities = (*hello).clone();
     let connected = *ws_connected;
+    let websocket_compatible = capabilities
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.compatibility_error().is_none());
+    let device_ready = connected && websocket_compatible;
+    let usb_control_ready = device_ready
+        && capabilities
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.supports_feature("usb_control"));
+    let script_ready = device_ready
+        && capabilities
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.supports_feature("script_bytecode"));
+    let transfer_ready = device_ready
+        && capabilities.as_ref().is_some_and(|snapshot| {
+            snapshot.transfer_compatible()
+                && snapshot.host_agent.present
+                && snapshot.host_agent.version.is_some()
+        });
+    let filesystem_ready = device_ready
+        && capabilities.as_ref().is_some_and(|snapshot| {
+            snapshot.filesystem_compatible()
+                && snapshot.host_agent.present
+                && snapshot.host_agent.version.is_some()
+        });
+    let supported_layouts: Vec<String> = capabilities
+        .as_ref()
+        .map(|snapshot| {
+            dsl_core::available_layouts()
+                .iter()
+                .copied()
+                .filter(|layout| snapshot.supports_layout(layout))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let version_warning = capabilities.as_ref().and_then(|snapshot| {
+        snapshot.compatibility_error().or_else(|| {
+            (snapshot.protocols.transfer != api::TRANSFER_PROTOCOL_VERSION
+                || snapshot.protocols.filesystem != api::FILESYSTEM_PROTOCOL_VERSION)
+                .then(|| {
+                    format!(
+                        "firmware protocols are transfer={} filesystem={}; this UI expects transfer={} filesystem={}",
+                        snapshot.protocols.transfer,
+                        snapshot.protocols.filesystem,
+                        api::TRANSFER_PROTOCOL_VERSION,
+                        api::FILESYSTEM_PROTOCOL_VERSION
+                    )
+                })
+        })
+    });
     let current_section = *active_section;
     let select_section = |section: AppSection| {
         let active_section = active_section.clone();
@@ -681,7 +835,10 @@ pub(crate) fn app() -> Html {
                 </nav>
                 <div class="sidebar-footer">
                     <span class={classes!("device-dot", connection_state.class())}></span>
-                    <div><strong>{"RP2350 console"}</strong><span>{"Desktop interface"}</span></div>
+                    <div>
+                        <strong>{capabilities.as_ref().map(|snapshot| format!("Firmware {}", snapshot.firmware.version)).unwrap_or_else(|| "RP2350 console".into())}</strong>
+                        <span>{capabilities.as_ref().map(|snapshot| snapshot.firmware.build.clone()).unwrap_or_else(|| "Desktop interface".into())}</span>
+                    </div>
                 </div>
             </aside>
 
@@ -701,11 +858,20 @@ pub(crate) fn app() -> Html {
                 </header>
 
                 <div class="content-area">
+                    if connected && capabilities.is_none() && handshake_error.is_none() {
+                        <div class="compatibility-banner is-loading"><strong>{"Negotiating capabilities"}</strong><span>{"Waiting for the firmware HELLO response…"}</span></div>
+                    } else if let Some(message) = version_warning.as_ref().or(handshake_error.as_ref()) {
+                        <div class="compatibility-banner is-error"><strong>{"Firmware update required"}</strong><span>{message}</span></div>
+                    } else if current_section == AppSection::Transfers && capabilities.as_ref().is_some_and(|snapshot| !snapshot.host_agent.present) {
+                        <div class="compatibility-banner is-warning"><strong>{"Host agent unavailable"}</strong><span>{"Start or update the USB host-agent to browse and transfer files."}</span></div>
+                    } else if current_section == AppSection::Transfers && capabilities.as_ref().is_some_and(|snapshot| snapshot.host_agent.present && snapshot.host_agent.version.is_none()) {
+                        <div class="compatibility-banner is-warning"><strong>{"Host agent update required"}</strong><span>{"The connected agent does not report a compatible version."}</span></div>
+                    }
                     { match current_section {
                         AppSection::Overview => html! {
                             <div class="overview-grid">
                                 <div class="overview-stack">
-                                    <StatusCard status={st.clone()} busy={busy} connection={*connection_state} />
+                                    <StatusCard status={st.clone()} hello={capabilities.clone()} busy={pending.refresh} connection={*connection_state} />
                                     <UsbCard
                                         selected_os={(*selected_os).clone()}
                                         on_select_os={{
@@ -713,16 +879,17 @@ pub(crate) fn app() -> Html {
                                             Callback::from(move |os: String| selected_os.set(os))
                                         }}
                                         usb_enabled={st.as_ref().map(|s| s.usb_enabled).unwrap_or(false)}
-                                        connected={connected}
-                                        busy={busy}
+                                        connected={usb_control_ready}
+                                        starting={pending.usb_start}
+                                        stopping={pending.usb_stop}
                                         on_start={on_usb_start.clone()}
                                         on_stop={on_usb_stop.clone()} />
                                 </div>
                                 <IdentityCard
                                     config={conf.clone()}
                                     usb_enabled={st.as_ref().map(|s| s.usb_enabled).unwrap_or(false)}
-                                    connected={connected}
-                                    busy={busy}
+                                    connected={device_ready && capabilities.as_ref().is_some_and(|snapshot| snapshot.supports_feature("usb_identity"))}
+                                    busy={pending.save_identity}
                                     on_save={on_save_identity.clone()} />
                             </div>
                         },
@@ -738,16 +905,18 @@ pub(crate) fn app() -> Html {
                                     Callback::from(move |layout: String| dsl_text.set(dsl::set_entry_layout(&dsl_text, &layout)))
                                 }}
                                 scripts={scr.clone()}
-                                connected={connected}
-                                busy={busy}
+                                connected={script_ready}
+                                busy={pending.run_script}
+                                supported_layouts={supported_layouts.clone()}
                                 on_run={on_run_dsl.clone()} />
                         },
                         AppSection::Transfers => html! {
                             <div class="transfer-workspace">
                                 <TransferStartCard
                                     path={(*transfer_path).clone()}
-                                    connected={connected}
-                                    busy={busy}
+                                    connected={transfer_ready}
+                                    starting={pending.transfer_start}
+                                    setting_default={pending.transfer_default}
                                     on_change={{
                                         let transfer_path = transfer_path.clone();
                                         Callback::from(move |value: String| transfer_path.set(value))
@@ -756,7 +925,9 @@ pub(crate) fn app() -> Html {
                                     on_set_default={on_set_transfer_default.clone()} />
                                 <FileBrowserCard
                                     view={(*filesystem_view).clone()}
-                                    connected={connected}
+                                    connected={filesystem_ready}
+                                    transfer_enabled={transfer_ready}
+                                    transfer_pending={pending.transfer_start}
                                     on_browse={on_browse.clone()}
                                     on_select={{
                                         let transfer_path = transfer_path.clone();

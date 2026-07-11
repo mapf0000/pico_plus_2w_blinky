@@ -4,6 +4,7 @@ use js_sys::{ArrayBuffer, Uint8Array};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::thread_local;
 use std::vec::Vec;
 use std::{cell::Cell, cell::RefCell, rc::Rc};
@@ -34,9 +35,158 @@ pub struct ScriptMeta {
     pub dsl: Option<String>,
 }
 
+pub const WEBSOCKET_PROTOCOL_VERSION: u16 = 1;
+pub const TRANSFER_PROTOCOL_VERSION: u16 = 1;
+pub const FILESYSTEM_PROTOCOL_VERSION: u16 = 1;
+
+const READ_TIMEOUT_MS: u32 = 5_000;
+const MUTATION_TIMEOUT_MS: u32 = 10_000;
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct Hello {
+    pub event_type: String,
+    pub version: u16,
+    pub firmware: FirmwareBuild,
+    pub protocols: ProtocolVersions,
+    pub host_agent: HostAgentInfo,
+    pub keyboard: KeyboardCapabilities,
+    #[serde(default)]
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub privileged_operations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct FirmwareBuild {
+    pub version: String,
+    pub build: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ProtocolVersions {
+    pub websocket: u16,
+    pub transfer: u16,
+    pub filesystem: u16,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HostAgentInfo {
+    pub present: bool,
+    pub version: Option<String>,
+    pub hostname: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct KeyboardCapabilities {
+    #[serde(default)]
+    pub layouts: Vec<String>,
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+
+impl Hello {
+    pub fn compatibility_error(&self) -> Option<String> {
+        if self.event_type != "hello" || self.version != 1 {
+            return Some("unsupported HELLO format".into());
+        }
+        if self.protocols.websocket != WEBSOCKET_PROTOCOL_VERSION {
+            return Some(format!(
+                "WebSocket protocol {} is not supported by this UI (expected {})",
+                self.protocols.websocket, WEBSOCKET_PROTOCOL_VERSION
+            ));
+        }
+        None
+    }
+
+    pub fn supports_feature(&self, feature: &str) -> bool {
+        self.features.iter().any(|candidate| candidate == feature)
+    }
+
+    pub fn supports_layout(&self, layout: &str) -> bool {
+        self.keyboard
+            .layouts
+            .iter()
+            .any(|candidate| candidate == layout)
+    }
+
+    pub fn transfer_compatible(&self) -> bool {
+        self.protocols.transfer == TRANSFER_PROTOCOL_VERSION
+            && self.supports_feature("file_transfer")
+    }
+
+    pub fn filesystem_compatible(&self) -> bool {
+        self.protocols.filesystem == FILESYSTEM_PROTOCOL_VERSION
+            && self.supports_feature("filesystem_browser")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelReason {
+    ConnectionLost,
+    Reconnecting,
+}
+
+impl fmt::Display for CancelReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConnectionLost => f.write_str("connection lost"),
+            Self::Reconnecting => f.write_str("connection replaced while reconnecting"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApiError {
+    Disconnected,
+    SendFailed,
+    Timeout {
+        request_id: u64,
+        timeout_ms: u32,
+    },
+    Canceled {
+        request_id: u64,
+        reason: CancelReason,
+    },
+    Protocol(String),
+    Remote(String),
+}
+
+impl ApiError {
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::Disconnected => "disconnected",
+            Self::SendFailed => "transport",
+            Self::Timeout { .. } => "timeout",
+            Self::Canceled { .. } => "canceled",
+            Self::Protocol(_) => "protocol",
+            Self::Remote(_) => "remote",
+        }
+    }
+}
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disconnected => f.write_str("device is not connected"),
+            Self::SendFailed => f.write_str("failed to send request"),
+            Self::Timeout {
+                request_id,
+                timeout_ms,
+            } => write!(f, "request {request_id} timed out after {timeout_ms} ms"),
+            Self::Canceled { request_id, reason } => {
+                write!(f, "request {request_id} canceled: {reason}")
+            }
+            Self::Protocol(message) | Self::Remote(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ApiError {}
+
 #[derive(Debug, Deserialize)]
 struct RpcResponseEnvelope {
     event_type: String,
+    version: u16,
     request_id: u64,
     payload: serde_json::Value,
 }
@@ -54,6 +204,7 @@ thread_local! {
     static RECONNECT_SCHEDULED: Cell<bool> = const { Cell::new(false) };
     static RECONNECT_DELAY_MS: Cell<u32> = const { Cell::new(RECONNECT_DELAY_MIN_MS) };
     static NEXT_FILESYSTEM_REQUEST_ID: Cell<u64> = const { Cell::new(1) };
+    static NEXT_WS_SESSION_ID: Cell<u64> = const { Cell::new(1) };
 }
 
 const RECONNECT_DELAY_MIN_MS: u32 = 500;
@@ -63,6 +214,7 @@ const RECONNECT_DELAY_MAX_MS: u32 = 5_000;
 struct WsCallbacks {
     on_log: Rc<dyn Fn(String)>,
     on_state: Rc<dyn Fn(bool)>,
+    on_hello: Rc<dyn Fn(Hello)>,
     on_transfer_text: Rc<dyn Fn(String)>,
     on_transfer_binary: Rc<dyn Fn(Vec<u8>)>,
     on_filesystem_binary: Rc<dyn Fn(Vec<u8>)>,
@@ -70,8 +222,9 @@ struct WsCallbacks {
 
 struct WsState {
     ws: WebSocket,
+    session_id: u64,
     next_request_id: u64,
-    pending: HashMap<u64, oneshot::Sender<String>>,
+    pending: HashMap<u64, oneshot::Sender<Result<String, ApiError>>>,
     // Keep event closures alive
     _onopen: Closure<dyn FnMut(Event)>,
     _onmessage: Closure<dyn FnMut(MessageEvent)>,
@@ -97,6 +250,7 @@ fn websocket_url() -> String {
 pub fn init_ws(
     on_log: impl Fn(String) + 'static,
     on_state: impl Fn(bool) + 'static,
+    on_hello: impl Fn(Hello) + 'static,
     on_transfer_text: impl Fn(String) + 'static,
     on_transfer_binary: impl Fn(Vec<u8>) + 'static,
     on_filesystem_binary: impl Fn(Vec<u8>) + 'static,
@@ -105,6 +259,7 @@ pub fn init_ws(
         cell.replace(Some(WsCallbacks {
             on_log: Rc::new(on_log),
             on_state: Rc::new(on_state),
+            on_hello: Rc::new(on_hello),
             on_transfer_text: Rc::new(on_transfer_text),
             on_transfer_binary: Rc::new(on_transfer_binary),
             on_filesystem_binary: Rc::new(on_filesystem_binary),
@@ -130,6 +285,13 @@ fn connect_ws() {
         return;
     };
 
+    cancel_all_pending(CancelReason::Reconnecting);
+    let session_id = NEXT_WS_SESSION_ID.with(|next| {
+        let value = next.get();
+        next.set(value.saturating_add(1));
+        value
+    });
+
     let url = websocket_url();
     let Ok(ws) = WebSocket::new(&url) else {
         (callbacks.on_log)("WS connection failed; retrying".into());
@@ -142,6 +304,9 @@ fn connect_ws() {
     let onopen = {
         let callbacks = callbacks.clone();
         Closure::wrap(Box::new(move |_e: Event| {
+            if !is_current_session(session_id) {
+                return;
+            }
             RECONNECT_DELAY_MS.with(|delay| delay.set(RECONNECT_DELAY_MIN_MS));
             (callbacks.on_log)("WS open".into());
             (callbacks.on_state)(true);
@@ -151,15 +316,21 @@ fn connect_ws() {
     let onmessage = {
         let callbacks = callbacks.clone();
         Closure::wrap(Box::new(move |e: MessageEvent| {
+            if !is_current_session(session_id) {
+                return;
+            }
             if let Some(s) = e.data().as_string() {
                 if route_rpc_response(&s) {
                     return;
                 }
-                if is_transfer_event(&s) {
-                    (callbacks.on_transfer_text)(s);
+                if let Ok(hello) = serde_json::from_str::<Hello>(&s)
+                    && hello.event_type == "hello"
+                {
+                    (callbacks.on_hello)(hello);
                     return;
                 }
-                if route_legacy_response(&s) {
+                if is_transfer_event(&s) {
+                    (callbacks.on_transfer_text)(s);
                     return;
                 }
                 (callbacks.on_log)(format!("WS msg: {s}"));
@@ -188,7 +359,10 @@ fn connect_ws() {
     let onerror = {
         let callbacks = callbacks.clone();
         Closure::wrap(Box::new(move |_e: Event| {
-            let canceled = cancel_pending_requests();
+            if !is_current_session(session_id) {
+                return;
+            }
+            let canceled = cancel_pending_requests(session_id, CancelReason::ConnectionLost);
             if canceled > 0 {
                 (callbacks.on_log)(format!(
                     "Connection interrupted; canceled {canceled} pending request(s)"
@@ -201,7 +375,10 @@ fn connect_ws() {
     let onclose = {
         let callbacks = callbacks.clone();
         Closure::wrap(Box::new(move |_e: CloseEvent| {
-            let canceled = cancel_pending_requests();
+            if !is_current_session(session_id) {
+                return;
+            }
+            let canceled = cancel_pending_requests(session_id, CancelReason::ConnectionLost);
             let _ = canceled;
             (callbacks.on_log)("Device connection lost; retrying".into());
             (callbacks.on_state)(false);
@@ -217,6 +394,7 @@ fn connect_ws() {
     WS.with(|cell| {
         cell.replace(Some(WsState {
             ws,
+            session_id,
             next_request_id: 1,
             pending: HashMap::new(),
             _onopen: onopen,
@@ -241,23 +419,36 @@ fn schedule_ws_reconnect() {
 
     Timeout::new(delay_ms, move || {
         RECONNECT_SCHEDULED.with(|scheduled| scheduled.set(false));
-        let should_reconnect = WS.with(|cell| {
-            let should_reconnect = cell.borrow().as_ref().is_none_or(|state| {
-                !matches!(
-                    state.ws.ready_state(),
-                    WebSocket::CONNECTING | WebSocket::OPEN
-                )
-            });
-            if should_reconnect {
-                cell.replace(None);
-            }
-            should_reconnect
-        });
+        let should_reconnect = clear_disconnected_session();
         if should_reconnect {
             connect_ws();
         }
     })
     .forget();
+}
+
+fn clear_disconnected_session() -> bool {
+    WS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let disconnected = slot.as_ref().is_none_or(|state| {
+            !matches!(
+                state.ws.ready_state(),
+                WebSocket::CONNECTING | WebSocket::OPEN
+            )
+        });
+        if !disconnected {
+            return false;
+        }
+        if let Some(mut state) = slot.take() {
+            for (request_id, tx) in state.pending.drain() {
+                let _ = tx.send(Err(ApiError::Canceled {
+                    request_id,
+                    reason: CancelReason::Reconnecting,
+                }));
+            }
+        }
+        true
+    })
 }
 
 fn route_rpc_response(text: &str) -> bool {
@@ -268,38 +459,27 @@ fn route_rpc_response(text: &str) -> bool {
         return false;
     }
 
-    let payload = match envelope.payload {
-        serde_json::Value::String(value) => value,
-        other => other.to_string(),
+    let response = if envelope.version != WEBSOCKET_PROTOCOL_VERSION {
+        Err(ApiError::Protocol(format!(
+            "response {} uses unsupported WebSocket protocol version {}",
+            envelope.request_id, envelope.version
+        )))
+    } else {
+        Ok(match envelope.payload {
+            serde_json::Value::String(value) => value,
+            other => other.to_string(),
+        })
     };
 
     WS.with(|cell| {
         let mut slot = cell.borrow_mut();
         let Some(state) = slot.as_mut() else {
-            return false;
+            return true;
         };
         let Some(tx) = state.pending.remove(&envelope.request_id) else {
-            return false;
+            return true;
         };
-        let _ = tx.send(payload);
-        true
-    })
-}
-
-fn route_legacy_response(text: &str) -> bool {
-    WS.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        let Some(state) = slot.as_mut() else {
-            return false;
-        };
-        let first_id = state.pending.keys().next().copied();
-        let Some(first_id) = first_id else {
-            return false;
-        };
-        let Some(tx) = state.pending.remove(&first_id) else {
-            return false;
-        };
-        let _ = tx.send(text.to_string());
+        let _ = tx.send(response);
         true
     })
 }
@@ -311,28 +491,69 @@ fn is_transfer_event(text: &str) -> bool {
     event.event_type.starts_with("transfer/")
 }
 
-fn cancel_pending_requests() -> usize {
+fn is_current_session(session_id: u64) -> bool {
+    WS.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|state| state.session_id == session_id)
+    })
+}
+
+fn cancel_pending_requests(session_id: u64, reason: CancelReason) -> usize {
     WS.with(|cell| {
         let mut slot = cell.borrow_mut();
         let Some(state) = slot.as_mut() else {
             return 0;
         };
+        if state.session_id != session_id {
+            return 0;
+        }
         let pending = std::mem::take(&mut state.pending);
         let canceled = pending.len();
-        drop(pending);
+        for (request_id, tx) in pending {
+            let _ = tx.send(Err(ApiError::Canceled { request_id, reason }));
+        }
         canceled
     })
 }
 
-async fn send_cmd(cmd: &str) -> Result<String, String> {
-    let (tx, rx) = oneshot::channel::<String>();
+fn cancel_all_pending(reason: CancelReason) -> usize {
+    let session_id = WS.with(|cell| cell.borrow().as_ref().map(|state| state.session_id));
+    session_id.map_or(0, |id| cancel_pending_requests(id, reason))
+}
+
+fn timeout_request(session_id: u64, request_id: u64, timeout_ms: u32) {
+    WS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let Some(state) = slot.as_mut() else {
+            return;
+        };
+        if state.session_id != session_id {
+            return;
+        }
+        if let Some(tx) = state.pending.remove(&request_id) {
+            let _ = tx.send(Err(ApiError::Timeout {
+                request_id,
+                timeout_ms,
+            }));
+        }
+    });
+}
+
+async fn send_cmd(cmd: &str, timeout_ms: u32) -> Result<String, ApiError> {
+    let (tx, rx) = oneshot::channel::<Result<String, ApiError>>();
     let mut tx = Some(tx);
-    let mut error = None::<String>;
+    let mut error = None::<ApiError>;
+    let mut registered = None::<(u64, u64)>;
 
     WS.with(|cell| {
         let mut slot = cell.borrow_mut();
         let Some(state) = slot.as_mut() else {
-            error = Some("ws not connected".into());
+            error = Some(ApiError::Disconnected);
+            return;
+        };
+        if state.ws.ready_state() != WebSocket::OPEN {
+            error = Some(ApiError::Disconnected);
             return;
         };
 
@@ -340,16 +561,18 @@ async fn send_cmd(cmd: &str) -> Result<String, String> {
         state.next_request_id = state.next_request_id.saturating_add(1);
 
         let Some(tx_value) = tx.take() else {
-            error = Some("internal request state error".into());
+            error = Some(ApiError::Protocol("internal request state error".into()));
             return;
         };
 
         state.pending.insert(request_id, tx_value);
+        registered = Some((state.session_id, request_id));
 
         let message = format!("RPC {} {}", request_id, cmd);
         if state.ws.send_with_str(&message).is_err() {
             state.pending.remove(&request_id);
-            error = Some("ws send failed".into());
+            registered = None;
+            error = Some(ApiError::SendFailed);
         }
     });
 
@@ -357,32 +580,64 @@ async fn send_cmd(cmd: &str) -> Result<String, String> {
         return Err(error);
     }
 
-    rx.await.map_err(|_| "ws response canceled".into())
+    let Some((session_id, request_id)) = registered else {
+        return Err(ApiError::Protocol("request was not registered".into()));
+    };
+    Timeout::new(timeout_ms, move || {
+        timeout_request(session_id, request_id, timeout_ms);
+    })
+    .forget();
+
+    rx.await.unwrap_or({
+        Err(ApiError::Canceled {
+            request_id,
+            reason: CancelReason::ConnectionLost,
+        })
+    })
 }
 
-pub async fn get_status() -> Result<Status, String> {
-    let text = send_cmd("STATUS").await?;
-    serde_json::from_str::<Status>(&text).map_err(|e| format!("parse status: {e}: {text}"))
+fn parse_json<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> Result<T, ApiError> {
+    serde_json::from_str(text)
+        .map_err(|error| ApiError::Protocol(format!("parse {name}: {error}: {text}")))
 }
 
-pub async fn get_config() -> Result<Config, String> {
-    let text = send_cmd("CONFIG_GET").await?;
-    serde_json::from_str::<Config>(&text).map_err(|e| format!("parse config: {e}: {text}"))
+fn expect_ok(text: &str) -> Result<(), ApiError> {
+    let value: serde_json::Value = parse_json("command response", text)?;
+    if value.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    if let Some(message) = value.get("error").and_then(serde_json::Value::as_str) {
+        return Err(ApiError::Remote(message.to_string()));
+    }
+    Err(ApiError::Protocol(format!(
+        "command returned an invalid response: {text}"
+    )))
 }
 
-pub async fn save_config(manufacturer: &str, product: &str) -> Result<(), String> {
+pub async fn get_hello() -> Result<Hello, ApiError> {
+    let text = send_cmd("HELLO", READ_TIMEOUT_MS).await?;
+    parse_json("HELLO", &text)
+}
+
+pub async fn get_status() -> Result<Status, ApiError> {
+    let text = send_cmd("STATUS", READ_TIMEOUT_MS).await?;
+    parse_json("status", &text)
+}
+
+pub async fn get_config() -> Result<Config, ApiError> {
+    let text = send_cmd("CONFIG_GET", READ_TIMEOUT_MS).await?;
+    parse_json("config", &text)
+}
+
+pub async fn save_config(manufacturer: &str, product: &str) -> Result<(), ApiError> {
     let m = utf8_percent_encode(manufacturer, NON_ALPHANUMERIC).to_string();
     let p = utf8_percent_encode(product, NON_ALPHANUMERIC).to_string();
     let cmd = format!("CONFIG_SET manufacturer={}&product={}", m, p);
-    let text = send_cmd(&cmd).await?;
-    if text.contains("\"ok\":true") {
-        Ok(())
-    } else {
-        Err(text)
-    }
+    let text = send_cmd(&cmd, MUTATION_TIMEOUT_MS).await?;
+    expect_ok(&text)
 }
 
-pub async fn usb_register(assistant: bool, os: Option<&str>) -> Result<(), String> {
+pub async fn usb_register(assistant: bool, os: Option<&str>) -> Result<(), ApiError> {
     let mut cmd = String::from("USB_REGISTER");
     let mut params: Vec<String> = Vec::new();
     if assistant {
@@ -401,24 +656,16 @@ pub async fn usb_register(assistant: bool, os: Option<&str>) -> Result<(), Strin
             cmd.push_str(extra);
         }
     }
-    let text = send_cmd(&cmd).await?;
-    if text.contains("\"ok\":true") {
-        Ok(())
-    } else {
-        Err(text)
-    }
+    let text = send_cmd(&cmd, MUTATION_TIMEOUT_MS).await?;
+    expect_ok(&text)
 }
 
-pub async fn usb_unregister() -> Result<(), String> {
-    let text = send_cmd("USB_UNREGISTER").await?;
-    if text.contains("\"ok\":true") {
-        Ok(())
-    } else {
-        Err(text)
-    }
+pub async fn usb_unregister() -> Result<(), ApiError> {
+    let text = send_cmd("USB_UNREGISTER", MUTATION_TIMEOUT_MS).await?;
+    expect_ok(&text)
 }
 
-pub async fn list_scripts() -> Result<Vec<ScriptMeta>, String> {
+pub async fn list_scripts() -> Result<Vec<ScriptMeta>, ApiError> {
     let list = scripts::all()
         .iter()
         .map(|s| ScriptMeta {
@@ -431,37 +678,25 @@ pub async fn list_scripts() -> Result<Vec<ScriptMeta>, String> {
     Ok(list)
 }
 
-pub async fn run_script(bytecode: &[u8]) -> Result<(), String> {
+pub async fn run_script(bytecode: &[u8]) -> Result<(), ApiError> {
     let encoded = codec::encode_hex(bytecode);
     let cmd = format!("SCRIPT_RUN_HEX {}", encoded);
-    let text = send_cmd(&cmd).await?;
-    if text.contains("\"ok\":true") {
-        Ok(())
-    } else {
-        Err(text)
-    }
+    let text = send_cmd(&cmd, MUTATION_TIMEOUT_MS).await?;
+    expect_ok(&text)
 }
 
-pub async fn transfer_start(path: &str) -> Result<(), String> {
+pub async fn transfer_start(path: &str) -> Result<(), ApiError> {
     let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC).to_string();
     let cmd = format!("TRANSFER_START path={encoded_path}");
-    let text = send_cmd(&cmd).await?;
-    if text.contains("\"ok\":true") {
-        Ok(())
-    } else {
-        Err(text)
-    }
+    let text = send_cmd(&cmd, MUTATION_TIMEOUT_MS).await?;
+    expect_ok(&text)
 }
 
-pub async fn transfer_set_default(path: &str) -> Result<(), String> {
+pub async fn transfer_set_default(path: &str) -> Result<(), ApiError> {
     let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC).to_string();
     let cmd = format!("TRANSFER_DEFAULT_SET path={encoded_path}");
-    let text = send_cmd(&cmd).await?;
-    if text.contains("\"ok\":true") {
-        Ok(())
-    } else {
-        Err(text)
-    }
+    let text = send_cmd(&cmd, MUTATION_TIMEOUT_MS).await?;
+    expect_ok(&text)
 }
 
 pub fn next_filesystem_request_id() -> u64 {
@@ -478,25 +713,70 @@ pub async fn filesystem_list(
     cursor: u32,
     entry_limit: u16,
     show_hidden: bool,
-) -> Result<(), String> {
+) -> Result<(), ApiError> {
     let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC).to_string();
     let flags = u8::from(show_hidden);
     let command = format!(
         "FS_LIST request_id={request_id}&cursor={cursor}&limit={entry_limit}&flags={flags}&path={encoded_path}"
     );
-    let text = send_cmd(&command).await?;
-    if text.contains("\"ok\":true") {
-        Ok(())
-    } else {
-        Err(text)
-    }
+    let text = send_cmd(&command, MUTATION_TIMEOUT_MS).await?;
+    expect_ok(&text)
 }
 
-pub async fn filesystem_cancel(request_id: u64) -> Result<(), String> {
-    let text = send_cmd(&format!("FS_LIST_CANCEL request_id={request_id}")).await?;
-    if text.contains("\"ok\":true") {
-        Ok(())
-    } else {
-        Err(text)
+pub async fn filesystem_cancel(request_id: u64) -> Result<(), ApiError> {
+    let text = send_cmd(
+        &format!("FS_LIST_CANCEL request_id={request_id}"),
+        MUTATION_TIMEOUT_MS,
+    )
+    .await?;
+    expect_ok(&text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hello(websocket: u16) -> Hello {
+        Hello {
+            event_type: "hello".into(),
+            version: 1,
+            firmware: FirmwareBuild {
+                version: "0.1.0".into(),
+                build: "test".into(),
+            },
+            protocols: ProtocolVersions {
+                websocket,
+                transfer: TRANSFER_PROTOCOL_VERSION,
+                filesystem: FILESYSTEM_PROTOCOL_VERSION,
+            },
+            host_agent: HostAgentInfo {
+                present: true,
+                version: Some("0.1.0".into()),
+                hostname: Some("test-host".into()),
+            },
+            keyboard: KeyboardCapabilities {
+                layouts: vec!["mac_de-DE".into()],
+                features: vec!["hid_keyboard".into()],
+            },
+            features: vec!["file_transfer".into(), "filesystem_browser".into()],
+            privileged_operations: vec!["host_execute".into()],
+        }
+    }
+
+    #[test]
+    fn hello_rejects_incompatible_websocket_protocol() {
+        let error = hello(WEBSOCKET_PROTOCOL_VERSION + 1)
+            .compatibility_error()
+            .expect("protocol mismatch should be rejected");
+        assert!(error.contains("WebSocket protocol"));
+    }
+
+    #[test]
+    fn command_errors_are_typed() {
+        assert_eq!(
+            expect_ok(r#"{"error":"busy"}"#),
+            Err(ApiError::Remote("busy".into()))
+        );
+        assert_eq!(expect_ok("not-json").unwrap_err().category(), "protocol");
     }
 }

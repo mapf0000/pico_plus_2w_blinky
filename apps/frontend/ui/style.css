@@ -358,6 +358,38 @@ textarea:disabled {
   padding: 28px 32px 44px;
 }
 
+.compatibility-banner {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  margin-bottom: 18px;
+  padding: 12px 15px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--muted);
+  background: var(--surface-soft);
+  font-size: 12px;
+}
+
+.compatibility-banner strong {
+  flex: 0 0 auto;
+  color: var(--text);
+}
+
+.compatibility-banner.is-loading {
+  border-color: rgba(89, 221, 204, .3);
+}
+
+.compatibility-banner.is-warning {
+  border-color: rgba(239, 181, 93, .42);
+  background: rgba(239, 181, 93, .06);
+}
+
+.compatibility-banner.is-error {
+  border-color: rgba(255, 116, 121, .48);
+  background: rgba(255, 116, 121, .07);
+}
+
 .overview-grid {
   display: grid;
   grid-template-columns: minmax(360px, .9fr) minmax(460px, 1.1fr);

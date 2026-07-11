@@ -31,12 +31,27 @@ pub fn run() -> Result<()> {
         env_consts::WARN_BYTES,
         env_consts::MAX_BYTES,
         env_consts::MSC_LABEL,
+        env_consts::FIRMWARE_BUILD,
     ]);
 
     // Re-run when these files change (build-support itself lives in its own crate)
     cargo::rerun_if_changed("build.rs");
 
     let cfg = Config::from_env()?;
+    let firmware_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".into());
+    let firmware_build = env::var(env_consts::FIRMWARE_BUILD)
+        .unwrap_or_else(|_| format!("{firmware_version}-{}", cfg.profile));
+    let firmware_build: String = firmware_build
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | '+')
+        })
+        .take(64)
+        .collect();
+    if firmware_build.is_empty() {
+        bail!("PICO_FIRMWARE_BUILD must contain at least one build identifier character");
+    }
+    cargo::rustc_env(env_consts::FIRMWARE_BUILD, &firmware_build);
 
     // 1) Linker script
     linker::install_memory_x(&cfg)?;
@@ -82,6 +97,7 @@ mod env_consts {
     pub const WARN_BYTES: &str = "PICO_WASM_WARN_BYTES";
     pub const MAX_BYTES: &str = "PICO_WASM_MAX_BYTES";
     pub const MSC_LABEL: &str = "PICO_MSC_LABEL";
+    pub const FIRMWARE_BUILD: &str = "PICO_FIRMWARE_BUILD";
 }
 
 impl Config {
@@ -148,6 +164,10 @@ mod cargo {
     /// Emit a Cargo build warning visible in build logs.
     pub fn warn(msg: impl AsRef<str>) {
         println!("cargo:warning={}", msg.as_ref());
+    }
+    /// Set a compile-time environment variable for the firmware crate.
+    pub fn rustc_env(key: &str, value: &str) {
+        println!("cargo:rustc-env={key}={value}");
     }
 }
 

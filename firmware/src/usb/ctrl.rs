@@ -72,7 +72,8 @@ const TAG_FS_LIST_REQUEST: u8 = 29;
 const TAG_FS_LIST_PAGE: u8 = 30;
 const TAG_FS_LIST_CANCEL: u8 = 31;
 
-const FS_PROTOCOL_VERSION: u16 = 1;
+const FS_PROTOCOL_VERSION: u16 = crate::capabilities::FILESYSTEM_PROTOCOL_VERSION;
+const FILE_TRANSFER_PROTOCOL_VERSION: u16 = crate::capabilities::TRANSFER_PROTOCOL_VERSION;
 
 const FILE_RESULT_OK: u8 = 0;
 const FILE_RESULT_SIZE_MISMATCH: u8 = 2;
@@ -175,6 +176,7 @@ where
     D: Driver<'d>,
 {
     class.wait_connection().await;
+    crate::capabilities::clear_host_agent();
     CTRL_READY.store(true, Ordering::SeqCst);
     log::info!("usb: CDC control ready");
 
@@ -338,10 +340,17 @@ where
 {
     match tag {
         TAG_AGENT_STATUS => {
-            let name = core::str::from_utf8(payload).unwrap_or("<invalid utf-8>");
-            log::info!("usb: host agent status: {}", name);
+            crate::capabilities::record_host_agent_status(payload);
+            let snapshot = crate::capabilities::host_agent_snapshot();
+            log::info!(
+                "usb: host agent status: version={} host={}",
+                snapshot.version.as_str(),
+                snapshot.hostname.as_str()
+            );
+            let _ = ws::queue_transfer_text(crate::capabilities::hello_json());
         }
         TAG_REQUEST_AGENT_STATUS => {
+            crate::capabilities::mark_host_agent_seen();
             if payload == HANDSHAKE_PAYLOAD {
                 send_tlv(class, max_packet, TAG_DEBUG_MSG, b"handshake-ok").await?;
                 log::info!("usb: handshake ok");

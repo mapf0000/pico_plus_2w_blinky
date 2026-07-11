@@ -3,6 +3,7 @@ use super::super::*;
 #[derive(Properties, PartialEq, Clone)]
 pub(crate) struct StatusProps {
     pub status: Option<StatusState>,
+    pub hello: Option<api::Hello>,
     pub busy: bool,
     pub connection: ConnectionState,
 }
@@ -20,6 +21,8 @@ pub(crate) fn status_card(props: &StatusProps) -> Html {
                 <div class="metric"><span>{"USB device"}</span><strong>{st.as_ref().map(|s| if s.usb_enabled { "Enabled" } else { "Off" }).unwrap_or("Checking…")}</strong></div>
                 <div class="metric"><span>{"Host ready"}</span><strong>{st.as_ref().map(|s| if s.usb_ready { "Ready" } else { "Not ready" }).unwrap_or("Checking…")}</strong></div>
                 <div class="metric"><span>{"Detected host"}</span><strong>{st.as_ref().map(|s| s.host_os.as_str()).unwrap_or("Unknown")}</strong></div>
+                <div class="metric"><span>{"Firmware"}</span><strong>{props.hello.as_ref().map(|hello| hello.firmware.version.as_str()).unwrap_or("Negotiating…")}</strong></div>
+                <div class="metric"><span>{"Host agent"}</span><strong>{props.hello.as_ref().map(|hello| if hello.host_agent.present { hello.host_agent.version.as_deref().unwrap_or("Update required") } else { "Not detected" }).unwrap_or("Checking…")}</strong></div>
             </div>
             <div class="card-footer-note"><span class="pulse-dot"></span>{"Status refreshes every five seconds while connected"}</div>
         </section>
@@ -138,7 +141,8 @@ pub(crate) struct UsbProps {
     pub on_stop: Callback<()>,
     pub usb_enabled: bool,
     pub connected: bool,
-    pub busy: bool,
+    pub starting: bool,
+    pub stopping: bool,
 }
 #[function_component(UsbCard)]
 pub(crate) fn usb_card(props: &UsbProps) -> Html {
@@ -165,15 +169,15 @@ pub(crate) fn usb_card(props: &UsbProps) -> Html {
                 <label class="radio"><input type="radio" name="os" value="windows" checked={props.selected_os=="windows"} onclick={set_win}/>{" Windows"}</label>
               </div>
               <div class="card-actions left">
-                <button id="btnUsbAssistant" class="btn-primary" onclick={start_assist} disabled={!props.connected || props.busy || props.selected_os=="windows"}>{"Start with Assistant"}</button>
-                <button id="btnUsbNoAssistant" class="btn-secondary" onclick={start_noassist} disabled={!props.connected || props.busy}>{"Start USB"}</button>
+                <button id="btnUsbAssistant" class="btn-primary" onclick={start_assist} disabled={!props.connected || props.starting || props.selected_os=="windows"}>{if props.starting { "Starting…" } else { "Start with Assistant" }}</button>
+                <button id="btnUsbNoAssistant" class="btn-secondary" onclick={start_noassist} disabled={!props.connected || props.starting}>{if props.starting { "Starting…" } else { "Start USB" }}</button>
               </div>
               <div class="card-footer-note">{"Assistant runs the macOS keyboard identification sequence after registration."}</div>
             </>
           } else {
             <div class="active-state"><span class="active-state-icon">{"✓"}</span><div><strong>{"USB is active"}</strong><span>{"The device is registered with the host."}</span></div></div>
             <div class="card-actions left">
-              <button id="btnUsbStop" class="btn-danger" disabled={!props.connected || props.busy} onclick={{ let cb = props.on_stop.clone(); Callback::from(move |_| cb.emit(())) }}>{"Stop USB"}</button>
+              <button id="btnUsbStop" class="btn-danger" disabled={!props.connected || props.stopping} onclick={{ let cb = props.on_stop.clone(); Callback::from(move |_| cb.emit(())) }}>{if props.stopping { "Stopping…" } else { "Stop USB" }}</button>
             </div>
           }
         </section>

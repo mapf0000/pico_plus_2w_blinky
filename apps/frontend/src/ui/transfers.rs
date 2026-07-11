@@ -4,6 +4,8 @@ use super::super::*;
 pub(crate) struct FileBrowserProps {
     pub view: filesystem::BrowserView,
     pub connected: bool,
+    pub transfer_enabled: bool,
+    pub transfer_pending: bool,
     pub on_browse: Callback<BrowseRequest>,
     pub on_select: Callback<String>,
     pub on_transfer: Callback<String>,
@@ -209,7 +211,7 @@ pub(crate) fn file_browser_card(props: &FileBrowserProps) -> Html {
                     <span class="row gap-1">
                       if entry.kind.is_file() {
                         <button class="btn-secondary" onclick={select} disabled={!entry.readable}>{"Select"}</button>
-                        <button class="btn-primary btn-small" onclick={transfer} disabled={!entry.readable}>{"Transfer"}</button>
+                        <button class="btn-primary btn-small" onclick={transfer} disabled={!entry.readable || !props.transfer_enabled || props.transfer_pending}>{if props.transfer_pending { "Queueing…" } else { "Transfer" }}</button>
                       }
                     </span>
                   </div>
@@ -230,7 +232,8 @@ pub(crate) fn file_browser_card(props: &FileBrowserProps) -> Html {
 pub(crate) struct TransferStartProps {
     pub path: String,
     pub connected: bool,
-    pub busy: bool,
+    pub starting: bool,
+    pub setting_default: bool,
     pub on_change: Callback<String>,
     pub on_start: Callback<()>,
     pub on_set_default: Callback<()>,
@@ -238,7 +241,7 @@ pub(crate) struct TransferStartProps {
 
 #[function_component(TransferStartCard)]
 pub(crate) fn transfer_start_card(props: &TransferStartProps) -> Html {
-    let disabled = !props.connected || props.busy || props.path.trim().is_empty();
+    let base_disabled = !props.connected || props.path.trim().is_empty();
     let on_input = {
         let on_change = props.on_change.clone();
         Callback::from(move |event: InputEvent| {
@@ -270,8 +273,8 @@ pub(crate) fn transfer_start_card(props: &TransferStartProps) -> Html {
                 value={props.path.clone()}
                 oninput={on_input}
             />
-            <button class="btn-primary" disabled={disabled} onclick={on_start}>{if props.busy { "Queueing…" } else { "Queue transfer" }}</button>
-            <button class="btn-secondary" disabled={disabled} onclick={on_set_default}>{"Set as default"}</button>
+            <button class="btn-primary" disabled={base_disabled || props.starting} onclick={on_start}>{if props.starting { "Queueing…" } else { "Queue transfer" }}</button>
+            <button class="btn-secondary" disabled={base_disabled || props.setting_default} onclick={on_set_default}>{if props.setting_default { "Saving…" } else { "Set as default" }}</button>
           </div>
           <div class="card-footer-note">{if props.connected { "Paths are resolved on the host-agent machine." } else { "Connect to the device before queueing a transfer." }}</div>
         </section>

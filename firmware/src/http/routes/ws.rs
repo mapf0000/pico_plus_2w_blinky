@@ -159,9 +159,11 @@ impl ws::WebSocketCallback for HelloWs {
         mut rx: ws::SocketRx<R>,
         mut tx: ws::SocketTx<W>,
     ) -> Result<(), W::Error> {
-        // greet once
-        tx.send_text("hello").await?;
+        // The first application message is a versioned capability snapshot.
+        let hello = crate::capabilities::hello_json();
+        tx.send_text(hello.as_str()).await?;
         begin_ws_session();
+        let _ = CTRL_CHAN.try_send(CtrlCommand::RequestStatus);
 
         let mut buf = [0u8; WS_COMMAND_MAX];
         loop {
@@ -188,7 +190,8 @@ impl ws::WebSocketCallback for HelloWs {
                             let _ = core::fmt::write(
                                 &mut envelope,
                                 format_args!(
-                                    "{{\"event_type\":\"command/response\",\"version\":1,\"request_id\":{},\"payload\":{}}}",
+                                    "{{\"event_type\":\"command/response\",\"version\":{},\"request_id\":{},\"payload\":{}}}",
+                                    crate::capabilities::WEBSOCKET_PROTOCOL_VERSION,
                                     request_id,
                                     response.as_str()
                                 ),
@@ -252,6 +255,10 @@ fn parse_rpc_command(cmd: &str) -> Option<(u64, &str)> {
 /// Handle a single text command and return a JSON response body.
 async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
     let mut response: String<TRANSFER_TEXT_MAX> = String::new();
+
+    if cmd.eq_ignore_ascii_case("HELLO") {
+        return crate::capabilities::hello_json();
+    }
 
     if cmd.eq_ignore_ascii_case("STATUS") {
         let enabled = usb_supervisor::USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst);

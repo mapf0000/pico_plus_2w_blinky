@@ -258,6 +258,7 @@ async fn main(spawner: Spawner) {
 
 // ===== Submodules (kept declared; implementations live in their own files) =====
 
+mod capabilities;
 mod device_config;
 mod dhcp;
 mod display;
