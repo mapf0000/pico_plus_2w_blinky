@@ -1,29 +1,34 @@
 use super::*;
 
 mod events;
-mod protocol;
 
-pub(super) use events::forward_filesystem_page;
 use events::{
-    build_ws_chunk_envelope, emit_chunk_status, emit_transfer_aborted, emit_transfer_failed,
-    emit_transfer_finished, emit_transfer_open, emit_transfer_progress,
+    emit_transfer_aborted, emit_transfer_finished, emit_transfer_progress, forward_secure_chunk,
+    forward_secure_close, forward_secure_open,
 };
-use protocol::{crc32_ieee, parse_file_abort, parse_file_chunk, parse_file_close, parse_file_open};
+pub(super) use events::{forward_filesystem_page, forward_secure_session};
+use transfer_protocol::{
+    FILE_SALT_LEN, FILE_TAG_LEN, MAX_PLAINTEXT_CHUNK, SESSION_ID_LEN, SecureChunk, SecureOpen,
+    decode_secure_chunk, decode_secure_close, decode_secure_open,
+};
 
 #[derive(Clone)]
 struct RelayTransferState {
     transfer_id: u64,
-    protocol_version: u16,
-    total_size: u64,
+    session_id: [u8; SESSION_ID_LEN],
+    file_salt: [u8; FILE_SALT_LEN],
     chunk_size: u16,
     chunk_count: u32,
-    sha256: [u8; 32],
-    file_name: String<MAX_TRANSFER_FILE_NAME>,
     highest_contiguous_chunk: Option<u32>,
-    next_expected_offset: u64,
     received_size: u64,
     finished_chunks: u32,
     last_progress_emit_finished_chunks: u32,
+}
+
+impl RelayTransferState {
+    fn approximate_total_size(&self) -> u64 {
+        self.chunk_size as u64 * self.chunk_count as u64
+    }
 }
 
 pub(super) struct RelayState {
@@ -58,36 +63,6 @@ impl RelayState {
     }
 }
 
-struct IncomingOpen<'a> {
-    protocol_version: u16,
-    transfer_id: u64,
-    total_size: u64,
-    chunk_size: u16,
-    chunk_count: u32,
-    sha256: [u8; 32],
-    file_name: &'a str,
-}
-
-struct IncomingChunk<'a> {
-    transfer_id: u64,
-    chunk_index: u32,
-    offset: u64,
-    payload: &'a [u8],
-    chunk_crc32: u32,
-}
-
-struct IncomingClose {
-    transfer_id: u64,
-    sent_chunk_count: u32,
-    sent_total_size: u64,
-}
-
-struct IncomingAbort<'a> {
-    transfer_id: u64,
-    reason_code: u8,
-    detail: &'a str,
-}
-
 pub(super) async fn handle_file_open<'d, D>(
     class: &mut CdcAcmClass<'d, D>,
     max_packet: usize,
@@ -97,125 +72,90 @@ pub(super) async fn handle_file_open<'d, D>(
 where
     D: Driver<'d>,
 {
-    let Some(open) = parse_file_open(payload) else {
-        return Ok(());
+    let open = match decode_secure_open(payload) {
+        Ok(open) => open,
+        Err(_) => {
+            log::warn!("usb: rejected malformed encrypted FILE_OPEN");
+            return Ok(());
+        }
     };
 
-    if open.protocol_version != FILE_TRANSFER_PROTOCOL_VERSION {
-        send_file_abort(
-            class,
-            max_packet,
-            open.transfer_id,
-            FILE_ABORT_REASON_PROTOCOL,
-            "unsupported protocol version",
-        )
-        .await?;
-        emit_transfer_failed(open.transfer_id, "unsupported protocol version").await;
-        return Ok(());
-    }
-
-    if open.chunk_size == 0 || open.chunk_size as usize > FILE_CHUNK_MAX_DATA {
-        send_file_abort(
-            class,
-            max_packet,
-            open.transfer_id,
-            FILE_ABORT_REASON_PROTOCOL,
-            "invalid chunk size",
-        )
-        .await?;
-        emit_transfer_failed(open.transfer_id, "invalid chunk size").await;
-        return Ok(());
-    }
-
     if let Some(existing) = relay.get_mut(open.transfer_id) {
-        if metadata_matches(existing, &open) {
+        if open_matches(existing, &open) {
             send_file_ack(
                 class,
                 max_packet,
                 existing.transfer_id,
                 existing.highest_contiguous_chunk,
-                existing.next_expected_offset,
+                existing.received_size,
                 DEFAULT_ACK_WINDOW_CREDIT,
             )
             .await?;
-            return Ok(());
+        } else {
+            send_file_abort(
+                class,
+                max_packet,
+                open.transfer_id,
+                FILE_ABORT_REASON_METADATA_MISMATCH,
+                "duplicate encrypted open mismatch",
+            )
+            .await?;
         }
-
-        send_file_abort(
-            class,
-            max_packet,
-            open.transfer_id,
-            FILE_ABORT_REASON_METADATA_MISMATCH,
-            "duplicate open with mismatched metadata",
-        )
-        .await?;
-        emit_transfer_failed(open.transfer_id, "duplicate open mismatch").await;
-        return Ok(());
-    }
-
-    let mut file_name: String<MAX_TRANSFER_FILE_NAME> = String::new();
-    if file_name.push_str(open.file_name).is_err() {
-        send_file_abort(
-            class,
-            max_packet,
-            open.transfer_id,
-            FILE_ABORT_REASON_PROTOCOL,
-            "file name too long",
-        )
-        .await?;
-        emit_transfer_failed(open.transfer_id, "file name too long").await;
         return Ok(());
     }
 
     let state = RelayTransferState {
         transfer_id: open.transfer_id,
-        protocol_version: open.protocol_version,
-        total_size: open.total_size,
+        session_id: open.session_id,
+        file_salt: open.file_salt,
         chunk_size: open.chunk_size,
         chunk_count: open.chunk_count,
-        sha256: open.sha256,
-        file_name,
         highest_contiguous_chunk: None,
-        next_expected_offset: 0,
         received_size: 0,
         finished_chunks: 0,
         last_progress_emit_finished_chunks: 0,
     };
-
-    TRANSFER_ID.store(state.transfer_id, Ordering::Release);
-    TRANSFER_TOTAL_SIZE.store(state.total_size, Ordering::Release);
-    TRANSFER_RECEIVED_SIZE.store(0, Ordering::Release);
-    TRANSFER_CHUNK_COUNT.store(state.chunk_count, Ordering::Release);
-    TRANSFER_FINISHED_CHUNKS.store(0, Ordering::Release);
-    set_transfer_view_state(TransferViewState::Open);
-
     if relay.insert(state.clone()).is_err() {
         send_file_abort(
             class,
             max_packet,
             open.transfer_id,
             FILE_ABORT_REASON_CAPACITY,
-            "too many active transfers",
+            "too many active encrypted transfers",
         )
         .await?;
-        emit_transfer_failed(open.transfer_id, "too many active transfers").await;
         return Ok(());
     }
 
-    emit_transfer_open(&state).await;
-    emit_transfer_progress(&state).await;
+    TRANSFER_ID.store(state.transfer_id, Ordering::Release);
+    TRANSFER_TOTAL_SIZE.store(state.approximate_total_size(), Ordering::Release);
+    TRANSFER_RECEIVED_SIZE.store(0, Ordering::Release);
+    TRANSFER_CHUNK_COUNT.store(state.chunk_count, Ordering::Release);
+    TRANSFER_FINISHED_CHUNKS.store(0, Ordering::Release);
+    set_transfer_view_state(TransferViewState::Open);
 
+    if !forward_secure_open(payload).await {
+        let _ = relay.remove(open.transfer_id);
+        send_file_abort(
+            class,
+            max_packet,
+            open.transfer_id,
+            FILE_ABORT_REASON_CAPACITY,
+            "secure browser relay unavailable",
+        )
+        .await?;
+        return Ok(());
+    }
+    emit_transfer_progress(&state).await;
     send_file_ack(
         class,
         max_packet,
         state.transfer_id,
-        state.highest_contiguous_chunk,
-        state.next_expected_offset,
+        None,
+        0,
         DEFAULT_ACK_WINDOW_CREDIT,
     )
-    .await?;
-
-    Ok(())
+    .await
 }
 
 pub(super) async fn handle_file_chunk<'d, D>(
@@ -227,221 +167,93 @@ pub(super) async fn handle_file_chunk<'d, D>(
 where
     D: Driver<'d>,
 {
-    let Some(chunk) = parse_file_chunk(payload) else {
-        return Ok(());
+    let chunk = match decode_secure_chunk(payload) {
+        Ok(chunk) => chunk,
+        Err(_) => {
+            log::warn!("usb: rejected malformed encrypted FILE_CHUNK");
+            return Ok(());
+        }
     };
-
     let Some(state) = relay.get_mut(chunk.transfer_id) else {
         send_file_abort(
             class,
             max_packet,
             chunk.transfer_id,
             FILE_ABORT_REASON_UNKNOWN_TRANSFER,
-            "unknown transfer id",
+            "unknown encrypted transfer",
         )
         .await?;
-        emit_transfer_failed(chunk.transfer_id, "unknown transfer id").await;
         return Ok(());
     };
-
-    if chunk.chunk_index >= state.chunk_count {
-        emit_chunk_status(
-            state.transfer_id,
-            chunk.chunk_index,
-            "failed",
-            1,
-            Some("chunk index out of bounds"),
-        )
-        .await;
+    if chunk.session_id != state.session_id || !valid_chunk(state, &chunk) {
         send_file_abort(
             class,
             max_packet,
-            state.transfer_id,
+            chunk.transfer_id,
             FILE_ABORT_REASON_INVALID_CHUNK,
-            "chunk index out of bounds",
+            "invalid encrypted chunk envelope",
         )
         .await?;
         return Ok(());
     }
 
-    if chunk.payload.len() > state.chunk_size as usize {
-        emit_chunk_status(
-            state.transfer_id,
-            chunk.chunk_index,
-            "failed",
-            1,
-            Some("payload larger than chunk size"),
-        )
-        .await;
-        send_file_abort(
-            class,
-            max_packet,
-            state.transfer_id,
-            FILE_ABORT_REASON_INVALID_CHUNK,
-            "payload larger than chunk size",
-        )
-        .await?;
-        return Ok(());
-    }
-
-    let expected_offset = chunk.chunk_index as u64 * state.chunk_size as u64;
-    if chunk.offset != expected_offset {
-        emit_chunk_status(
-            state.transfer_id,
-            chunk.chunk_index,
-            "failed",
-            1,
-            Some("offset mismatch"),
-        )
-        .await;
-        send_file_abort(
-            class,
-            max_packet,
-            state.transfer_id,
-            FILE_ABORT_REASON_INVALID_CHUNK,
-            "offset mismatch",
-        )
-        .await?;
-        return Ok(());
-    }
-
-    if chunk.offset.saturating_add(chunk.payload.len() as u64) > state.total_size {
-        emit_chunk_status(
-            state.transfer_id,
-            chunk.chunk_index,
-            "failed",
-            1,
-            Some("chunk exceeds total size"),
-        )
-        .await;
-        send_file_abort(
-            class,
-            max_packet,
-            state.transfer_id,
-            FILE_ABORT_REASON_INVALID_CHUNK,
-            "chunk exceeds total size",
-        )
-        .await?;
-        return Ok(());
-    }
-
-    let expected_next = state
-        .highest_contiguous_chunk
-        .map_or(0u32, |value| value.saturating_add(1));
-
-    if chunk.chunk_index < expected_next {
-        emit_chunk_status(
-            state.transfer_id,
-            chunk.chunk_index,
-            "retrying",
-            2,
-            Some("duplicate chunk"),
-        )
-        .await;
+    if let Some(highest) = state.highest_contiguous_chunk
+        && chunk.chunk_index <= highest
+    {
         send_file_ack(
             class,
             max_packet,
             state.transfer_id,
             state.highest_contiguous_chunk,
-            state.next_expected_offset,
+            state.received_size,
             DEFAULT_ACK_WINDOW_CREDIT,
         )
         .await?;
         return Ok(());
     }
 
-    if chunk.chunk_index > expected_next {
-        emit_chunk_status(
-            state.transfer_id,
-            chunk.chunk_index,
-            "retrying",
-            1,
-            Some("out-of-order chunk"),
-        )
-        .await;
+    let expected_index = state.highest_contiguous_chunk.map_or(0, |value| value + 1);
+    if chunk.chunk_index != expected_index {
         send_file_ack(
             class,
             max_packet,
             state.transfer_id,
             state.highest_contiguous_chunk,
-            state.next_expected_offset,
+            state.received_size,
             0,
         )
         .await?;
         return Ok(());
     }
 
-    let crc32 = crc32_ieee(chunk.payload);
-    if crc32 != chunk.chunk_crc32 {
-        emit_chunk_status(
-            state.transfer_id,
-            chunk.chunk_index,
-            "retrying",
-            1,
-            Some("crc32 mismatch"),
-        )
-        .await;
-        send_file_ack(
+    if !forward_secure_chunk(payload).await {
+        let transfer_id = state.transfer_id;
+        let _ = relay.remove(transfer_id);
+        send_file_abort(
             class,
             max_packet,
-            state.transfer_id,
-            state.highest_contiguous_chunk,
-            state.next_expected_offset,
-            DEFAULT_ACK_WINDOW_CREDIT,
+            transfer_id,
+            FILE_ABORT_REASON_CAPACITY,
+            "secure browser relay unavailable",
         )
         .await?;
         return Ok(());
     }
 
-    if matches!(transfer_relay_mode(), TransferRelayMode::RelayToBrowser) {
-        if let Some(binary) = build_ws_chunk_envelope(&chunk) {
-            if let Err(err) = ws::send_transfer_binary(binary).await {
-                let transfer_id = state.transfer_id;
-                let detail = err.detail();
-                let _ = relay.remove(transfer_id);
-                send_file_abort(
-                    class,
-                    max_packet,
-                    transfer_id,
-                    FILE_ABORT_REASON_CAPACITY,
-                    detail,
-                )
-                .await?;
-                emit_transfer_failed(transfer_id, detail).await;
-                return Ok(());
-            }
-        } else {
-            let transfer_id = state.transfer_id;
-            let _ = relay.remove(transfer_id);
-            send_file_abort(
-                class,
-                max_packet,
-                transfer_id,
-                FILE_ABORT_REASON_CAPACITY,
-                "binary envelope overflow",
-            )
-            .await?;
-            emit_transfer_failed(transfer_id, "binary envelope overflow").await;
-            return Ok(());
-        }
-    }
-
+    let plaintext_len = chunk.ciphertext.len().saturating_sub(FILE_TAG_LEN) as u64;
     state.highest_contiguous_chunk = Some(chunk.chunk_index);
-    state.next_expected_offset = chunk.offset + chunk.payload.len() as u64;
-    state.received_size = state
-        .received_size
-        .saturating_add(chunk.payload.len() as u64);
+    state.received_size = state.received_size.saturating_add(plaintext_len);
     state.finished_chunks = state.finished_chunks.saturating_add(1);
     TRANSFER_RECEIVED_SIZE.store(state.received_size, Ordering::Release);
     TRANSFER_FINISHED_CHUNKS.store(state.finished_chunks, Ordering::Release);
     set_transfer_view_state(TransferViewState::Progress);
 
-    let should_emit_progress = state.finished_chunks == state.chunk_count
+    if state.finished_chunks == state.chunk_count
         || state
             .finished_chunks
             .saturating_sub(state.last_progress_emit_finished_chunks)
-            >= PROGRESS_EMIT_EVERY_CHUNKS;
-    if should_emit_progress {
+            >= PROGRESS_EMIT_EVERY_CHUNKS
+    {
         state.last_progress_emit_finished_chunks = state.finished_chunks;
         emit_transfer_progress(state).await;
     }
@@ -451,12 +263,10 @@ where
         max_packet,
         state.transfer_id,
         state.highest_contiguous_chunk,
-        state.next_expected_offset,
+        state.received_size,
         DEFAULT_ACK_WINDOW_CREDIT,
     )
-    .await?;
-
-    Ok(())
+    .await
 }
 
 pub(super) async fn handle_file_close<'d, D>(
@@ -468,43 +278,58 @@ pub(super) async fn handle_file_close<'d, D>(
 where
     D: Driver<'d>,
 {
-    let Some(close) = parse_file_close(payload) else {
-        return Ok(());
+    let close = match decode_secure_close(payload) {
+        Ok(close) => close,
+        Err(_) => {
+            log::warn!("usb: rejected malformed encrypted FILE_CLOSE");
+            return Ok(());
+        }
     };
-
-    let Some(state) = relay.remove(close.transfer_id) else {
+    let Some(state) = relay.get_mut(close.transfer_id) else {
         send_file_abort(
             class,
             max_packet,
             close.transfer_id,
             FILE_ABORT_REASON_UNKNOWN_TRANSFER,
-            "close for unknown transfer",
+            "unknown encrypted transfer",
         )
         .await?;
-        emit_transfer_failed(close.transfer_id, "close for unknown transfer").await;
         return Ok(());
     };
-
-    if close.sent_chunk_count != state.chunk_count
-        || close.sent_total_size != state.total_size
-        || state.received_size != state.total_size
-        || state.finished_chunks != state.chunk_count
-    {
+    if close.session_id != state.session_id || state.finished_chunks != state.chunk_count {
         send_file_result(
             class,
             max_packet,
-            state.transfer_id,
+            close.transfer_id,
             FILE_RESULT_SIZE_MISMATCH,
-            "size mismatch",
+            "encrypted chunk count mismatch",
         )
         .await?;
-        emit_transfer_failed(state.transfer_id, "size mismatch").await;
         return Ok(());
     }
-
-    send_file_result(class, max_packet, state.transfer_id, FILE_RESULT_OK, "ok").await?;
-    emit_transfer_finished(state.transfer_id).await;
+    if !forward_secure_close(payload).await {
+        send_file_abort(
+            class,
+            max_packet,
+            close.transfer_id,
+            FILE_ABORT_REASON_CAPACITY,
+            "secure browser relay unavailable",
+        )
+        .await?;
+        return Ok(());
+    }
+    let transfer_id = close.transfer_id;
+    let _ = relay.remove(transfer_id);
     set_transfer_view_state(TransferViewState::Finished);
+    send_file_result(
+        class,
+        max_packet,
+        transfer_id,
+        FILE_RESULT_OK,
+        "encrypted relay complete",
+    )
+    .await?;
+    emit_transfer_finished(transfer_id).await;
     Ok(())
 }
 
@@ -517,32 +342,57 @@ pub(super) async fn handle_file_abort<'d, D>(
 where
     D: Driver<'d>,
 {
-    let Some(abort) = parse_file_abort(payload) else {
+    let Some((transfer_id, reason_code, detail)) = parse_abort(payload) else {
         return Ok(());
     };
-
-    let _ = relay.remove(abort.transfer_id);
-    emit_transfer_aborted(abort.transfer_id, abort.reason_code, abort.detail).await;
+    let _ = relay.remove(transfer_id);
     set_transfer_view_state(TransferViewState::Aborted);
     send_file_result(
         class,
         max_packet,
-        abort.transfer_id,
+        transfer_id,
         FILE_RESULT_ABORTED,
-        abort.detail,
+        "encrypted transfer aborted",
     )
     .await?;
-
+    emit_transfer_aborted(transfer_id, reason_code, detail).await;
     Ok(())
 }
 
-fn metadata_matches(existing: &RelayTransferState, incoming: &IncomingOpen<'_>) -> bool {
-    existing.protocol_version == incoming.protocol_version
-        && existing.total_size == incoming.total_size
-        && existing.chunk_size == incoming.chunk_size
-        && existing.chunk_count == incoming.chunk_count
-        && existing.sha256 == incoming.sha256
-        && existing.file_name.as_str() == incoming.file_name
+fn open_matches(state: &RelayTransferState, open: &SecureOpen<'_>) -> bool {
+    state.session_id == open.session_id
+        && state.file_salt == open.file_salt
+        && state.chunk_size == open.chunk_size
+        && state.chunk_count == open.chunk_count
+}
+
+fn valid_chunk(state: &RelayTransferState, chunk: &SecureChunk<'_>) -> bool {
+    if chunk.chunk_index >= state.chunk_count {
+        return false;
+    }
+    let plaintext_len = chunk.ciphertext.len().saturating_sub(FILE_TAG_LEN);
+    if chunk.chunk_index + 1 < state.chunk_count {
+        plaintext_len == state.chunk_size as usize
+    } else {
+        plaintext_len <= state.chunk_size as usize
+    }
+}
+
+fn parse_abort(payload: &[u8]) -> Option<(u64, u8, &str)> {
+    if payload.len() < 11 {
+        return None;
+    }
+    let transfer_id = u64::from_le_bytes(payload[0..8].try_into().ok()?);
+    let reason = payload[8];
+    let len = u16::from_le_bytes(payload[9..11].try_into().ok()?) as usize;
+    if payload.len() != 11 + len {
+        return None;
+    }
+    Some((
+        transfer_id,
+        reason,
+        core::str::from_utf8(&payload[11..]).ok()?,
+    ))
 }
 
 async fn send_file_ack<'d, D>(
@@ -556,7 +406,7 @@ async fn send_file_ack<'d, D>(
 where
     D: Driver<'d>,
 {
-    let mut payload = [0u8; 8 + 4 + 8 + 2];
+    let mut payload = [0; 22];
     payload[0..8].copy_from_slice(&transfer_id.to_le_bytes());
     payload[8..12].copy_from_slice(
         &highest_contiguous_chunk
@@ -572,22 +422,20 @@ async fn send_file_result<'d, D>(
     class: &mut CdcAcmClass<'d, D>,
     max_packet: usize,
     transfer_id: u64,
-    result_code: u8,
+    code: u8,
     detail: &str,
 ) -> Result<(), EndpointError>
 where
     D: Driver<'d>,
 {
-    let mut payload: Vec<u8, 256> = Vec::new();
-    let detail_bytes = detail.as_bytes();
-    let detail_len = core::cmp::min(detail_bytes.len(), u16::MAX as usize);
-
+    let detail = detail.as_bytes();
+    let detail_len = detail.len().min(u16::MAX as usize);
+    let mut payload: Vec<u8, MAX_PAYLOAD_LEN> = Vec::new();
     let _ = payload.extend_from_slice(&transfer_id.to_le_bytes());
-    let _ = payload.push(result_code);
+    let _ = payload.push(code);
     let _ = payload.extend_from_slice(&(detail_len as u16).to_le_bytes());
-    let _ = payload.extend_from_slice(&detail_bytes[..detail_len]);
-
-    send_tlv(class, max_packet, TAG_FILE_RESULT, &payload).await
+    let _ = payload.extend_from_slice(&detail[..detail_len]);
+    send_tlv(class, max_packet, TAG_FILE_RESULT, payload.as_slice()).await
 }
 
 async fn send_file_abort<'d, D>(
@@ -600,14 +448,14 @@ async fn send_file_abort<'d, D>(
 where
     D: Driver<'d>,
 {
-    let mut payload: Vec<u8, 256> = Vec::new();
-    let detail_bytes = detail.as_bytes();
-    let detail_len = core::cmp::min(detail_bytes.len(), u16::MAX as usize);
-
+    let detail = detail.as_bytes();
+    let detail_len = detail.len().min(u16::MAX as usize);
+    let mut payload: Vec<u8, MAX_PAYLOAD_LEN> = Vec::new();
     let _ = payload.extend_from_slice(&transfer_id.to_le_bytes());
     let _ = payload.push(reason_code);
     let _ = payload.extend_from_slice(&(detail_len as u16).to_le_bytes());
-    let _ = payload.extend_from_slice(&detail_bytes[..detail_len]);
-
-    send_tlv(class, max_packet, TAG_FILE_ABORT, &payload).await
+    let _ = payload.extend_from_slice(&detail[..detail_len]);
+    send_tlv(class, max_packet, TAG_FILE_ABORT, payload.as_slice()).await
 }
+
+const _: () = assert!(MAX_PLAINTEXT_CHUNK <= u16::MAX as usize);

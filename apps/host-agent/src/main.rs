@@ -2,6 +2,7 @@ mod config;
 mod dispatch;
 mod file_transfer;
 mod filesystem;
+mod secure_transfer;
 mod tlv;
 mod transport;
 

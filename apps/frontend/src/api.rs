@@ -36,7 +36,7 @@ pub struct ScriptMeta {
 }
 
 pub const WEBSOCKET_PROTOCOL_VERSION: u16 = 1;
-pub const TRANSFER_PROTOCOL_VERSION: u16 = 1;
+pub const TRANSFER_PROTOCOL_VERSION: u16 = transfer_protocol::TRANSFER_PROTOCOL_VERSION;
 pub const FILESYSTEM_PROTOCOL_VERSION: u16 = 1;
 
 const READ_TIMEOUT_MS: u32 = 5_000;
@@ -216,7 +216,7 @@ struct WsCallbacks {
     on_state: Rc<dyn Fn(bool)>,
     on_hello: Rc<dyn Fn(Hello)>,
     on_transfer_text: Rc<dyn Fn(String)>,
-    on_transfer_binary: Rc<dyn Fn(Vec<u8>)>,
+    on_secure_transfer_binary: Rc<dyn Fn(u8, Vec<u8>)>,
     on_filesystem_binary: Rc<dyn Fn(Vec<u8>)>,
 }
 
@@ -252,7 +252,7 @@ pub fn init_ws(
     on_state: impl Fn(bool) + 'static,
     on_hello: impl Fn(Hello) + 'static,
     on_transfer_text: impl Fn(String) + 'static,
-    on_transfer_binary: impl Fn(Vec<u8>) + 'static,
+    on_secure_transfer_binary: impl Fn(u8, Vec<u8>) + 'static,
     on_filesystem_binary: impl Fn(Vec<u8>) + 'static,
 ) {
     WS_CALLBACKS.with(|cell| {
@@ -261,7 +261,7 @@ pub fn init_ws(
             on_state: Rc::new(on_state),
             on_hello: Rc::new(on_hello),
             on_transfer_text: Rc::new(on_transfer_text),
-            on_transfer_binary: Rc::new(on_transfer_binary),
+            on_secure_transfer_binary: Rc::new(on_secure_transfer_binary),
             on_filesystem_binary: Rc::new(on_filesystem_binary),
         }));
     });
@@ -342,8 +342,10 @@ fn connect_ws() {
                 let mut payload = vec![0u8; bytes.length() as usize];
                 bytes.copy_to(&mut payload);
                 match payload.split_first() {
-                    Some((1, data)) => (callbacks.on_transfer_binary)(data.to_vec()),
                     Some((2, data)) => (callbacks.on_filesystem_binary)(data.to_vec()),
+                    Some((kind @ 3..=6, data)) => {
+                        (callbacks.on_secure_transfer_binary)(*kind, data.to_vec())
+                    }
                     Some((kind, _)) => {
                         (callbacks.on_log)(format!("WS msg: unknown binary kind {kind}"));
                     }
@@ -685,18 +687,26 @@ pub async fn run_script(bytecode: &[u8]) -> Result<(), ApiError> {
     expect_ok(&text)
 }
 
-pub async fn transfer_start(path: &str) -> Result<(), ApiError> {
-    let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC).to_string();
-    let cmd = format!("TRANSFER_START path={encoded_path}");
-    let text = send_cmd(&cmd, MUTATION_TIMEOUT_MS).await?;
-    expect_ok(&text)
-}
-
-pub async fn transfer_set_default(path: &str) -> Result<(), ApiError> {
-    let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC).to_string();
-    let cmd = format!("TRANSFER_DEFAULT_SET path={encoded_path}");
-    let text = send_cmd(&cmd, MUTATION_TIMEOUT_MS).await?;
-    expect_ok(&text)
+pub fn send_secure_transfer(payload: &[u8]) -> Result<(), ApiError> {
+    let mut error = None;
+    WS.with(|cell| {
+        let slot = cell.borrow();
+        let Some(state) = slot.as_ref() else {
+            error = Some(ApiError::Disconnected);
+            return;
+        };
+        if state.ws.ready_state() != WebSocket::OPEN {
+            error = Some(ApiError::Disconnected);
+            return;
+        }
+        let mut message = Vec::with_capacity(payload.len() + 1);
+        message.push(transfer_protocol::WS_BINARY_KIND_SESSION);
+        message.extend_from_slice(payload);
+        if state.ws.send_with_u8_array(&message).is_err() {
+            error = Some(ApiError::SendFailed);
+        }
+    });
+    error.map_or(Ok(()), Err)
 }
 
 pub fn next_filesystem_request_id() -> u64 {

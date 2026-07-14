@@ -58,15 +58,6 @@ pub fn set_transfer_relay_mode(mode: TransferRelayMode) {
     TRANSFER_MODE.store(mode_to_raw(mode), Ordering::Release);
 }
 
-pub fn toggle_transfer_relay_mode() -> TransferRelayMode {
-    let mode = match transfer_relay_mode() {
-        TransferRelayMode::RelayToBrowser => TransferRelayMode::SimulationDrop,
-        TransferRelayMode::SimulationDrop => TransferRelayMode::RelayToBrowser,
-    };
-    set_transfer_relay_mode(mode);
-    mode
-}
-
 pub fn transfer_view_snapshot() -> TransferViewSnapshot {
     TransferViewSnapshot {
         mode: transfer_relay_mode(),

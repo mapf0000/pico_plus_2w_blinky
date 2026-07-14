@@ -1,0 +1,18 @@
+[package]
+name = "transfer-crypto"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+getrandom = "0.3"
+hkdf = "0.13"
+sha2 = "0.11"
+snow = { version = "0.10", default-features = false, features = ["default-resolver-crypto"] }
+thiserror = "2"
+transfer-protocol = { path = "../transfer-protocol" }
+zeroize = { version = "1.9", features = ["derive"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }

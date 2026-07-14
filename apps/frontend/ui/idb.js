@@ -1,4 +1,5 @@
-const DB_NAME = "pico-transfer-v1";
+const LEGACY_DB_NAME = "pico-transfer-v1";
+const DB_NAME = "pico-transfer-v2";
 const DB_VERSION = 1;
 const CHUNK_STORE = "chunks";
 const WRITE_BATCH_SIZE = 64;
@@ -9,6 +10,15 @@ let persistQueue = Promise.resolve();
 let persistError = null;
 let pendingChunkWrites = [];
 let chunkFlushScheduled = false;
+
+// Secure transfer sessions are not resumable. Remove legacy plaintext staging
+// and clear this version's abandoned chunks when the first database handle is
+// opened after a page load.
+try {
+  indexedDB.deleteDatabase(LEGACY_DB_NAME);
+} catch (_) {
+  // Storage may be unavailable in privacy modes; normal operations report it.
+}
 
 function normalizeTransferId(transferId) {
   // wasm-bindgen passes Rust u64 values as BigInt. IndexedDB values may contain
@@ -24,7 +34,18 @@ function keyFor(transferId, chunkIndex) {
 
 function requestToPromise(request) {
   return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = async () => {
+      const db = request.result;
+      try {
+        const transaction = db.transaction(CHUNK_STORE, "readwrite");
+        transaction.objectStore(CHUNK_STORE).clear();
+        await transactionDone(transaction);
+        resolve(db);
+      } catch (error) {
+        db.close();
+        reject(error);
+      }
+    };
     request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
   });
 }

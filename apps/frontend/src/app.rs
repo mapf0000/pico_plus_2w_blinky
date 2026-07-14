@@ -102,6 +102,9 @@ pub(crate) fn app() -> Html {
     let transfer_store = use_mut_ref(transfer::TransferStore::new);
     let transfers = use_state(Vec::<transfer::TransferView>::new);
     let transfer_path = use_state(String::new);
+    let secure_session = use_mut_ref(transfer::SecureSession::new);
+    let secure_session_view = use_state(|| transfer::SecureSessionView::Idle);
+    let pairing_code = use_state(String::new);
     let filesystem_store = use_mut_ref(filesystem::BrowserStore::new);
     let filesystem_view = use_state(filesystem::BrowserView::default);
     let dsl_text = use_state(|| STARTER_SCRIPT.to_string());
@@ -322,6 +325,9 @@ pub(crate) fn app() -> Html {
         let was_connected = was_connected.clone();
         let transfer_store = transfer_store.clone();
         let transfers_state = transfers.clone();
+        let secure_session = secure_session.clone();
+        let secure_session_view = secure_session_view.clone();
+        let pairing_code = pairing_code.clone();
         let filesystem_store = filesystem_store.clone();
         let filesystem_view = filesystem_view.clone();
         use_effect_with((), move |_| {
@@ -337,17 +343,26 @@ pub(crate) fn app() -> Html {
                     let hello_state = hello_state.clone();
                     let handshake_error = handshake_error.clone();
                     let pending_actions = pending_actions.clone();
+                    let secure_session = secure_session.clone();
+                    let secure_session_view = secure_session_view.clone();
+                    let pairing_code = pairing_code.clone();
                     move |connected| {
                         ws_connected.set(connected);
                         if connected {
                             *was_connected.borrow_mut() = true;
                             connection_state.set(ConnectionState::Connected);
                         } else if *was_connected.borrow() {
+                            secure_session.borrow_mut().reset();
+                            secure_session_view.set(transfer::SecureSessionView::Idle);
+                            pairing_code.set(String::new());
                             hello_state.set(None);
                             handshake_error.set(None);
                             pending_actions.set(PendingActions::default());
                             connection_state.set(ConnectionState::Reconnecting);
                         } else {
+                            secure_session.borrow_mut().reset();
+                            secure_session_view.set(transfer::SecureSessionView::Idle);
+                            pairing_code.set(String::new());
                             hello_state.set(None);
                             pending_actions.set(PendingActions::default());
                             connection_state.set(ConnectionState::Unavailable);
@@ -397,14 +412,82 @@ pub(crate) fn app() -> Html {
                     let push_log = push_log.clone();
                     let transfer_store = transfer_store.clone();
                     let transfers_state = transfers_state.clone();
-                    move |binary| {
-                        let now_ms = monotonic_now_ms();
-                        let mut store = transfer_store.borrow_mut();
-                        if let Err(err) = store.apply_binary_chunk(&binary, now_ms) {
-                            push_log.emit(format!("transfer chunk error: {err}"));
-                            return;
+                    let secure_session = secure_session.clone();
+                    let secure_session_view = secure_session_view.clone();
+                    let pairing_code = pairing_code.clone();
+                    move |kind, binary| {
+                        let result = (|| -> Result<(), String> {
+                            match kind {
+                                transfer_protocol::WS_BINARY_KIND_SESSION => {
+                                    let outbound =
+                                        secure_session.borrow_mut().handle_session(&binary)?;
+                                    let view = secure_session.borrow().view();
+                                    secure_session_view.set(view);
+                                    if view.established() {
+                                        pairing_code.set(String::new());
+                                        push_log.emit(
+                                            "encrypted file-transfer session established".into(),
+                                        );
+                                    }
+                                    if let Some(outbound) = outbound {
+                                        api::send_secure_transfer(&outbound)
+                                            .map_err(|error| error.to_string())?;
+                                    }
+                                }
+                                transfer_protocol::WS_BINARY_KIND_SECURE_OPEN => {
+                                    let open = secure_session.borrow_mut().decrypt_open(&binary)?;
+                                    let now_ms = monotonic_now_ms();
+                                    let mut store = transfer_store.borrow_mut();
+                                    store.apply_secure_open(open, now_ms)?;
+                                    transfers_state.set(store.snapshots());
+                                }
+                                transfer_protocol::WS_BINARY_KIND_SECURE_CHUNK => {
+                                    let (transfer_id, chunk_index, plaintext) =
+                                        secure_session.borrow().decrypt_chunk(&binary)?;
+                                    let now_ms = monotonic_now_ms();
+                                    let mut store = transfer_store.borrow_mut();
+                                    store.apply_secure_chunk(
+                                        transfer_id,
+                                        chunk_index,
+                                        plaintext.as_slice(),
+                                        now_ms,
+                                    )?;
+                                    transfers_state.set(store.snapshots());
+                                }
+                                transfer_protocol::WS_BINARY_KIND_SECURE_CLOSE => {
+                                    let close =
+                                        secure_session.borrow_mut().decrypt_close(&binary)?;
+                                    let transfer_id = close.transfer_id;
+                                    let now_ms = monotonic_now_ms();
+                                    let digest = {
+                                        let mut store = transfer_store.borrow_mut();
+                                        let digest = store.apply_secure_close(close, now_ms)?;
+                                        transfers_state.set(store.snapshots());
+                                        digest
+                                    };
+                                    let receipt = secure_session
+                                        .borrow_mut()
+                                        .seal_receipt(transfer_id, &digest)?;
+                                    api::send_secure_transfer(&receipt)
+                                        .map_err(|error| error.to_string())?;
+                                    push_log.emit(format!(
+                                        "encrypted transfer {transfer_id} authenticated end to end"
+                                    ));
+                                }
+                                _ => return Err(format!("unknown encrypted transfer kind {kind}")),
+                            }
+                            Ok(())
+                        })();
+                        if let Err(error) = result {
+                            if let Some(transfer_id) = transfer::secure_transfer_id(kind, &binary) {
+                                secure_session.borrow_mut().discard_file(transfer_id);
+                                let mut store = transfer_store.borrow_mut();
+                                store.fail_secure_transfer(transfer_id, monotonic_now_ms());
+                                transfers_state.set(store.snapshots());
+                            }
+                            secure_session_view.set(secure_session.borrow().view());
+                            push_log.emit(format!("encrypted transfer error: {error}"));
                         }
-                        transfers_state.set(store.snapshots());
                     }
                 },
                 {
@@ -640,6 +723,7 @@ pub(crate) fn app() -> Html {
     };
 
     let queue_transfer_path = {
+        let secure_session = secure_session.clone();
         let set_pending = set_pending.clone();
         let push_log = push_log.clone();
         let toast_cb = show_toast.clone();
@@ -653,23 +737,23 @@ pub(crate) fn app() -> Html {
                 ));
                 return;
             }
-            let set_pending = set_pending.clone();
-            let push_log = push_log.clone();
-            let show_toast = toast_cb.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                set_pending.emit((PendingAction::TransferStart, true));
-                match api::transfer_start(&path).await {
-                    Ok(()) => {
-                        push_log.emit(format!("transfer queued for path: {}", path));
-                        show_toast.emit(("Transfer queued".into(), true));
-                    }
-                    Err(err) => {
-                        push_log.emit(format!("transfer start error: {err}"));
-                        show_toast.emit((format!("Transfer start failed: {err}"), false));
-                    }
+            set_pending.emit((PendingAction::TransferStart, true));
+            let result = secure_session
+                .borrow_mut()
+                .seal_start(&path)
+                .map_err(api::ApiError::Protocol)
+                .and_then(|payload| api::send_secure_transfer(&payload));
+            match result {
+                Ok(()) => {
+                    push_log.emit("encrypted transfer request queued".into());
+                    toast_cb.emit(("Transfer queued securely".into(), true));
                 }
-                set_pending.emit((PendingAction::TransferStart, false));
-            });
+                Err(err) => {
+                    push_log.emit(format!("transfer start error: {err}"));
+                    toast_cb.emit((format!("Transfer start failed: {err}"), false));
+                }
+            }
+            set_pending.emit((PendingAction::TransferStart, false));
         })
     };
 
@@ -680,6 +764,7 @@ pub(crate) fn app() -> Html {
     };
 
     let on_set_transfer_default = {
+        let secure_session = secure_session.clone();
         let transfer_path = transfer_path.clone();
         let set_pending = set_pending.clone();
         let push_log = push_log.clone();
@@ -694,23 +779,88 @@ pub(crate) fn app() -> Html {
                 ));
                 return;
             }
-            let set_pending = set_pending.clone();
-            let push_log = push_log.clone();
-            let show_toast = toast_cb.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                set_pending.emit((PendingAction::TransferDefault, true));
-                match api::transfer_set_default(&path).await {
-                    Ok(()) => {
-                        push_log.emit(format!("default transfer path set: {}", path));
-                        show_toast.emit(("Transfer default updated".into(), true));
-                    }
-                    Err(err) => {
-                        push_log.emit(format!("transfer default error: {err}"));
-                        show_toast.emit((format!("Set default failed: {err}"), false));
-                    }
+            set_pending.emit((PendingAction::TransferDefault, true));
+            let result = secure_session
+                .borrow_mut()
+                .seal_default_path(&path)
+                .map_err(api::ApiError::Protocol)
+                .and_then(|payload| api::send_secure_transfer(&payload));
+            match result {
+                Ok(()) => {
+                    push_log.emit("encrypted default transfer path updated".into());
+                    toast_cb.emit(("Transfer default updated securely".into(), true));
                 }
-                set_pending.emit((PendingAction::TransferDefault, false));
-            });
+                Err(err) => {
+                    push_log.emit(format!("transfer default error: {err}"));
+                    toast_cb.emit((format!("Set default failed: {err}"), false));
+                }
+            }
+            set_pending.emit((PendingAction::TransferDefault, false));
+        })
+    };
+
+    let on_start_default_transfer = {
+        let secure_session = secure_session.clone();
+        let set_pending = set_pending.clone();
+        let push_log = push_log.clone();
+        let toast_cb = show_toast.clone();
+        Callback::from(move |_| {
+            set_pending.emit((PendingAction::TransferStart, true));
+            let result = secure_session
+                .borrow_mut()
+                .seal_start_default()
+                .map_err(api::ApiError::Protocol)
+                .and_then(|payload| api::send_secure_transfer(&payload));
+            match result {
+                Ok(()) => {
+                    push_log.emit("encrypted default transfer request queued".into());
+                    toast_cb.emit(("Default transfer queued securely".into(), true));
+                }
+                Err(err) => {
+                    push_log.emit(format!("default transfer start error: {err}"));
+                    toast_cb.emit((format!("Default transfer failed: {err}"), false));
+                }
+            }
+            set_pending.emit((PendingAction::TransferStart, false));
+        })
+    };
+
+    let on_request_pairing = {
+        let secure_session = secure_session.clone();
+        let secure_session_view = secure_session_view.clone();
+        let pairing_code = pairing_code.clone();
+        let push_log = push_log.clone();
+        let toast_cb = show_toast.clone();
+        Callback::from(move |_| {
+            pairing_code.set(String::new());
+            let result = secure_session
+                .borrow_mut()
+                .request_pairing()
+                .map_err(api::ApiError::Protocol)
+                .and_then(|payload| api::send_secure_transfer(&payload));
+            secure_session_view.set(secure_session.borrow().view());
+            match result {
+                Ok(()) => push_log.emit("requested a single-use host pairing code".into()),
+                Err(error) => toast_cb.emit((format!("Pairing request failed: {error}"), false)),
+            }
+        })
+    };
+
+    let on_pair = {
+        let secure_session = secure_session.clone();
+        let secure_session_view = secure_session_view.clone();
+        let pairing_code = pairing_code.clone();
+        let toast_cb = show_toast.clone();
+        Callback::from(move |_| {
+            let result = secure_session
+                .borrow_mut()
+                .begin_pairing(pairing_code.trim())
+                .map_err(api::ApiError::Protocol)
+                .and_then(|payload| api::send_secure_transfer(&payload));
+            secure_session_view.set(secure_session.borrow().view());
+            if let Err(error) = result {
+                toast_cb.emit((format!("Secure pairing failed: {error}"), false));
+            }
         })
     };
 
@@ -758,12 +908,13 @@ pub(crate) fn app() -> Html {
         && capabilities
             .as_ref()
             .is_some_and(|snapshot| snapshot.supports_feature("script_bytecode"));
-    let transfer_ready = device_ready
+    let transfer_capable = device_ready
         && capabilities.as_ref().is_some_and(|snapshot| {
             snapshot.transfer_compatible()
                 && snapshot.host_agent.present
                 && snapshot.host_agent.version.is_some()
         });
+    let transfer_ready = transfer_capable && secure_session_view.established();
     let filesystem_ready = device_ready
         && capabilities.as_ref().is_some_and(|snapshot| {
             snapshot.filesystem_compatible()
@@ -912,6 +1063,16 @@ pub(crate) fn app() -> Html {
                         },
                         AppSection::Transfers => html! {
                             <div class="transfer-workspace">
+                                <SecurePairingCard
+                                    connected={transfer_capable}
+                                    state={*secure_session_view}
+                                    code={(*pairing_code).clone()}
+                                    on_request={on_request_pairing.clone()}
+                                    on_code={{
+                                        let pairing_code = pairing_code.clone();
+                                        Callback::from(move |value: String| pairing_code.set(value))
+                                    }}
+                                    on_pair={on_pair.clone()} />
                                 <TransferStartCard
                                     path={(*transfer_path).clone()}
                                     connected={transfer_ready}
@@ -922,6 +1083,7 @@ pub(crate) fn app() -> Html {
                                         Callback::from(move |value: String| transfer_path.set(value))
                                     }}
                                     on_start={on_start_transfer.clone()}
+                                    on_start_default={on_start_default_transfer.clone()}
                                     on_set_default={on_set_transfer_default.clone()} />
                                 <FileBrowserCard
                                     view={(*filesystem_view).clone()}

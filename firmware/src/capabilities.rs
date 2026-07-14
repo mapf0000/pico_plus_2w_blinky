@@ -11,7 +11,7 @@ use crate::http::util::escape_json_str;
 
 pub const HELLO_VERSION: u16 = 1;
 pub const WEBSOCKET_PROTOCOL_VERSION: u16 = 1;
-pub const TRANSFER_PROTOCOL_VERSION: u16 = 1;
+pub const TRANSFER_PROTOCOL_VERSION: u16 = transfer_protocol::TRANSFER_PROTOCOL_VERSION;
 pub const FILESYSTEM_PROTOCOL_VERSION: u16 = 1;
 pub const HELLO_TEXT_MAX: usize = 768;
 

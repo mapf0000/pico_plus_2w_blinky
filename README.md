@@ -90,18 +90,15 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
   - Responds to `TAG_DB_CREDENTIALS_REQUEST` with a native dialog (masked password).
   - For headless runs/tests, set `HOST_AGENT_DB_USER` and `HOST_AGENT_DB_PASSWORD`.
 
-## On-device transfer controls (no Wi-Fi required)
-- Open the new `Transfer` page on the Pico display.
-- Controls:
-  - `A/B`: select action
-  - `X` on `Start Transfer (default)`: send `FILE_START_REQUEST` with default path mode
-  - `X` on mode row: toggle `relay->browser` vs `simulation(drop)`
-- Default transfer source:
-  - The host-agent uses its first `--send-file <path>` entry when the device sends a default transfer request (empty path payload).
-  - Example: `./host-agent --send-file /absolute/path/to/file.bin`
-- Simulation mode:
-  - The device keeps USB transfer ACK/RESULT flow and progress accounting.
-  - Chunk payloads are intentionally dropped instead of being forwarded to browser WebSocket clients.
+## Secure file transfer
+
+- Start the host agent, open the Web UI, and request a new file-transfer pairing code.
+- Read the single-use code from the host-agent terminal and enter it in the UI.
+- After the UI reports an encrypted session, select or enter a host file path and queue it.
+- The host streams the file through bounded plaintext buffers, encrypts each record before USB transfer, and waits for an authenticated browser hash receipt.
+- The Pico display reports transfer progress but intentionally cannot start an unpaired transfer. Plaintext transfer commands and legacy simulation/drop mode are disabled.
+- `--send-file <path>` records a default candidate but does not bypass browser pairing.
+- Security scope, trust assumptions, metadata leakage, and follow-up work are documented in [Secure file-transfer design](docs/SECURE_FILE_TRANSFER.md).
 
 ## Source filesystem browser
 - With the browser WebSocket connected and the host-agent running, the Web UI can browse the source computer's filesystem through the Pico.

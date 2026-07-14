@@ -42,7 +42,7 @@ Types used in layout tables:
 | --- | ---: | --- | --- |
 | WebSocket command/event protocol | 1 | `HELLO.protocols.websocket`; response/event `version` fields | The frontend reports a compatibility error when the WebSocket version differs. |
 | `HELLO` schema | 1 | Top-level `HELLO.version` | The frontend requires `event_type = "hello"` and `version = 1`. |
-| File-transfer protocol | 1 | `FILE_OPEN.protocol_version`; WebSocket transfer event `version` | Firmware rejects unsupported `FILE_OPEN` versions. Frontend rejects unsupported transfer event versions. |
+| File-transfer protocol | 2 | `FILE_OPEN.protocol_version`; WebSocket transfer event `version` | There is no plaintext downgrade: the host and frontend reject the v1 file path. |
 | Filesystem protocol | 1 | First `u16` in list requests and pages | Host agent and frontend reject unsupported versions; firmware refuses to forward mismatched pages. |
 | Keyboard bytecode | `KBD1` | Four-byte bytecode magic | Firmware executor rejects other magic values. See the DSL documentation. |
 | USB TLV envelope | Unversioned | None | Compatibility is maintained by stable tag numbers and versioned payloads for complex subprotocols. |
@@ -65,7 +65,7 @@ The byte stream is a sequence of frames:
 
 USB packet boundaries have no application meaning. Headers and payloads may be split across USB packets, and multiple frames may be present in a read buffer.
 
-There is no envelope checksum. Integrity checks belong to subprotocols, such as CRC32 on file chunks and keyboard bytecode.
+There is no envelope checksum. File-transfer v2 uses ChaCha20-Poly1305 authentication; keyboard bytecode retains its own integrity checks.
 
 Both endpoints reject lengths over 2048 and attempt to resynchronize. The host decoder scans forward for a plausible complete frame; the firmware decoder slides its five-byte header window after an oversized length. A producer must never depend on this recovery behavior.
 
@@ -91,18 +91,20 @@ Implementation:
 | 10 | `MIC_PCM_DATA` | Reserved | Unspecified | Recognized by host transport; no current producer/consumer. |
 | 11 | `DB_CREDENTIALS_REQUEST` | D -> H | Optional UTF-8 prompt label | Active. |
 | 12 | `DB_CREDENTIALS_RESPONSE` | H -> D | Empty for cancel, otherwise `username + NUL + password` | Active. |
-| 20 | `FILE_OPEN` | H -> D | File metadata | Active, transfer protocol v1. |
-| 21 | `FILE_CHUNK` | H -> D | Indexed data chunk with CRC32 | Active. |
+| 20 | `FILE_OPEN` | H -> D | v2 public envelope plus encrypted manifest | Active. |
+| 21 | `FILE_CHUNK` | H -> D | v2 public envelope plus AEAD ciphertext | Active. |
 | 22 | `FILE_ACK` | D -> H | Contiguous progress and window credit | Active. |
-| 23 | `FILE_CLOSE` | H -> D | Sender totals | Active. |
+| 23 | `FILE_CLOSE` | H -> D | v2 public envelope plus encrypted totals/hash | Active. |
 | 24 | `FILE_RESULT` | D -> H | Terminal result | Active. |
 | 25 | `FILE_ABORT` | Bidirectional | Terminal abort reason | Active. |
 | 26 | `FILE_HEARTBEAT` | H -> D | Currently ignored | Reserved for transfer liveness; no current sender. |
-| 27 | `FILE_START_REQUEST` | D -> H | UTF-8 path, or empty for configured default | Active. |
-| 28 | `FILE_SET_DEFAULT_PATH` | D -> H | Non-empty UTF-8 path | Active. |
+| 27 | `FILE_START_REQUEST` | D -> H | Legacy plaintext path | Disabled; current host rejects it. |
+| 28 | `FILE_SET_DEFAULT_PATH` | D -> H | Legacy plaintext path | Disabled; current host rejects it. |
 | 29 | `FS_LIST_REQUEST` | D -> H | Versioned filesystem request | Active. |
 | 30 | `FS_LIST_PAGE` | H -> D | Versioned filesystem page | Active. |
 | 31 | `FS_LIST_CANCEL` | D -> H | `request_id: u64` | Active. |
+| 32 | `TRANSFER_SESSION_TO_HOST` | D -> H | Versioned pairing or Noise transport envelope | Active for file transfer only. |
+| 33 | `TRANSFER_SESSION_TO_BROWSER` | H -> D | Versioned pairing or Noise transport envelope | Active for file transfer only. |
 
 Tags are globally allocated. Do not reuse a reserved or legacy value for a different payload. Search all three components and tests before changing this table.
 
@@ -151,9 +153,132 @@ username_utf8 + 0x00 + password_utf8
 
 NUL is forbidden in both fields. Firmware does not persist the returned credential and logs only the username and password length.
 
-`FILE_START_REQUEST` and `FILE_SET_DEFAULT_PATH` carry raw UTF-8 paths. Firmware accepts up to 512 bytes from WebSocket commands. The host accepts up to 1024 bytes, trims surrounding whitespace, and rejects an empty explicit path. An empty start request uses the first `--send-file` path configured on the host agent.
+File-transfer paths are not simple control payloads in v2. They are Noise transport plaintexts carried inside tags 32/33. Legacy tags 27/28 and plaintext transfer RPC commands are rejected. Filesystem browsing remains a separate plaintext protocol and is outside this encryption scope.
 
-## File-transfer protocol v1 over TLV
+## Secure file-transfer protocol v2
+
+### Security boundary and pairing
+
+Only file-transfer initiation, the selected transfer path, file name, file bytes, exact byte count, and final SHA-256 are protected. Filesystem listing, shell commands, credentials, general diagnostics, ACK/result flow control, packet lengths, timing, session/transfer identifiers, chunk size, and chunk count are not covered by this version.
+
+The browser and host agent establish an in-memory session using `Noise_NNpsk0_25519_ChaChaPoly_SHA256`. The host generates a 128-bit, single-use hexadecimal pairing code and prints it directly to its controlling terminal. The user enters that code in the frontend. Both sides derive the Noise PSK as:
+
+```text
+SHA-256("pico-transfer-pairing-v1" || session_id || decoded_pairing_code)
+```
+
+The browser generates the random 256-bit session master after the authenticated Noise handshake and sends it to the host inside Noise transport encryption. The Pico is an opaque relay and never receives the pairing code, session master, or a file key. Session secrets are not flashed or persisted. A WebSocket disconnect clears the browser state; starting a new pairing invalidates the host's prior session.
+
+The session envelope used inside USB tags 32/33 and WebSocket binary kind 3 is:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `session_protocol_version` | `u16` | Must be 1 |
+| `kind` | `u8` | 1 pair request, 2 pair ready, 3 Noise handshake, 4 Noise transport, 5 error/reserved |
+| `session_id` | `bytes[16]` | Pair request uses all zeroes; host chooses a random value in pair ready |
+| `body_len` | `u16` | Exact remaining length |
+| `body` | `bytes[body_len]` | Empty, Noise handshake bytes, or Noise ciphertext |
+
+Authenticated browser-to-host control plaintexts inside Noise transport are:
+
+| Kind | Remaining plaintext |
+| ---: | --- |
+| 1 | Non-empty UTF-8 start path, maximum 512 bytes |
+| 2 | Non-empty UTF-8 default path, maximum 512 bytes |
+| 3 | `transfer_id: u64` followed by `sha256: bytes[32]` browser receipt |
+| 4 | Empty body; start the host's configured/default path inside the paired session |
+
+### Per-file encryption
+
+Each transfer uses a fresh random 32-byte salt and one ChaCha20-Poly1305 key. The key is isolated from other files with HKDF-SHA-256:
+
+```text
+salt = file_salt
+IKM  = session_master
+info = "pico-transfer-v2/file-key" || session_id || transfer_id_le
+```
+
+Manifest, chunk, and close records share the per-file key but have domain-separated nonces. The 12-byte nonce is zero-filled, with the record type in byte 0 and the chunk/record index encoded big-endian in bytes 8–11. The associated data is:
+
+```text
+transfer_version_le || session_id || transfer_id_le || file_salt ||
+chunk_size_le || chunk_count_le || record_type || record_index_le
+```
+
+Record types are 1 manifest, 2 chunk, and 3 close. Manifest and close use index zero. A retransmission must reuse the exact cached ciphertext; it must never re-encrypt different or identical plaintext under the same record nonce.
+
+### Limits
+
+| Item | Limit/value |
+| --- | ---: |
+| TLV payload | 2048 bytes |
+| Chunk public header | 30 bytes |
+| AEAD tag | 16 bytes |
+| Maximum plaintext chunk | 2002 bytes |
+| Encrypted file name | 96 UTF-8 bytes |
+| Encrypted start/default path | 512 UTF-8 bytes |
+| Concurrent firmware relay states | 4 |
+| Firmware WebSocket event queue | 16 |
+| Initial/advertised sender window | 8 chunks |
+| Maximum accepted window | 64 chunks |
+| ACK timeout / retry limit | 5 seconds / 5 retries |
+| Browser-receipt timeout | 300 seconds |
+
+### `FILE_OPEN` — tag 20
+
+| Field | Type |
+| --- | --- |
+| `transfer_protocol_version` | `u16`, must be 2 |
+| `session_id` | `bytes[16]` |
+| `transfer_id` | `u64` |
+| `file_salt` | `bytes[32]` |
+| `chunk_size` | `u16`, 1–2002 |
+| `chunk_count` | `u32` |
+| `ciphertext_len` | `u16` |
+| `ciphertext` | `bytes[ciphertext_len]`, authenticated manifest |
+
+The manifest plaintext is `format_version: u8 = 1`, `total_size: u64`, `file_name_len: u16`, then `file_name: utf8[file_name_len]`.
+
+### `FILE_CHUNK` — tag 21
+
+| Field | Type |
+| --- | --- |
+| `session_id` | `bytes[16]` |
+| `transfer_id` | `u64` |
+| `chunk_index` | `u32` |
+| `ciphertext_len` | `u16`, 16–2018 |
+| `ciphertext` | `bytes[ciphertext_len]` |
+
+The frontend authenticates/decrypts each chunk, enforces strict ordering and the authenticated manifest's exact lengths, updates a rolling SHA-256, and queues the plaintext for IndexedDB staging. Firmware can validate only public structure, session/order, and ciphertext-derived plaintext length; it cannot authenticate or inspect the data.
+
+### `FILE_CLOSE` — tag 23
+
+| Field | Type |
+| --- | --- |
+| `session_id` | `bytes[16]` |
+| `transfer_id` | `u64` |
+| `ciphertext_len` | `u16` |
+| `ciphertext` | `bytes[ciphertext_len]`, authenticated close |
+
+The close plaintext is `total_size: u64`, `chunk_count: u32`, and `sha256: bytes[32]`. The browser compares all three values with its authenticated manifest and streamed plaintext. Only then does it return the Noise-encrypted receipt. The host reports success only after both the firmware relay result and a matching authenticated browser receipt.
+
+### ACK, result, abort, and backpressure
+
+Tags 22, 24, and 25 retain their v1 binary layouts below. They are unencrypted flow-control/diagnostic messages and are never treated as proof of end-to-end authenticity. The host validates ACK monotonicity, sent-index bounds, and offset consistency. Firmware waits for WebSocket queue capacity before ACKing a new chunk, preserving the existing USB-to-browser backpressure chain. Duplicate chunks are ACKed without a second relay.
+
+The host opens one regular-file handle and reads the file once in at most 2002-byte plaintext buffers. It hashes and encrypts each buffer immediately, zeroizes best-effort plaintext buffers, and retains only bounded ciphertext for retries. It does not pre-read, buffer the whole file, or automatically compress it. Compression is deliberately omitted because many inputs are already compressed, content-dependent sizes can leak information, and streaming encryption meets the memory/privacy goal without a second transformation.
+
+Implementation:
+
+- Shared formats and bounds: `crates/transfer-protocol`
+- Noise, HKDF, AEAD, and record codecs: `crates/transfer-crypto`
+- Host pairing/control and streaming sender: `apps/host-agent/src/secure_transfer.rs`, `file_transfer.rs`
+- Opaque firmware relay/backpressure: `firmware/src/usb/ctrl/relay.rs`
+- Frontend session/decryption/receipt and state: `apps/frontend/src/transfer/secure.rs`, `store.rs`
+
+## Legacy file-transfer protocol v1 (disabled)
+
+The following layouts are retained only for tag-history and migration reference. Current firmware does not produce them, the frontend does not accept plaintext transfer manifests/chunks, and the current host rejects plaintext start/default requests.
 
 ### Limits and integrity
 
@@ -284,14 +409,14 @@ stateDiagram-v2
 
 In `relay` mode, firmware awaits space in the WebSocket event channel before acknowledging an accepted USB chunk. This propagates backpressure through the firmware queue and host ACK window. The ACK means the chunk was accepted and queued for WebSocket transmission; it does not mean browser IndexedDB persistence or final SHA-256 verification has completed.
 
-In `simulation` mode, firmware performs USB validation, ACK, result, and progress accounting but intentionally does not forward chunk bytes to the browser.
+In the legacy `simulation` mode, firmware performed USB validation, ACK, result, and progress accounting while dropping bytes. Secure v2 requires a browser receipt and disables this mode.
 
-Implementation:
+Historical v1 component locations (the files now implement v2):
 
 - Host protocol, hashing, window, retry, and timeout logic: `apps/host-agent/src/file_transfer.rs`
 - Host request dispatch and feedback routing: `apps/host-agent/src/dispatch.rs`
 - Firmware state machine and ACK/result/abort encoding: `firmware/src/usb/ctrl/relay.rs`
-- Firmware parsing: `firmware/src/usb/ctrl/relay/protocol.rs`
+- Firmware parsing/relay: `firmware/src/usb/ctrl/relay.rs`
 - Firmware WebSocket event conversion: `firmware/src/usb/ctrl/relay/events.rs`
 - Frontend event model and binary decoder: `apps/frontend/src/transfer/protocol.rs`
 - Frontend validation/state/hash: `apps/frontend/src/transfer/store.rs`
@@ -405,7 +530,7 @@ Implementation:
 - Maximum queued text event: 768 bytes.
 - Maximum queued binary event: 2049 bytes.
 - Shared firmware event queue depth: 16.
-- Browser-to-firmware binary commands are not currently defined; incoming binary messages are ignored.
+- Browser-to-firmware binary kind 3 carries bounded secure file-session envelopes; other binary command kinds are ignored.
 - Standard WebSocket ping receives pong.
 
 Firmware tracks an active-client count, but transfer events use one shared queue rather than per-client broadcast queues. Multiple simultaneous clients therefore must not be assumed to receive identical event streams. The supported operational model is one active UI session during transfer.
@@ -428,7 +553,7 @@ Schema:
   },
   "protocols": {
     "websocket": 1,
-    "transfer": 1,
+    "transfer": 2,
     "filesystem": 1
   },
   "host_agent": {
@@ -457,7 +582,7 @@ Schema:
 
 `host_agent.version` and `hostname` are `null` when unknown. `privileged_operations` is empty while the host agent is absent. `firmware.build` defaults to `<package-version>-<Cargo-profile>` and can be overridden at build time with `PICO_FIRMWARE_BUILD`.
 
-`privileged_operations` describes capabilities the connected host agent can service; it does not by itself create a browser RPC command. In the current UI, filesystem browsing and file-transfer initiation are exposed through WebSocket commands, while execute and credential requests originate from the on-device daemon page.
+`privileged_operations` describes capabilities the connected host agent can service; it does not by itself create a browser RPC command. Filesystem browsing uses WebSocket RPC. File-transfer initiation uses the paired binary session so its path is not exposed as RPC text. Execute and credential requests originate from the on-device daemon page.
 
 The current frontend:
 
@@ -511,25 +636,23 @@ Parameters after a command use `key=value&key=value`; string values are percent-
 | `USB_REGISTER` | Optional `assistant=1`, `os=mac|windows` | `{"ok":true}` | Starts/enables composite USB if needed |
 | `USB_UNREGISTER` | None | `{"ok":true}` | Detaches USB after 150 ms |
 | `SCRIPT_RUN_HEX` | Hex-encoded `KBD1` bytes | `{"ok":true,"queued":true}` | Maximum decoded bytecode 4096; returns `busy` if HID queue is full |
-| `TRANSFER_START` | `path` | `{"ok":true,"queued":true}` | Queues tag 27 |
-| `TRANSFER_DEFAULT_SET` | `path` | `{"ok":true,"updated":true}` | Queues tag 28 |
-| `TRANSFER_START_DEFAULT` | None | `{"ok":true,"queued":true}` | Queues empty tag 27 |
+| `TRANSFER_START` | `path` | Error | Disabled plaintext legacy command; use paired binary control kind 1 |
+| `TRANSFER_DEFAULT_SET` | `path` | Error | Disabled plaintext legacy command; use paired binary control kind 2 |
+| `TRANSFER_START_DEFAULT` | None | Error | Disabled because a browser-authenticated session is required |
 | `FS_LIST` | `request_id`, `cursor`, `limit`, `flags`, `path` | `{"ok":true,"queued":true}` | Result arrives asynchronously as binary kind 2 |
 | `FS_LIST_CANCEL` | `request_id` | `{"ok":true,"queued":true}` | Best effort |
 | `TRANSFER_MODE_GET` | None | `{"mode":"relay|simulation","ws_clients":n}` | Read-only mode snapshot |
-| `TRANSFER_MODE_SET` | `mode=relay|simulation` | `{"ok":true,"mode":"..."}` | Changes firmware relay behavior |
+| `TRANSFER_MODE_SET` | `mode=relay|simulation` | Relay succeeds; simulation errors | Authenticated v2 always requires browser relay/receipt |
 
 Command errors are JSON objects with an `error` string, including `busy`, validation errors, persistence errors, and `unknown command`. The frontend maps them to a typed remote error. Malformed response JSON is a protocol error; socket/send failures, request timeouts, and connection cancellation are separate error categories.
 
 ### Asynchronous transfer events
 
-Text messages use these `event_type` values, all with `version: 1`:
+Text messages use these `event_type` values, all with `version: 2`. They contain relay progress/diagnostics only; authenticated manifest and file bytes are binary ciphertext:
 
 | Event | Fields beyond `event_type` and `version` |
 | --- | --- |
-| `transfer/open` | `transfer_id`, `file_name`, `total_size`, `chunk_size`, `chunk_count`, lowercase hex `sha256` |
 | `transfer/progress` | `transfer_id`, `received_size`, `total_size`, `finished_chunks`, `chunk_count` |
-| `transfer/chunk_status` | `transfer_id`, `chunk_index`, `status`, `attempts`, optional `error` |
 | `transfer/finished` | `transfer_id` |
 | `transfer/failed` | `transfer_id`, `reason` |
 | `transfer/aborted` | `transfer_id`, `reason_code`, `detail` |
@@ -542,21 +665,14 @@ The first byte selects the binary kind:
 
 | Kind | Meaning | Remaining bytes |
 | ---: | --- | --- |
-| 1 | File-transfer chunk | Transfer envelope below |
+| 1 | Legacy plaintext transfer chunk | Rejected/not produced by v2 |
 | 2 | Filesystem page | Exact `FS_LIST_PAGE` TLV payload |
+| 3 | Secure session/control | Exact session envelope used by USB tags 32/33 |
+| 4 | Encrypted file open | Exact v2 `FILE_OPEN` payload |
+| 5 | Encrypted file chunk | Exact v2 `FILE_CHUNK` payload |
+| 6 | Encrypted file close | Exact v2 `FILE_CLOSE` payload |
 
-Kind 1 envelope after removing the kind byte:
-
-| Field | Type |
-| --- | --- |
-| `transfer_id` | `u64` |
-| `chunk_index` | `u32` |
-| `offset` | `u64` |
-| `payload_len` | `u16` |
-| `chunk_crc32` | `u32` |
-| `payload` | `bytes[payload_len]` |
-
-Unlike the TLV `FILE_CHUNK`, the WebSocket envelope places CRC32 before payload. Its fixed inner header is 26 bytes; including the kind byte, a maximum-size binary WebSocket message is 2049 bytes.
+Kinds 4–6 are host-to-browser only. Firmware prepends the kind byte without decrypting or re-encoding the TLV payload. The maximum binary WebSocket message remains 2049 bytes including the kind.
 
 ## Compatibility and change rules
 

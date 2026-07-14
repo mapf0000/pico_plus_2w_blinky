@@ -7,15 +7,15 @@ use portable_atomic::{AtomicUsize, Ordering};
 
 use crate::host::{self, HostOs};
 use crate::http::util::{escape_json_str, percent_decode_str};
-use crate::usb::ctrl::{CTRL_CHAN, CtrlCommand, MAX_TRANSFER_PATH_LEN};
+use crate::usb::ctrl::{CTRL_CHAN, CtrlCommand, MAX_SECURE_TRANSFER_FRAME, MAX_TRANSFER_PATH_LEN};
 use crate::usb::hid::{HID_CHAN, HidCommand, MAX_BYTECODE, USB_READY};
 use crate::usb::usb_supervisor;
 use heapless::{String, Vec};
 
 pub const TRANSFER_TEXT_MAX: usize = 768;
 pub const TRANSFER_BINARY_MAX: usize = 2049;
-pub const WS_BINARY_KIND_TRANSFER: u8 = 1;
 pub const WS_BINARY_KIND_FILESYSTEM: u8 = 2;
+pub const WS_BINARY_KIND_SESSION: u8 = transfer_protocol::WS_BINARY_KIND_SESSION;
 const WS_COMMAND_MAX: usize = 2048;
 const _: () = assert!(TRANSFER_TEXT_MAX <= TRANSFER_BINARY_MAX);
 
@@ -41,15 +41,6 @@ pub fn has_active_client() -> bool {
 pub enum TransferQueueError {
     NoClient,
     Full,
-}
-
-impl TransferQueueError {
-    pub fn detail(self) -> &'static str {
-        match self {
-            Self::NoClient => "browser is not connected",
-            Self::Full => "browser transfer queue is full",
-        }
-    }
 }
 
 pub fn queue_transfer_text(event: String<TRANSFER_TEXT_MAX>) -> Result<(), TransferQueueError> {
@@ -207,8 +198,18 @@ impl ws::WebSocketCallback for HelloWs {
                             break;
                         }
                     }
-                    Ok(Either::First(Ok(ws::Message::Binary(_b)))) => {
-                        // No browser -> firmware binary command protocol currently.
+                    Ok(Either::First(Ok(ws::Message::Binary(binary)))) => {
+                        let Some((&kind, body)) = binary.split_first() else {
+                            continue;
+                        };
+                        if kind != WS_BINARY_KIND_SESSION || body.len() > MAX_SECURE_TRANSFER_FRAME
+                        {
+                            continue;
+                        }
+                        let mut payload: Vec<u8, MAX_SECURE_TRANSFER_FRAME> = Vec::new();
+                        if payload.extend_from_slice(body).is_ok() {
+                            let _ = CTRL_CHAN.try_send(CtrlCommand::SecureTransfer { payload });
+                        }
                     }
                     Ok(Either::First(Ok(ws::Message::Ping(p)))) => {
                         if tx.send_pong(p).await.is_err() {
@@ -393,56 +394,9 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
                 response
             }
         }
-    } else if let Some(rest) = cmd.strip_prefix("TRANSFER_START ") {
-        let mut path = None;
-        for pair in rest.split('&') {
-            if let Some((k, v)) = pair.split_once('=')
-                && k == "path"
-            {
-                path = percent_decode_str::<{ MAX_TRANSFER_PATH_LEN }>(v);
-            }
-        }
-
-        let Some(path) = path else {
-            let _ = response.push_str("{\"error\":\"missing path\"}");
-            return response;
-        };
-
-        match CTRL_CHAN.try_send(CtrlCommand::StartTransfer { path }) {
-            Ok(()) => {
-                let _ = response.push_str("{\"ok\":true,\"queued\":true}");
-                response
-            }
-            Err(_) => {
-                let _ = response.push_str("{\"error\":\"busy\"}");
-                response
-            }
-        }
-    } else if let Some(rest) = cmd.strip_prefix("TRANSFER_DEFAULT_SET ") {
-        let mut path = None;
-        for pair in rest.split('&') {
-            if let Some((k, v)) = pair.split_once('=')
-                && k == "path"
-            {
-                path = percent_decode_str::<{ MAX_TRANSFER_PATH_LEN }>(v);
-            }
-        }
-
-        let Some(path) = path else {
-            let _ = response.push_str("{\"error\":\"missing path\"}");
-            return response;
-        };
-
-        match CTRL_CHAN.try_send(CtrlCommand::SetTransferDefault { path }) {
-            Ok(()) => {
-                let _ = response.push_str("{\"ok\":true,\"updated\":true}");
-                response
-            }
-            Err(_) => {
-                let _ = response.push_str("{\"error\":\"busy\"}");
-                response
-            }
-        }
+    } else if cmd.starts_with("TRANSFER_START ") || cmd.starts_with("TRANSFER_DEFAULT_SET ") {
+        let _ = response.push_str("{\"error\":\"secure binary transfer session required\"}");
+        response
     } else if let Some(rest) = cmd.strip_prefix("FS_LIST ") {
         let mut request_id = None;
         let mut cursor = None;
@@ -507,16 +461,8 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
             }
         }
     } else if cmd.eq_ignore_ascii_case("TRANSFER_START_DEFAULT") {
-        match CTRL_CHAN.try_send(CtrlCommand::StartTransferDefault) {
-            Ok(()) => {
-                let _ = response.push_str("{\"ok\":true,\"queued\":true}");
-                response
-            }
-            Err(_) => {
-                let _ = response.push_str("{\"error\":\"busy\"}");
-                response
-            }
-        }
+        let _ = response.push_str("{\"error\":\"secure browser session required\"}");
+        response
     } else if cmd.eq_ignore_ascii_case("TRANSFER_MODE_GET") {
         let mode = match crate::usb::ctrl::transfer_relay_mode() {
             crate::usb::ctrl::TransferRelayMode::RelayToBrowser => "relay",
@@ -551,10 +497,9 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
                 response
             }
             Some("simulation") => {
-                crate::usb::ctrl::set_transfer_relay_mode(
-                    crate::usb::ctrl::TransferRelayMode::SimulationDrop,
+                let _ = response.push_str(
+                    "{\"error\":\"simulation is unavailable for authenticated transfers\"}",
                 );
-                let _ = response.push_str("{\"ok\":true,\"mode\":\"simulation\"}");
                 response
             }
             _ => {

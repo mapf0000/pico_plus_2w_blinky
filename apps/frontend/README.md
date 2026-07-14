@@ -36,3 +36,16 @@ control disabled.
 
 Set `PICO_FIRMWARE_BUILD` during a firmware build to override the build
 identifier advertised by HELLO. It is normalized to a bounded ASCII token.
+
+## Secure file transfer
+
+File transfer requires an ephemeral, paired host session. Request a code in the
+Transfers section, copy the single-use 32-character code from the host-agent's
+controlling terminal, and complete pairing before selecting a file. The browser
+generates the session master, decrypts authenticated per-file records, verifies
+the streamed SHA-256, and sends an encrypted receipt to the host.
+
+The session is memory-only and is cleared on WebSocket disconnect or page
+refresh. Decrypted chunks are staged in IndexedDB for download; filesystem
+browsing remains outside this encryption scope. See
+[`docs/SECURE_FILE_TRANSFER.md`](../../docs/SECURE_FILE_TRANSFER.md).

@@ -8,4 +8,6 @@ pub(crate) use diagnostics::LogCard;
 pub(crate) use feedback::ToastBar;
 pub(crate) use overview::{IdentityCard, StatusCard, UsbCard};
 pub(crate) use scripts::ScriptingCard;
-pub(crate) use transfers::{DownloadManagerCard, FileBrowserCard, TransferStartCard};
+pub(crate) use transfers::{
+    DownloadManagerCard, FileBrowserCard, SecurePairingCard, TransferStartCard,
+};

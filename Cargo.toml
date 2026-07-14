@@ -8,6 +8,8 @@ members = [
   "crates/dsl/dsl-core",
   "crates/dsl/dsl-wasm",
   "crates/dsl/firmware-exec",
+  "crates/transfer-crypto",
+  "crates/transfer-protocol",
   "firmware",
 ]
 default-members = ["firmware"]

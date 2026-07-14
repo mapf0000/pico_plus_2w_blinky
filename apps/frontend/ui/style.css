@@ -1152,6 +1152,16 @@ textarea#scriptDsl {
 .m-0 { margin: 0; }
 .hint { color: var(--muted); font-size: 11px; }
 
+.secure-pairing-card .connection-pill {
+  white-space: nowrap;
+}
+
+.secure-pairing-card input {
+  min-width: 280px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  letter-spacing: .04em;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     scroll-behavior: auto !important;

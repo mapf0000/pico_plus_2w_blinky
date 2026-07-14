@@ -1,6 +1,65 @@
 use super::super::*;
 
 #[derive(Properties, PartialEq, Clone)]
+pub(crate) struct SecurePairingProps {
+    pub connected: bool,
+    pub state: transfer::SecureSessionView,
+    pub code: String,
+    pub on_request: Callback<()>,
+    pub on_code: Callback<String>,
+    pub on_pair: Callback<()>,
+}
+
+#[function_component(SecurePairingCard)]
+pub(crate) fn secure_pairing_card(props: &SecurePairingProps) -> Html {
+    let on_request = {
+        let callback = props.on_request.clone();
+        Callback::from(move |_| callback.emit(()))
+    };
+    let on_code = {
+        let callback = props.on_code.clone();
+        Callback::from(move |event: InputEvent| {
+            callback.emit(
+                event
+                    .target_unchecked_into::<web_sys::HtmlInputElement>()
+                    .value(),
+            );
+        })
+    };
+    let on_pair = {
+        let callback = props.on_pair.clone();
+        Callback::from(move |_| callback.emit(()))
+    };
+    let waiting_for_code = props.state == transfer::SecureSessionView::WaitingForCode;
+
+    html! {
+        <section class="card secure-pairing-card">
+            <div class="card-header">
+                <div><span class="eyebrow">{"File-transfer security"}</span><h2>{"Pair with the host agent"}</h2></div>
+                <span class={classes!("connection-pill", props.state.established().then_some("is-good"))}>{props.state.label()}</span>
+            </div>
+            <p class="hint">{"Request a single-use code, read it from the host-agent terminal, then enter it here. The code authenticates an ephemeral encrypted session; it is not stored on the device."}</p>
+            <div class="transfer-path-row">
+                <button class="btn-secondary" disabled={!props.connected} onclick={on_request}>{"Request new code"}</button>
+                <input
+                    type="text"
+                    inputmode="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    maxlength="32"
+                    aria-label="Single-use host pairing code"
+                    placeholder="32-character code from host agent"
+                    value={props.code.clone()}
+                    disabled={!waiting_for_code}
+                    oninput={on_code}
+                />
+                <button class="btn-primary" disabled={!waiting_for_code || props.code.trim().len() != 32} onclick={on_pair}>{"Pair securely"}</button>
+            </div>
+        </section>
+    }
+}
+
+#[derive(Properties, PartialEq, Clone)]
 pub(crate) struct FileBrowserProps {
     pub view: filesystem::BrowserView,
     pub connected: bool,
@@ -236,6 +295,7 @@ pub(crate) struct TransferStartProps {
     pub setting_default: bool,
     pub on_change: Callback<String>,
     pub on_start: Callback<()>,
+    pub on_start_default: Callback<()>,
     pub on_set_default: Callback<()>,
 }
 
@@ -262,6 +322,11 @@ pub(crate) fn transfer_start_card(props: &TransferStartProps) -> Html {
         Callback::from(move |_| cb.emit(()))
     };
 
+    let on_start_default = {
+        let cb = props.on_start_default.clone();
+        Callback::from(move |_| cb.emit(()))
+    };
+
     html! {
         <section class="card transfer-start-card">
           <div class="card-header"><div><span class="eyebrow">{"Quick transfer"}</span><h2>{"Queue a host path"}</h2></div></div>
@@ -275,8 +340,9 @@ pub(crate) fn transfer_start_card(props: &TransferStartProps) -> Html {
             />
             <button class="btn-primary" disabled={base_disabled || props.starting} onclick={on_start}>{if props.starting { "Queueing…" } else { "Queue transfer" }}</button>
             <button class="btn-secondary" disabled={base_disabled || props.setting_default} onclick={on_set_default}>{if props.setting_default { "Saving…" } else { "Set as default" }}</button>
+            <button class="btn-secondary" disabled={!props.connected || props.starting} onclick={on_start_default}>{"Queue default"}</button>
           </div>
-          <div class="card-footer-note">{if props.connected { "Paths are resolved on the host-agent machine." } else { "Connect to the device before queueing a transfer." }}</div>
+          <div class="card-footer-note">{if props.connected { "The path and every file record are authenticated and encrypted before leaving the host-agent process." } else { "Establish an encrypted host session before queueing a transfer." }}</div>
         </section>
     }
 }

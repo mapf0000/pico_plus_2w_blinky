@@ -276,7 +276,7 @@ The presence flag is a freshness signal, not authentication. It says that a proc
 
 ## File-transfer path and backpressure
 
-The transfer path sends a host file to a browser download through the Pico; firmware does not store the whole file.
+The transfer path sends a host file to a browser download through the Pico. The paired browser and host agent are the cryptographic endpoints; firmware is an opaque ciphertext relay and never stores the whole file or receives a key. See [SECURE_FILE_TRANSFER.md](SECURE_FILE_TRANSFER.md) for the threat model and lifecycle.
 
 ```mermaid
 sequenceDiagram
@@ -286,26 +286,33 @@ sequenceDiagram
     participant H as Host transfer worker
     participant DB as Browser IndexedDB
 
-    B->>W: RPC TRANSFER_START path=...
-    W->>C: CtrlCommand::StartTransfer (try_send)
-    C->>H: TLV FILE_START_REQUEST
-    H->>H: Stat file + compute SHA-256
-    H->>C: FILE_OPEN
-    C->>W: transfer/open event (await queue)
+    B->>W: Binary kind 3: pair request
+    W->>C: SecureTransfer envelope
+    C->>H: TLV tag 32
+    H-->>B: Pairing code via host terminal/user
+    B->>H: Noise handshake via firmware relay
+    B->>H: Browser-generated session master in Noise
+    B->>H: Noise-encrypted start path
+    H->>H: Open regular file once
+    H->>C: Encrypted FILE_OPEN manifest
+    C->>W: Binary kind 4, unchanged (await queue)
     C-->>H: FILE_ACK, credit=8
     loop Each in-order chunk
-        H->>C: FILE_CHUNK + CRC32
-        C->>C: Validate ID/index/offset/size/CRC
+        H->>H: Read <=2002 bytes, hash, AEAD encrypt, zeroize
+        H->>C: Encrypted FILE_CHUNK
+        C->>C: Validate public ID/index/length only
         C->>W: Await and enqueue binary event
         C-->>H: FILE_ACK after queue admission
-        W-->>B: Binary kind 1 when socket writer drains queue
-        B->>DB: Queue chunk persistence
+        W-->>B: Binary kind 5 when socket writer drains queue
+        B->>B: AEAD decrypt + order/length/hash checks
+        B->>DB: Queue plaintext chunk persistence
     end
-    H->>C: FILE_CLOSE
+    H->>C: Encrypted FILE_CLOSE with totals/SHA-256
+    W-->>B: Binary kind 6
+    B->>B: Authenticate close and final SHA-256
+    B->>H: Noise-encrypted transfer receipt
     C-->>H: FILE_RESULT
     C->>W: transfer/finished
-    W->>B: Terminal event
-    B->>B: Check count/size/rolling SHA-256
     B->>DB: Flush writes, save file, clear chunks
 ```
 
@@ -315,12 +322,13 @@ Backpressure boundaries:
 - Firmware accepts chunks strictly in order.
 - In relay mode, firmware awaits capacity in the 16-event WebSocket channel before sending the USB ACK.
 - If the last browser disconnects, firmware drains the queue to wake blocked producers; the producer observes no active client and aborts the transfer.
-- WebSocket transmission is downstream of queue admission. USB ACK does not wait for browser IndexedDB persistence or final hash verification.
+- WebSocket transmission is downstream of queue admission. USB ACK does not wait for browser decryption, IndexedDB persistence, or final hash verification.
 - Browser persistence is batched in JavaScript. Finalization explicitly waits for the persistence queue before saving.
+- Host completion additionally requires the paired browser's Noise-encrypted receipt with a matching SHA-256.
 
-This distinction matters when changing reliability semantics. End-to-end durable acknowledgement would require a browser-to-firmware-to-host acknowledgement that does not exist today.
+The receipt proves authenticated browser processing through the final hash, but not durable filesystem storage or successful user handling of the save dialog.
 
-Simulation mode preserves USB validation, progress, ACK, and result behavior while dropping chunk bytes before WebSocket relay. It is useful for exercising the USB path without downloading data.
+Legacy simulation/drop mode is disabled for secure v2 because it cannot produce an authenticated browser receipt.
 
 ## Filesystem request path
 
@@ -402,7 +410,7 @@ When adding a feature, keep ownership at one layer and pass bounded messages acr
 - Unknown USB tags and many malformed frames are logged/ignored rather than panicking.
 - Host serial and dispatch errors return to the reconnect loop.
 - Browser requests have typed send, timeout, cancellation, protocol, and remote errors.
-- Transfer chunks are checked independently with CRC32; final content is checked with SHA-256 in the browser.
+- Secure transfer records use ChaCha20-Poly1305 authentication; the browser also enforces ordering/size and checks the final streamed SHA-256 before issuing its encrypted receipt.
 - Filesystem errors are encoded as status pages rather than terminating the host agent.
 - Display initialization is best effort; buttons and LED continue if the ST7789 fails.
 - PSRAM detection is best effort; HTTP has SRAM fallback buffers.

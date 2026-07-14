@@ -35,7 +35,10 @@ struct Args {
     probe_timeout_ms: u64,
     #[arg(long)]
     debug_log: Option<PathBuf>,
-    #[arg(long = "send-file")]
+    #[arg(
+        long = "send-file",
+        help = "Set a default file candidate; a paired browser must still request the transfer"
+    )]
     send_file: Vec<PathBuf>,
     #[arg(long)]
     raw: bool,

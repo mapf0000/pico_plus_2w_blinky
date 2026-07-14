@@ -45,6 +45,8 @@ const TAG_FILE_SET_DEFAULT_PATH: u8 = 28;
 const TAG_FS_LIST_REQUEST: u8 = 29;
 const TAG_FS_LIST_PAGE: u8 = 30;
 const TAG_FS_LIST_CANCEL: u8 = 31;
+const TAG_TRANSFER_SESSION_TO_HOST: u8 = 32;
+const TAG_TRANSFER_SESSION_TO_BROWSER: u8 = 33;
 
 const CACHE_DIR_NAME: &str = "host-agent";
 const CACHE_FILE_NAME: &str = "port";
@@ -358,6 +360,8 @@ fn is_known_tag(tag: u8) -> bool {
             | TAG_FS_LIST_REQUEST
             | TAG_FS_LIST_PAGE
             | TAG_FS_LIST_CANCEL
+            | TAG_TRANSFER_SESSION_TO_HOST
+            | TAG_TRANSFER_SESSION_TO_BROWSER
     )
 }
 

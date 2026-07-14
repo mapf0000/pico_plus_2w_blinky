@@ -1,7 +1,6 @@
 use core::fmt::Write as _;
 use core::sync::atomic::Ordering;
 
-use embassy_time::{Duration, Instant};
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::pixelcolor::Rgb565;
@@ -12,8 +11,7 @@ use heapless::String;
 
 use crate::http::routes::ws;
 use crate::usb::ctrl::{
-    self, CTRL_CHAN, CTRL_READY, CtrlCommand, TransferRelayMode, TransferViewSnapshot,
-    TransferViewState,
+    self, CTRL_READY, TransferRelayMode, TransferViewSnapshot, TransferViewState,
 };
 
 use super::DisplayPalette;
@@ -23,7 +21,6 @@ use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData}
 const ACTION_START_TRANSFER: usize = 0;
 const ACTION_TOGGLE_MODE: usize = 1;
 const ACTION_COUNT: usize = 2;
-const START_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct TransferPageState {
     pub selected: usize,
@@ -39,10 +36,6 @@ pub struct TransferPageState {
     prev_id_line: String<64>,
     prev_bytes_line: String<64>,
     prev_chunks_line: String<64>,
-    pending_start_until: Option<Instant>,
-    pending_start_mode: TransferRelayMode,
-    pending_start_transfer_id: u64,
-    pending_start_state: TransferViewState,
 }
 
 impl TransferPageState {
@@ -61,10 +54,6 @@ impl TransferPageState {
             prev_id_line: String::new(),
             prev_bytes_line: String::new(),
             prev_chunks_line: String::new(),
-            pending_start_until: None,
-            pending_start_mode: TransferRelayMode::RelayToBrowser,
-            pending_start_transfer_id: 0,
-            pending_start_state: TransferViewState::Idle,
         }
     }
 
@@ -80,7 +69,6 @@ impl TransferPageState {
         self.prev_id_line.clear();
         self.prev_bytes_line.clear();
         self.prev_chunks_line.clear();
-        self.pending_start_until = None;
     }
 
     fn select_prev(&mut self) -> bool {
@@ -105,116 +93,15 @@ impl TransferPageState {
         self.status_bg = bg;
     }
 
-    fn clear_pending_start(&mut self) {
-        self.pending_start_until = None;
-    }
-
-    fn arm_pending_start(&mut self, snapshot: TransferViewSnapshot, mode: TransferRelayMode) {
-        self.pending_start_until = Some(Instant::now() + START_REQUEST_TIMEOUT);
-        self.pending_start_mode = mode;
-        self.pending_start_transfer_id = snapshot.transfer_id;
-        self.pending_start_state = snapshot.state;
-    }
-
-    fn pending_start_observed(&self, snapshot: TransferViewSnapshot) -> bool {
-        snapshot.transfer_id != self.pending_start_transfer_id
-            || snapshot.state != self.pending_start_state
-    }
-
-    fn update_pending_start(
-        &mut self,
-        palette: &DisplayPalette,
-        snapshot: TransferViewSnapshot,
-        ws_connected: bool,
-    ) -> bool {
-        let Some(deadline) = self.pending_start_until else {
-            return false;
-        };
-
-        if self.pending_start_observed(snapshot) {
-            self.clear_pending_start();
-            match snapshot.state {
-                TransferViewState::Open | TransferViewState::Progress => {
-                    self.set_status("Transfer active", palette.green);
-                    return true;
-                }
-                TransferViewState::Finished => {
-                    self.set_status("Transfer finished", palette.green);
-                    return true;
-                }
-                TransferViewState::Failed => {
-                    self.set_status("Transfer failed", palette.yellow);
-                    return true;
-                }
-                TransferViewState::Aborted => {
-                    self.set_status("Transfer aborted", palette.yellow);
-                    return true;
-                }
-                TransferViewState::Idle => return false,
-            }
-        }
-
-        if Instant::now() < deadline {
-            return false;
-        }
-
-        self.clear_pending_start();
-        match self.pending_start_mode {
-            TransferRelayMode::RelayToBrowser if !ws_connected => {
-                self.set_status("Open browser page, then retry", palette.yellow);
-            }
-            _ => {
-                self.set_status("No host transfer; check --send-file", palette.yellow);
-            }
-        }
-        true
-    }
-
     fn run_selected(&mut self, palette: &DisplayPalette) -> bool {
         match self.selected {
             ACTION_START_TRANSFER => {
-                if !CTRL_READY.load(Ordering::Acquire) {
-                    self.clear_pending_start();
-                    self.set_status("Waiting for USB control", palette.yellow);
-                    return true;
-                }
-                let mode = ctrl::transfer_relay_mode();
-                let ws_connected = ws::has_active_client();
-                if matches!(mode, TransferRelayMode::RelayToBrowser) && !ws_connected {
-                    self.clear_pending_start();
-                    self.set_status("Open browser page, then retry", palette.yellow);
-                    return true;
-                }
-
-                let snapshot = ctrl::transfer_view_snapshot();
-                match CTRL_CHAN.try_send(CtrlCommand::StartTransferDefault) {
-                    Ok(()) => {
-                        self.arm_pending_start(snapshot, mode);
-                        self.set_status("Waiting for host transfer", palette.yellow);
-                        log::info!("transfer page: start requested (default path)");
-                    }
-                    Err(_) => {
-                        self.clear_pending_start();
-                        self.set_status("Transfer queue busy", palette.yellow);
-                        log::warn!("transfer page: start request dropped (queue busy)");
-                    }
-                }
+                self.set_status("Pair and start in Web UI", palette.yellow);
                 true
             }
             ACTION_TOGGLE_MODE => {
-                let mode = ctrl::toggle_transfer_relay_mode();
-                match mode {
-                    TransferRelayMode::RelayToBrowser => {
-                        self.clear_pending_start();
-                        self.set_status("Mode set: Relay to browser", palette.green);
-                        log::info!("transfer mode set to relay");
-                    }
-                    TransferRelayMode::SimulationDrop => {
-                        self.clear_pending_start();
-                        self.set_status("Mode set: Simulation drop", palette.yellow);
-                        log::info!("transfer mode set to simulation");
-                    }
-                }
+                ctrl::set_transfer_relay_mode(TransferRelayMode::RelayToBrowser);
+                self.set_status("Encrypted relay is required", palette.green);
                 true
             }
             _ => false,
@@ -243,10 +130,8 @@ impl Page for TransferPageState {
         dirty
     }
 
-    fn on_tick(&mut self, ctx: &PageContext) -> bool {
-        let snapshot = ctrl::transfer_view_snapshot();
-        let ws_connected = ws::has_active_client();
-        self.update_pending_start(ctx.palette, snapshot, ws_connected)
+    fn on_tick(&mut self, _ctx: &PageContext) -> bool {
+        false
     }
 
     fn render<D: DrawTarget<Color = Rgb565>>(
@@ -524,16 +409,13 @@ fn render<D: DrawTarget<Color = Rgb565>>(
         disp,
         &action_context,
         y_pos,
-        "Start Transfer (default)",
+        "Start in paired Web UI",
         start_selected,
     );
     y_pos += 16;
 
     let mode_selected = state.selected == ACTION_TOGGLE_MODE;
-    let mode_action_label = match snapshot.mode {
-        TransferRelayMode::RelayToBrowser => "Mode: Relay (tap to simulate)",
-        TransferRelayMode::SimulationDrop => "Mode: Sim Drop (tap to relay)",
-    };
+    let mode_action_label = "Mode: Encrypted relay only";
     draw_action_row(
         disp,
         &action_context,

@@ -15,8 +15,8 @@ mod ui;
 use app::App;
 pub(crate) use app::{BrowseRequest, ConfigState, ConnectionState, StatusState};
 use ui::{
-    DownloadManagerCard, FileBrowserCard, IdentityCard, LogCard, ScriptingCard, StatusCard,
-    ToastBar, TransferStartCard, UsbCard,
+    DownloadManagerCard, FileBrowserCard, IdentityCard, LogCard, ScriptingCard, SecurePairingCard,
+    StatusCard, ToastBar, TransferStartCard, UsbCard,
 };
 
 #[wasm_bindgen(start)]

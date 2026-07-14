@@ -1,15 +1,15 @@
 use super::model::TransferRecord;
-use super::protocol::{TransferControlEvent, decode_chunk_envelope};
+use super::protocol::TransferControlEvent;
+use super::secure::{SecureCloseData, SecureOpenData};
 use super::storage::{storage_queue_chunk_persist, storage_queue_clear_transfer_chunks};
 use super::{
     ChunkCounters, ChunkState, FinalizeError, FinalizePlan, TransferState, TransferStore,
     TransferView,
 };
-use crc32fast::Hasher as Crc32Hasher;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-const EVENT_VERSION: u16 = 1;
+const EVENT_VERSION: u16 = transfer_protocol::TRANSFER_PROTOCOL_VERSION;
 const EWMA_ALPHA: f64 = 0.2;
 const RATE_EPSILON: f64 = 1e-3;
 
@@ -18,51 +18,151 @@ impl TransferStore {
         Self::default()
     }
 
+    pub fn apply_secure_open(&mut self, open: SecureOpenData, now_ms: f64) -> Result<(), String> {
+        if open.chunk_size == 0 || open.chunk_size as usize > transfer_protocol::MAX_PLAINTEXT_CHUNK
+        {
+            return Err("invalid encrypted transfer chunk size".into());
+        }
+        let expected_chunks = if open.total_size == 0 {
+            0
+        } else {
+            open.total_size.div_ceil(open.chunk_size as u64)
+        };
+        if expected_chunks != u64::from(open.chunk_count) {
+            return Err("encrypted manifest has inconsistent size and chunk count".into());
+        }
+        if open.file_name.is_empty() || open.file_name.len() > transfer_protocol::MAX_FILE_NAME_LEN
+        {
+            return Err("encrypted manifest contains an invalid file name".into());
+        }
+
+        storage_queue_clear_transfer_chunks(open.transfer_id);
+        self.transfers.insert(
+            open.transfer_id,
+            TransferRecord {
+                transfer_id: open.transfer_id,
+                file_name: open.file_name,
+                total_size: open.total_size,
+                chunk_size: open.chunk_size,
+                chunk_count: open.chunk_count,
+                sha256_hex: String::new(),
+                received_size: 0,
+                finished_chunks: 0,
+                failed_chunks: 0,
+                retrying_chunks: 0,
+                status: TransferState::Open,
+                updated_at_ms: now_ms,
+                smoothed_rate_bps: 0.0,
+                eta_total_secs: None,
+                last_rate_sample_ms: now_ms,
+                last_rate_sample_bytes: 0,
+                next_expected_chunk: 0,
+                rolling_sha256: Sha256::new(),
+                chunk_states: HashMap::new(),
+            },
+        );
+        Ok(())
+    }
+
+    pub fn apply_secure_chunk(
+        &mut self,
+        transfer_id: u64,
+        chunk_index: u32,
+        plaintext: &[u8],
+        now_ms: f64,
+    ) -> Result<(), String> {
+        let Some(record) = self.transfers.get_mut(&transfer_id) else {
+            return Err(format!("chunk for unknown transfer {transfer_id}"));
+        };
+        if chunk_index != record.next_expected_chunk {
+            record.status = TransferState::Failed;
+            record.failed_chunks = record.failed_chunks.saturating_add(1);
+            storage_queue_clear_transfer_chunks(transfer_id);
+            return Err(format!(
+                "out-of-order chunk for transfer {transfer_id}: got {chunk_index}, expected {}",
+                record.next_expected_chunk
+            ));
+        }
+        let expected_len = expected_chunk_len(record, chunk_index)?;
+        if plaintext.len() != expected_len {
+            record.status = TransferState::Failed;
+            record.failed_chunks = record.failed_chunks.saturating_add(1);
+            storage_queue_clear_transfer_chunks(transfer_id);
+            return Err(format!(
+                "chunk length mismatch for transfer {transfer_id} chunk {chunk_index}: got {}, expected {expected_len}",
+                plaintext.len()
+            ));
+        }
+
+        storage_queue_chunk_persist(transfer_id, chunk_index, plaintext);
+        update_chunk_state(record, chunk_index, ChunkState::Finished);
+        record.next_expected_chunk = record.next_expected_chunk.saturating_add(1);
+        record.received_size = (u64::from(chunk_index) * u64::from(record.chunk_size))
+            .saturating_add(plaintext.len() as u64)
+            .min(record.total_size);
+        record.finished_chunks = record.next_expected_chunk;
+        record.rolling_sha256.update(plaintext);
+        record.status = TransferState::Downloading;
+        update_transfer_rate(record, now_ms);
+        Ok(())
+    }
+
+    pub fn apply_secure_close(
+        &mut self,
+        close: SecureCloseData,
+        now_ms: f64,
+    ) -> Result<[u8; 32], String> {
+        let Some(record) = self.transfers.get_mut(&close.transfer_id) else {
+            return Err(format!("close for unknown transfer {}", close.transfer_id));
+        };
+        if close.total_size != record.total_size || close.chunk_count != record.chunk_count {
+            record.status = TransferState::Failed;
+            record.failed_chunks = record.failed_chunks.saturating_add(1);
+            storage_queue_clear_transfer_chunks(close.transfer_id);
+            return Err("authenticated close does not match the manifest".into());
+        }
+        if record.next_expected_chunk != record.chunk_count
+            || record.received_size != record.total_size
+        {
+            record.status = TransferState::Failed;
+            record.failed_chunks = record.failed_chunks.saturating_add(1);
+            storage_queue_clear_transfer_chunks(close.transfer_id);
+            return Err("authenticated close arrived before all chunks".into());
+        }
+        let computed: [u8; 32] = record.rolling_sha256.clone().finalize().into();
+        if computed != close.sha256 {
+            record.status = TransferState::Failed;
+            record.failed_chunks = record.failed_chunks.saturating_add(1);
+            storage_queue_clear_transfer_chunks(close.transfer_id);
+            return Err("end-to-end SHA-256 verification failed".into());
+        }
+        record.sha256_hex = hex_lower(&computed);
+        record.status = TransferState::Finished;
+        record.updated_at_ms = now_ms;
+        record.eta_total_secs = Some(0.0);
+        Ok(computed)
+    }
+
+    pub fn fail_secure_transfer(&mut self, transfer_id: u64, now_ms: f64) {
+        storage_queue_clear_transfer_chunks(transfer_id);
+        if let Some(record) = self.transfers.get_mut(&transfer_id) {
+            record.status = TransferState::Failed;
+            record.failed_chunks = record.failed_chunks.saturating_add(1);
+            record.updated_at_ms = now_ms;
+            record.eta_total_secs = None;
+        }
+    }
+
     pub fn apply_text_event(&mut self, event_json: &str, now_ms: f64) -> Result<(), String> {
         let event: TransferControlEvent = serde_json::from_str(event_json)
             .map_err(|err| format!("transfer event parse: {err}"))?;
 
         match event {
-            TransferControlEvent::Open {
-                version,
-                transfer_id,
-                file_name,
-                total_size,
-                chunk_size,
-                chunk_count,
-                sha256,
-            } => {
+            TransferControlEvent::Open { version } => {
                 if version != EVENT_VERSION {
                     return Err(format!("unsupported transfer event version {version}"));
                 }
-                if chunk_size == 0 && chunk_count > 0 {
-                    return Err("invalid transfer metadata: chunk_size=0".to_string());
-                }
-
-                storage_queue_clear_transfer_chunks(transfer_id);
-
-                let record = TransferRecord {
-                    transfer_id,
-                    file_name,
-                    total_size,
-                    chunk_size,
-                    chunk_count,
-                    sha256_hex: sha256,
-                    received_size: 0,
-                    finished_chunks: 0,
-                    failed_chunks: 0,
-                    retrying_chunks: 0,
-                    status: TransferState::Open,
-                    updated_at_ms: now_ms,
-                    smoothed_rate_bps: 0.0,
-                    eta_total_secs: None,
-                    last_rate_sample_ms: now_ms,
-                    last_rate_sample_bytes: 0,
-                    next_expected_chunk: 0,
-                    rolling_sha256: Sha256::new(),
-                    chunk_states: HashMap::new(),
-                };
-                self.transfers.insert(transfer_id, record);
+                return Err("rejected unauthenticated plaintext transfer manifest".into());
             }
             TransferControlEvent::Progress {
                 version,
@@ -76,11 +176,17 @@ impl TransferStore {
                     return Err(format!("unsupported transfer event version {version}"));
                 }
                 if let Some(record) = self.transfers.get_mut(&transfer_id) {
-                    record.total_size = total_size;
-                    record.chunk_count = chunk_count;
-                    record.received_size = record.received_size.max(received_size.min(total_size));
-                    record.finished_chunks =
-                        record.finished_chunks.max(finished_chunks.min(chunk_count));
+                    if chunk_count != record.chunk_count || total_size < record.total_size {
+                        return Err(
+                            "relay progress is inconsistent with the authenticated manifest".into(),
+                        );
+                    }
+                    record.received_size = record
+                        .received_size
+                        .max(received_size.min(record.total_size));
+                    record.finished_chunks = record
+                        .finished_chunks
+                        .max(finished_chunks.min(record.chunk_count));
                     if record.status == TransferState::Open {
                         record.status = TransferState::Downloading;
                     }
@@ -119,7 +225,11 @@ impl TransferStore {
                     return Err(format!("unsupported transfer event version {version}"));
                 }
                 if let Some(record) = self.transfers.get_mut(&transfer_id) {
-                    record.status = TransferState::Finished;
+                    if record.next_expected_chunk == record.chunk_count
+                        && !record.sha256_hex.is_empty()
+                    {
+                        record.status = TransferState::Finished;
+                    }
                     record.updated_at_ms = now_ms;
                     record.eta_total_secs = Some(0.0);
                 }
@@ -132,6 +242,7 @@ impl TransferStore {
                 if version != EVENT_VERSION {
                     return Err(format!("unsupported transfer event version {version}"));
                 }
+                storage_queue_clear_transfer_chunks(transfer_id);
                 if let Some(record) = self.transfers.get_mut(&transfer_id) {
                     record.status = TransferState::Failed;
                     record.updated_at_ms = now_ms;
@@ -150,6 +261,7 @@ impl TransferStore {
                 if version != EVENT_VERSION {
                     return Err(format!("unsupported transfer event version {version}"));
                 }
+                storage_queue_clear_transfer_chunks(transfer_id);
                 if let Some(record) = self.transfers.get_mut(&transfer_id) {
                     record.status = TransferState::Aborted;
                     record.updated_at_ms = now_ms;
@@ -160,83 +272,6 @@ impl TransferStore {
             }
         }
 
-        Ok(())
-    }
-
-    pub fn apply_binary_chunk(&mut self, frame: &[u8], now_ms: f64) -> Result<(), String> {
-        let envelope = decode_chunk_envelope(frame)?;
-
-        let mut crc32 = Crc32Hasher::new();
-        crc32.update(&envelope.payload);
-        let checksum = crc32.finalize();
-        if checksum != envelope.crc32 {
-            return Err(format!(
-                "crc32 mismatch for transfer {} chunk {}",
-                envelope.transfer_id, envelope.chunk_index
-            ));
-        }
-
-        let Some(record) = self.transfers.get_mut(&envelope.transfer_id) else {
-            return Err(format!(
-                "chunk for unknown transfer {}",
-                envelope.transfer_id
-            ));
-        };
-
-        if envelope.chunk_index >= record.chunk_count {
-            return Err(format!(
-                "chunk index {} out of bounds for transfer {}",
-                envelope.chunk_index, envelope.transfer_id
-            ));
-        }
-
-        if envelope.chunk_index != record.next_expected_chunk {
-            return Err(format!(
-                "out-of-order chunk for transfer {}: got {}, expected {}",
-                envelope.transfer_id, envelope.chunk_index, record.next_expected_chunk
-            ));
-        }
-
-        let expected_offset = envelope.chunk_index as u64 * record.chunk_size as u64;
-        if envelope.offset != expected_offset {
-            return Err(format!(
-                "offset mismatch for transfer {} chunk {}: got {}, expected {}",
-                envelope.transfer_id, envelope.chunk_index, envelope.offset, expected_offset
-            ));
-        }
-
-        let expected_len = expected_chunk_len(record, envelope.chunk_index)?;
-        if envelope.payload_len as usize != expected_len {
-            return Err(format!(
-                "chunk length mismatch for transfer {} chunk {}: got {}, expected {}",
-                envelope.transfer_id, envelope.chunk_index, envelope.payload_len, expected_len
-            ));
-        }
-
-        storage_queue_chunk_persist(
-            envelope.transfer_id,
-            envelope.chunk_index,
-            &envelope.payload,
-        );
-
-        update_chunk_state(record, envelope.chunk_index, ChunkState::Finished);
-
-        record.received_size = record
-            .received_size
-            .saturating_add(envelope.payload.len() as u64)
-            .min(record.total_size);
-        record.finished_chunks = record.finished_chunks.saturating_add(1);
-        record.next_expected_chunk = record.next_expected_chunk.saturating_add(1);
-        record.rolling_sha256.update(&envelope.payload);
-
-        if matches!(
-            record.status,
-            TransferState::Open | TransferState::Downloading
-        ) {
-            record.status = TransferState::Downloading;
-        }
-
-        update_transfer_rate(record, now_ms);
         Ok(())
     }
 
@@ -348,6 +383,7 @@ impl TransferStore {
                 }
                 Err(err) => {
                     if err.is_verification() {
+                        storage_queue_clear_transfer_chunks(transfer_id);
                         record.status = TransferState::Failed;
                         record.failed_chunks = record.failed_chunks.saturating_add(1);
                         record.eta_total_secs = None;

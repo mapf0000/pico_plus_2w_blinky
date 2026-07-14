@@ -1,6 +1,7 @@
 mod download;
 mod model;
 mod protocol;
+mod secure;
 mod storage;
 mod store;
 
@@ -9,13 +10,10 @@ pub use model::{
     ChunkCounters, ChunkState, FinalizeError, FinalizePlan, TransferState, TransferStore,
     TransferView,
 };
+pub use secure::{SecureSession, SecureSessionView, secure_transfer_id};
 
 #[cfg(test)]
-use crc32fast::Hasher as Crc32Hasher;
-#[cfg(test)]
 use download::verify_finalize_plan;
-#[cfg(test)]
-use protocol::decode_chunk_envelope;
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -25,41 +23,40 @@ use store::hex_lower;
 mod tests {
     use super::*;
 
-    #[test]
-    fn decode_binary_chunk_roundtrip() {
-        let payload = b"hello";
-        let mut crc32 = Crc32Hasher::new();
-        crc32.update(payload);
-        let crc = crc32.finalize();
-
-        let mut frame = Vec::new();
-        frame.extend_from_slice(&7u64.to_le_bytes());
-        frame.extend_from_slice(&3u32.to_le_bytes());
-        frame.extend_from_slice(&42u64.to_le_bytes());
-        frame.extend_from_slice(&(payload.len() as u16).to_le_bytes());
-        frame.extend_from_slice(&crc.to_le_bytes());
-        frame.extend_from_slice(payload);
-
-        let chunk = decode_chunk_envelope(&frame).expect("decode chunk envelope");
-        assert_eq!(chunk.transfer_id, 7);
-        assert_eq!(chunk.chunk_index, 3);
-        assert_eq!(chunk.offset, 42);
-        assert_eq!(chunk.payload, payload);
-        assert_eq!(chunk.crc32, crc);
+    fn open(
+        transfer_id: u64,
+        total_size: u64,
+        chunk_size: u16,
+        chunk_count: u32,
+    ) -> secure::SecureOpenData {
+        secure::SecureOpenData {
+            transfer_id,
+            file_name: "x.bin".into(),
+            total_size,
+            chunk_size,
+            chunk_count,
+        }
     }
 
     #[test]
-    fn open_and_progress_updates_state() {
+    fn plaintext_open_is_rejected() {
         let mut store = TransferStore::new();
-        store
+        let error = store
             .apply_text_event(
-                r#"{"event_type":"transfer/open","version":1,"transfer_id":1,"file_name":"a.bin","total_size":10,"chunk_size":5,"chunk_count":2,"sha256":""}"#,
+                r#"{"event_type":"transfer/open","version":2,"transfer_id":1,"file_name":"a.bin","total_size":10,"chunk_size":5,"chunk_count":2,"sha256":""}"#,
                 1000.0,
             )
-            .unwrap();
+            .unwrap_err();
+        assert!(error.contains("unauthenticated"));
+    }
+
+    #[test]
+    fn authenticated_open_and_progress_update_state() {
+        let mut store = TransferStore::new();
+        store.apply_secure_open(open(1, 10, 5, 2), 1000.0).unwrap();
         store
             .apply_text_event(
-                r#"{"event_type":"transfer/progress","version":1,"transfer_id":1,"received_size":5,"total_size":10,"finished_chunks":1,"chunk_count":2}"#,
+                r#"{"event_type":"transfer/progress","version":2,"transfer_id":1,"received_size":5,"total_size":10,"finished_chunks":1,"chunk_count":2}"#,
                 1500.0,
             )
             .unwrap();
@@ -74,111 +71,69 @@ mod tests {
     #[test]
     fn ewma_and_eta_are_computed() {
         let mut store = TransferStore::new();
-        store
-            .apply_text_event(
-                r#"{"event_type":"transfer/open","version":1,"transfer_id":5,"file_name":"a.bin","total_size":100,"chunk_size":10,"chunk_count":10,"sha256":""}"#,
-                0.0,
-            )
-            .unwrap();
-
+        store.apply_secure_open(open(5, 100, 10, 10), 0.0).unwrap();
         let payload = vec![1u8; 10];
-        let mut crc = Crc32Hasher::new();
-        crc.update(&payload);
-        let crc = crc.finalize();
-
-        let mut frame = Vec::new();
-        frame.extend_from_slice(&5u64.to_le_bytes());
-        frame.extend_from_slice(&0u32.to_le_bytes());
-        frame.extend_from_slice(&0u64.to_le_bytes());
-        frame.extend_from_slice(&(payload.len() as u16).to_le_bytes());
-        frame.extend_from_slice(&crc.to_le_bytes());
-        frame.extend_from_slice(&payload);
-
-        store.apply_binary_chunk(&frame, 1000.0).unwrap();
+        store.apply_secure_chunk(5, 0, &payload, 1000.0).unwrap();
         let rows = store.snapshots();
         assert!(rows[0].smoothed_rate_bps > 0.0);
         assert!(rows[0].eta_total_secs.is_some());
     }
 
     #[test]
-    fn rejects_out_of_order_binary_chunks() {
+    fn rejects_out_of_order_authenticated_chunks() {
         let mut store = TransferStore::new();
-        store
-            .apply_text_event(
-                r#"{"event_type":"transfer/open","version":1,"transfer_id":9,"file_name":"x.bin","total_size":20,"chunk_size":10,"chunk_count":2,"sha256":""}"#,
-                0.0,
-            )
-            .unwrap();
-
+        store.apply_secure_open(open(9, 20, 10, 2), 0.0).unwrap();
         let payload = vec![1u8; 10];
-        let mut crc = Crc32Hasher::new();
-        crc.update(&payload);
-        let crc = crc.finalize();
-
-        let mut frame = Vec::new();
-        frame.extend_from_slice(&9u64.to_le_bytes());
-        frame.extend_from_slice(&1u32.to_le_bytes());
-        frame.extend_from_slice(&10u64.to_le_bytes());
-        frame.extend_from_slice(&(payload.len() as u16).to_le_bytes());
-        frame.extend_from_slice(&crc.to_le_bytes());
-        frame.extend_from_slice(&payload);
-
-        let err = store.apply_binary_chunk(&frame, 1000.0).unwrap_err();
+        let err = store
+            .apply_secure_chunk(9, 1, &payload, 1000.0)
+            .unwrap_err();
         assert!(err.contains("out-of-order chunk"));
     }
 
     #[test]
     fn finalize_plan_uses_streamed_sha256() {
         let payload = b"hello-world";
-        let expected_sha256 = {
+        let expected_sha256: [u8; 32] = {
             let mut h = Sha256::new();
             h.update(payload);
-            hex_lower(&h.finalize())
+            h.finalize().into()
         };
 
         let mut store = TransferStore::new();
         store
-            .apply_text_event(
-                &format!(
-                    "{{\"event_type\":\"transfer/open\",\"version\":1,\"transfer_id\":11,\"file_name\":\"x.bin\",\"total_size\":{},\"chunk_size\":{},\"chunk_count\":1,\"sha256\":\"{}\"}}",
-                    payload.len(),
-                    payload.len(),
-                    expected_sha256
-                ),
-                0.0,
+            .apply_secure_open(open(11, payload.len() as u64, payload.len() as u16, 1), 0.0)
+            .unwrap();
+        store.apply_secure_chunk(11, 0, payload, 1000.0).unwrap();
+        store
+            .apply_secure_close(
+                secure::SecureCloseData {
+                    transfer_id: 11,
+                    total_size: payload.len() as u64,
+                    chunk_count: 1,
+                    sha256: expected_sha256,
+                },
+                1100.0,
             )
             .unwrap();
 
-        let mut crc = Crc32Hasher::new();
-        crc.update(payload);
-        let crc = crc.finalize();
-
-        let mut frame = Vec::new();
-        frame.extend_from_slice(&11u64.to_le_bytes());
-        frame.extend_from_slice(&0u32.to_le_bytes());
-        frame.extend_from_slice(&0u64.to_le_bytes());
-        frame.extend_from_slice(&(payload.len() as u16).to_le_bytes());
-        frame.extend_from_slice(&crc.to_le_bytes());
-        frame.extend_from_slice(payload);
-        store.apply_binary_chunk(&frame, 1000.0).unwrap();
-
         let plan = store.prepare_finalize(11).unwrap();
-        assert_eq!(plan.computed_sha256_hex, expected_sha256);
+        assert_eq!(plan.computed_sha256_hex, hex_lower(&expected_sha256));
         verify_finalize_plan(&plan).unwrap();
     }
 
     #[test]
     fn download_errors_keep_completed_transfer_retryable() {
         let mut store = TransferStore::new();
+        store.apply_secure_open(open(21, 0, 4, 0), 0.0).unwrap();
+        let empty_digest: [u8; 32] = Sha256::digest([]).into();
         store
-            .apply_text_event(
-                r#"{"event_type":"transfer/open","version":1,"transfer_id":21,"file_name":"x.bin","total_size":4,"chunk_size":4,"chunk_count":1,"sha256":""}"#,
-                0.0,
-            )
-            .unwrap();
-        store
-            .apply_text_event(
-                r#"{"event_type":"transfer/finished","version":1,"transfer_id":21}"#,
+            .apply_secure_close(
+                secure::SecureCloseData {
+                    transfer_id: 21,
+                    total_size: 0,
+                    chunk_count: 0,
+                    sha256: empty_digest,
+                },
                 10.0,
             )
             .unwrap();
@@ -192,12 +147,7 @@ mod tests {
     #[test]
     fn verification_errors_mark_transfer_failed() {
         let mut store = TransferStore::new();
-        store
-            .apply_text_event(
-                r#"{"event_type":"transfer/open","version":1,"transfer_id":22,"file_name":"x.bin","total_size":4,"chunk_size":4,"chunk_count":1,"sha256":""}"#,
-                0.0,
-            )
-            .unwrap();
+        store.apply_secure_open(open(22, 4, 4, 1), 0.0).unwrap();
 
         store.finish_finalize(22, &Err(FinalizeError::verification("sha256 mismatch")));
 

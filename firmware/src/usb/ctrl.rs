@@ -17,13 +17,9 @@ pub enum CtrlCommand {
     RequestDbCredentials {
         prompt: &'static str,
     },
-    StartTransfer {
-        path: String<MAX_TRANSFER_PATH_LEN>,
+    SecureTransfer {
+        payload: Vec<u8, MAX_SECURE_TRANSFER_FRAME>,
     },
-    SetTransferDefault {
-        path: String<MAX_TRANSFER_PATH_LEN>,
-    },
-    StartTransferDefault,
     ListDirectory {
         request_id: u64,
         cursor: u32,
@@ -39,13 +35,12 @@ pub enum CtrlCommand {
 mod relay;
 mod view;
 use relay::{
-    RelayState, forward_filesystem_page, handle_file_abort, handle_file_chunk, handle_file_close,
-    handle_file_open,
+    RelayState, forward_filesystem_page, forward_secure_session, handle_file_abort,
+    handle_file_chunk, handle_file_close, handle_file_open,
 };
 pub use view::{
     CTRL_CHAN, CTRL_READY, TransferRelayMode, TransferViewSnapshot, TransferViewState,
-    set_transfer_relay_mode, toggle_transfer_relay_mode, transfer_relay_mode,
-    transfer_view_snapshot,
+    set_transfer_relay_mode, transfer_relay_mode, transfer_view_snapshot,
 };
 use view::{
     TRANSFER_CHUNK_COUNT, TRANSFER_FINISHED_CHUNKS, TRANSFER_ID, TRANSFER_RECEIVED_SIZE,
@@ -66,20 +61,17 @@ const TAG_FILE_CLOSE: u8 = 23;
 const TAG_FILE_RESULT: u8 = 24;
 const TAG_FILE_ABORT: u8 = 25;
 const TAG_FILE_HEARTBEAT: u8 = 26;
-const TAG_FILE_START_REQUEST: u8 = 27;
-const TAG_FILE_SET_DEFAULT_PATH: u8 = 28;
 const TAG_FS_LIST_REQUEST: u8 = 29;
 const TAG_FS_LIST_PAGE: u8 = 30;
 const TAG_FS_LIST_CANCEL: u8 = 31;
+const TAG_TRANSFER_SESSION_TO_HOST: u8 = transfer_protocol::TAG_TRANSFER_SESSION_TO_HOST;
+const TAG_TRANSFER_SESSION_TO_BROWSER: u8 = transfer_protocol::TAG_TRANSFER_SESSION_TO_BROWSER;
 
 const FS_PROTOCOL_VERSION: u16 = crate::capabilities::FILESYSTEM_PROTOCOL_VERSION;
-const FILE_TRANSFER_PROTOCOL_VERSION: u16 = crate::capabilities::TRANSFER_PROTOCOL_VERSION;
-
 const FILE_RESULT_OK: u8 = 0;
 const FILE_RESULT_SIZE_MISMATCH: u8 = 2;
 const FILE_RESULT_ABORTED: u8 = 3;
 
-const FILE_ABORT_REASON_PROTOCOL: u8 = 1;
 const FILE_ABORT_REASON_METADATA_MISMATCH: u8 = 2;
 const FILE_ABORT_REASON_INVALID_CHUNK: u8 = 3;
 const FILE_ABORT_REASON_UNKNOWN_TRANSFER: u8 = 4;
@@ -90,11 +82,9 @@ const MAX_PAYLOAD_LEN: usize = 2048;
 const LOCAL_BUF_LEN: usize = 64;
 const HANDSHAKE_PAYLOAD: &[u8] = b"handshake";
 
-const MAX_TRANSFER_FILE_NAME: usize = 96;
 pub const MAX_TRANSFER_PATH_LEN: usize = 512;
+pub const MAX_SECURE_TRANSFER_FRAME: usize = transfer_protocol::MAX_SECURE_SESSION_FRAME;
 const MAX_RELAY_TRANSFERS: usize = 4;
-const FILE_CHUNK_OVERHEAD: usize = 8 + 4 + 8 + 2 + 4;
-const FILE_CHUNK_MAX_DATA: usize = MAX_PAYLOAD_LEN - FILE_CHUNK_OVERHEAD;
 const NONE_CONTIGUOUS_CHUNK: u32 = u32::MAX;
 const DEFAULT_ACK_WINDOW_CREDIT: u16 = 8;
 const PROGRESS_EMIT_EVERY_CHUNKS: u32 = 16;
@@ -237,16 +227,14 @@ where
             let payload = prompt.as_bytes();
             send_tlv(class, max_packet, TAG_DB_CREDENTIALS_REQUEST, payload).await
         }
-        CtrlCommand::StartTransfer { path } => {
-            let payload = path.as_bytes();
-            send_tlv(class, max_packet, TAG_FILE_START_REQUEST, payload).await
-        }
-        CtrlCommand::SetTransferDefault { path } => {
-            let payload = path.as_bytes();
-            send_tlv(class, max_packet, TAG_FILE_SET_DEFAULT_PATH, payload).await
-        }
-        CtrlCommand::StartTransferDefault => {
-            send_tlv(class, max_packet, TAG_FILE_START_REQUEST, &[]).await
+        CtrlCommand::SecureTransfer { payload } => {
+            send_tlv(
+                class,
+                max_packet,
+                TAG_TRANSFER_SESSION_TO_HOST,
+                payload.as_slice(),
+            )
+            .await
         }
         CtrlCommand::ListDirectory {
             request_id,
@@ -396,6 +384,11 @@ where
         TAG_FS_LIST_PAGE => {
             if !forward_filesystem_page(payload) {
                 log::warn!("usb: failed to forward filesystem page");
+            }
+        }
+        TAG_TRANSFER_SESSION_TO_BROWSER => {
+            if !forward_secure_session(payload) {
+                log::warn!("usb: failed to forward secure transfer session message");
             }
         }
         TAG_EXECUTE

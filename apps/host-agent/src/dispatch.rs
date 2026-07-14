@@ -1,9 +1,10 @@
 use crate::config::Config;
 use crate::file_transfer::{self, TransferFeedback};
 use crate::filesystem;
+use crate::secure_transfer::{SecureAction, SecureTransferState};
 use crate::tlv::{self, Frame};
 use crate::transport::Event;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use std::fs::OpenOptions;
 use std::io::Write as _;
@@ -38,7 +39,6 @@ const KEEPALIVE_TIMEOUT_SECS: u64 = KEEPALIVE_INTERVAL_SECS + 2;
 const MAX_EXEC_OUTPUT: usize = 8 * 1024;
 const EXEC_CHUNK_DELAY_MS: u64 = 20;
 const MAX_PROMPT_LABEL_LEN: usize = 80;
-const MAX_TRANSFER_PATH_LEN: usize = 1024;
 static DB_CREDENTIALS_PROMPT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 struct DispatchState {
@@ -46,8 +46,9 @@ struct DispatchState {
     debug_sink: DebugSink,
     handshake_ok: bool,
     transfer_feedback: mpsc::Sender<TransferFeedback>,
-    transfer_request: mpsc::Sender<PathBuf>,
+    transfer_request: mpsc::Sender<file_transfer::TransferRequest>,
     default_transfer_path: Option<PathBuf>,
+    secure_transfer: SecureTransferState,
     filesystem_cancellations: filesystem::CancellationRegistry,
 }
 
@@ -57,15 +58,9 @@ pub async fn run(
     config: &Config,
 ) -> Result<()> {
     let (transfer_feedback_tx, transfer_feedback_rx) = mpsc::channel::<TransferFeedback>(128);
-    let (transfer_request_tx, transfer_request_rx) = mpsc::channel::<PathBuf>(32);
+    let (transfer_request_tx, transfer_request_rx) =
+        mpsc::channel::<file_transfer::TransferRequest>(32);
     spawn_transfer_worker(outbound.clone(), transfer_feedback_rx, transfer_request_rx);
-
-    for path in config.send_files.clone() {
-        if transfer_request_tx.send(path).await.is_err() {
-            warn!("failed to queue startup transfer path");
-            break;
-        }
-    }
 
     let mut state = DispatchState {
         outbound,
@@ -74,6 +69,7 @@ pub async fn run(
         transfer_feedback: transfer_feedback_tx,
         transfer_request: transfer_request_tx,
         default_transfer_path: config.send_files.first().cloned(),
+        secure_transfer: SecureTransferState::new(),
         filesystem_cancellations: filesystem::CancellationRegistry::default(),
     };
 
@@ -186,39 +182,23 @@ async fn handle_frame(frame: Frame, state: &mut DispatchState) -> Result<()> {
                 handle_db_credentials_request_in_background(frame, outbound).await;
             });
         }
-        TAG_FILE_START_REQUEST => {
-            if let Some(path) = transfer_path_from_payload(&frame.payload) {
-                if state.transfer_request.send(path.clone()).await.is_ok() {
-                    info!(path = %path.display(), "queued transfer start request");
-                } else {
-                    warn!("transfer request worker is not running");
-                }
-            } else if frame.payload.is_empty() {
-                if let Some(path) = state.default_transfer_path.as_ref() {
-                    if state.transfer_request.send(path.clone()).await.is_ok() {
-                        info!(
-                            path = %path.display(),
-                            "queued default transfer start request"
-                        );
-                    } else {
-                        warn!("transfer request worker is not running");
+        transfer_protocol::TAG_TRANSFER_SESSION_TO_HOST => {
+            match state.secure_transfer.handle(&frame.payload) {
+                Ok(actions) => {
+                    for action in actions {
+                        handle_secure_action(action, state).await?;
                     }
-                } else {
-                    warn!(
-                        "received default transfer start request but no --send-file path is configured"
-                    );
                 }
-            } else {
-                warn!("received invalid transfer start request payload");
+                Err(err) => {
+                    warn!(error = %err, "rejected secure file-transfer session message");
+                }
             }
         }
+        TAG_FILE_START_REQUEST => {
+            warn!("rejected insecure file-transfer start request");
+        }
         TAG_FILE_SET_DEFAULT_PATH => {
-            if let Some(path) = transfer_path_from_payload(&frame.payload) {
-                info!(path = %path.display(), "updated default transfer path");
-                state.default_transfer_path = Some(path);
-            } else {
-                warn!("received invalid default transfer path payload");
-            }
+            warn!("rejected insecure default transfer path update");
         }
         filesystem::TAG_FS_LIST_REQUEST => match filesystem::decode_list_request(&frame.payload) {
             Ok(request) => {
@@ -274,6 +254,72 @@ async fn handle_frame(frame: Frame, state: &mut DispatchState) -> Result<()> {
     Ok(())
 }
 
+async fn handle_secure_action(action: SecureAction, state: &mut DispatchState) -> Result<()> {
+    match action {
+        SecureAction::Send(payload) => {
+            state
+                .outbound
+                .send(Frame::new(crate::secure_transfer::TO_BROWSER_TAG, payload))
+                .await?;
+        }
+        SecureAction::Established => info!("secure file-transfer session established"),
+        SecureAction::StartTransfer(path) => {
+            let Some((session_id, session_master)) = state.secure_transfer.session_material()
+            else {
+                bail!("secure transfer request without established session");
+            };
+            state
+                .transfer_request
+                .send(file_transfer::TransferRequest {
+                    path,
+                    session_id,
+                    session_master,
+                })
+                .await
+                .context("queue secure transfer")?;
+            info!("queued encrypted file transfer");
+        }
+        SecureAction::StartDefaultTransfer => {
+            let Some(path) = state.default_transfer_path.clone() else {
+                warn!("rejected secure default transfer: no default path is configured");
+                return Ok(());
+            };
+            let Some((session_id, session_master)) = state.secure_transfer.session_material()
+            else {
+                bail!("secure default transfer request without established session");
+            };
+            state
+                .transfer_request
+                .send(file_transfer::TransferRequest {
+                    path,
+                    session_id,
+                    session_master,
+                })
+                .await
+                .context("queue secure default transfer")?;
+            info!("queued encrypted default file transfer");
+        }
+        SecureAction::SetDefaultPath(path) => {
+            state.default_transfer_path = Some(path);
+            info!("updated encrypted default transfer path");
+        }
+        SecureAction::Receipt {
+            transfer_id,
+            sha256,
+        } => {
+            state
+                .transfer_feedback
+                .send(TransferFeedback::BrowserReceipt {
+                    transfer_id: file_transfer::TransferId(transfer_id),
+                    sha256,
+                })
+                .await
+                .context("queue authenticated browser receipt")?;
+        }
+    }
+    Ok(())
+}
+
 fn agent_status_payload() -> Bytes {
     let hostname = hostname::get().unwrap_or_else(|_| "unknown".into());
     let hostname = hostname.to_string_lossy();
@@ -290,40 +336,24 @@ fn agent_status_payload() -> Bytes {
 fn spawn_transfer_worker(
     outbound: mpsc::Sender<Frame>,
     mut feedback_rx: mpsc::Receiver<TransferFeedback>,
-    mut request_rx: mpsc::Receiver<PathBuf>,
+    mut request_rx: mpsc::Receiver<file_transfer::TransferRequest>,
 ) {
     tokio::spawn(async move {
-        while let Some(path) = request_rx.recv().await {
-            info!(path = %path.display(), "starting queued transfer");
-            let files = [path.clone()];
-            match file_transfer::send_files(&outbound, &mut feedback_rx, &files).await {
+        while let Some(request) = request_rx.recv().await {
+            match file_transfer::send_request(&outbound, &mut feedback_rx, request).await {
                 Ok(()) => {
-                    info!(path = %path.display(), "queued transfer finished");
+                    info!("encrypted file transfer finished");
                 }
                 Err(err) => {
                     warn!(
-                        path = %path.display(),
                         error = %format!("{err:#}"),
-                        "queued transfer failed"
+                        "encrypted file transfer failed"
                     );
                 }
             }
         }
         warn!("transfer request worker stopped");
     });
-}
-
-fn transfer_path_from_payload(payload: &Bytes) -> Option<PathBuf> {
-    if payload.is_empty() || payload.len() > MAX_TRANSFER_PATH_LEN {
-        return None;
-    }
-
-    let path_str = std::str::from_utf8(payload.as_ref()).ok()?.trim();
-    if path_str.is_empty() {
-        return None;
-    }
-
-    Some(PathBuf::from(path_str))
 }
 
 fn should_send_handshake(_config: &Config) -> bool {
