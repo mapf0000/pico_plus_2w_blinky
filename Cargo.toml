@@ -11,6 +11,7 @@ members = [
   "crates/transfer-crypto",
   "crates/transfer-protocol",
   "firmware",
+  "tools/device-test",
 ]
 default-members = ["firmware"]
 resolver = "2"

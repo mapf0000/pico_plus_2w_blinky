@@ -1,0 +1,771 @@
+use std::io::{ErrorKind, Read, Write};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result, anyhow, bail, ensure};
+use clap::Parser;
+use serialport::{
+    ClearBuffer, DataBits, FlowControl, Parity, SerialPort, SerialPortInfo, SerialPortType,
+    StopBits,
+};
+use transfer_protocol::{
+    FILE_OPEN_HEADER_LEN, FILE_TAG_LEN, MANIFEST_PLAINTEXT_BASE_LEN, MAX_PLAINTEXT_CHUNK,
+    TLV_MAX_PAYLOAD, encode_secure_chunk, encode_secure_open,
+};
+
+const BAUD_RATE: u32 = 115_200;
+const TLV_HEADER_LEN: usize = 5;
+const TAG_DEBUG_MSG: u8 = 2;
+const TAG_REQUEST_AGENT_STATUS: u8 = 7;
+const TAG_FILE_OPEN: u8 = 20;
+const TAG_FILE_CHUNK: u8 = 21;
+const TAG_FILE_ACK: u8 = 22;
+const TAG_FILE_RESULT: u8 = 24;
+const TAG_FILE_ABORT: u8 = 25;
+const UNKNOWN_TAG: u8 = 0xfe;
+
+const FILE_ABORT_REASON_UNKNOWN_TRANSFER: u8 = 4;
+const FILE_ABORT_REASON_CAPACITY: u8 = 5;
+const PROBE_OK: &[u8] = b"probe-ok";
+const HANDSHAKE: &[u8] = b"handshake";
+const HANDSHAKE_OK: &[u8] = b"handshake-ok";
+const IO_POLL: Duration = Duration::from_millis(50);
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "device-test",
+    about = "Safe, opt-in USB device tests for Pico file-transfer transport"
+)]
+struct Args {
+    /// USB vendor ID. Decimal and 0x-prefixed values are accepted.
+    #[arg(long, default_value = "0x1209", value_parser = parse_u16)]
+    vid: u16,
+
+    /// USB product ID. Decimal and 0x-prefixed values are accepted.
+    #[arg(long, default_value = "0x0001", value_parser = parse_u16)]
+    pid: u16,
+
+    /// Test this serial port instead of probing matching USB CDC interfaces.
+    #[arg(long)]
+    port: Option<String>,
+
+    /// How long to wait for the application USB device to enumerate.
+    #[arg(long, default_value_t = 45)]
+    wait_secs: u64,
+
+    /// Per-response timeout for device protocol assertions.
+    #[arg(long, default_value_t = 2500)]
+    response_timeout_ms: u64,
+
+    /// Print matching USB CDC metadata without opening a port or sending data.
+    #[arg(long)]
+    list: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Frame {
+    tag: u8,
+    payload: Vec<u8>,
+}
+
+#[derive(Default)]
+struct FrameDecoder {
+    bytes: Vec<u8>,
+}
+
+impl FrameDecoder {
+    fn push(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    fn next(&mut self) -> Option<Frame> {
+        loop {
+            if self.bytes.len() < TLV_HEADER_LEN {
+                return None;
+            }
+
+            let payload_len =
+                u32::from_le_bytes([self.bytes[1], self.bytes[2], self.bytes[3], self.bytes[4]])
+                    as usize;
+            if payload_len > TLV_MAX_PAYLOAD {
+                self.bytes.remove(0);
+                continue;
+            }
+
+            let frame_len = TLV_HEADER_LEN + payload_len;
+            if self.bytes.len() < frame_len {
+                return None;
+            }
+
+            let tag = self.bytes[0];
+            let payload = self.bytes[TLV_HEADER_LEN..frame_len].to_vec();
+            self.bytes.drain(..frame_len);
+            return Some(Frame { tag, payload });
+        }
+    }
+
+    fn clear(&mut self) {
+        self.bytes.clear();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeOutcome {
+    Control,
+    Noisy,
+    Quiet,
+}
+
+struct DeviceRunner {
+    port: Box<dyn SerialPort>,
+    decoder: FrameDecoder,
+    response_timeout: Duration,
+    transfer_id_seed: u64,
+    passed: usize,
+    failures: Vec<(&'static str, String)>,
+}
+
+impl DeviceRunner {
+    fn new(port: Box<dyn SerialPort>, response_timeout: Duration) -> Self {
+        let transfer_id_seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64
+            | (1_u64 << 63);
+        Self {
+            port,
+            decoder: FrameDecoder::default(),
+            response_timeout,
+            transfer_id_seed,
+            passed: 0,
+            failures: Vec::new(),
+        }
+    }
+
+    fn run(mut self) -> Result<()> {
+        println!("[INFO] Opened the control CDC with exclusive access");
+        println!("[INFO] Tests send only TLV control data and synthetic encrypted envelopes");
+
+        self.case("baseline control probe", Self::test_probe);
+        self.case("agent handshake response", Self::test_handshake);
+        self.case("fragmented TLV frame", Self::test_fragmented_frame);
+        self.case("coalesced TLV frames", Self::test_coalesced_frames);
+        self.case("unknown tag isolation", Self::test_unknown_tag);
+        self.case(
+            "truncated encrypted FILE_OPEN rejection",
+            Self::test_malformed_secure_open,
+        );
+        self.case(
+            "legacy FILE_OPEN version rejection",
+            Self::test_legacy_secure_open,
+        );
+        self.case(
+            "unknown encrypted FILE_CHUNK rejection",
+            Self::test_unknown_secure_chunk,
+        );
+        self.case(
+            "encrypted FILE_OPEN rejection without browser",
+            Self::test_secure_open_without_browser,
+        );
+        self.case(
+            "oversized-header TLV resynchronization",
+            Self::test_oversized_header_resync,
+        );
+        self.case("final control health probe", Self::test_probe);
+
+        println!(
+            "[SUMMARY] {} passed; {} failed",
+            self.passed,
+            self.failures.len()
+        );
+        if self.failures.is_empty() {
+            return Ok(());
+        }
+
+        let names = self
+            .failures
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("device suite failed: {names}")
+    }
+
+    fn case(&mut self, name: &'static str, test: fn(&mut Self) -> Result<()>) {
+        let started = Instant::now();
+        match test(self) {
+            Ok(()) => {
+                self.passed += 1;
+                println!("[PASS] {name} ({} ms)", started.elapsed().as_millis());
+            }
+            Err(error) => {
+                println!("[FAIL] {name}: {error:#}");
+                self.failures.push((name, format!("{error:#}")));
+            }
+        }
+    }
+
+    fn reset_input(&mut self) {
+        self.decoder.clear();
+        let _ = self.port.clear(ClearBuffer::Input);
+    }
+
+    fn send_frame(&mut self, tag: u8, payload: &[u8]) -> Result<()> {
+        let frame = encode_frame(tag, payload)?;
+        self.port
+            .write_all(&frame)
+            .with_context(|| format!("write TLV tag {tag}"))?;
+        self.port.flush().context("flush serial output")
+    }
+
+    fn send_raw(&mut self, bytes: &[u8]) -> Result<()> {
+        self.port
+            .write_all(bytes)
+            .context("write raw serial bytes")?;
+        self.port.flush().context("flush raw serial bytes")
+    }
+
+    fn read_frame_until(&mut self, deadline: Instant) -> Result<Option<Frame>> {
+        loop {
+            if let Some(frame) = self.decoder.next() {
+                return Ok(Some(frame));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let _ = self.port.set_timeout(remaining.min(IO_POLL));
+            let mut buf = [0_u8; 256];
+            match self.port.read(&mut buf) {
+                Ok(0) => {}
+                Ok(count) => self.decoder.push(&buf[..count]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error).context("read control CDC"),
+            }
+        }
+    }
+
+    fn expect_exact(&mut self, tag: u8, payload: &[u8]) -> Result<()> {
+        let deadline = Instant::now() + self.response_timeout;
+        while let Some(frame) = self.read_frame_until(deadline)? {
+            if frame.tag == tag && frame.payload == payload {
+                return Ok(());
+            }
+        }
+        bail!(
+            "timed out waiting for tag {tag} with {}-byte expected payload",
+            payload.len()
+        )
+    }
+
+    fn expect_transfer_response(&mut self, transfer_id: u64) -> Result<Frame> {
+        let deadline = Instant::now() + self.response_timeout;
+        while let Some(frame) = self.read_frame_until(deadline)? {
+            if !matches!(frame.tag, TAG_FILE_ACK | TAG_FILE_RESULT | TAG_FILE_ABORT) {
+                continue;
+            }
+            if frame.payload.len() >= 8
+                && u64::from_le_bytes(frame.payload[0..8].try_into().expect("length checked"))
+                    == transfer_id
+            {
+                return Ok(frame);
+            }
+        }
+        bail!("timed out waiting for transfer {transfer_id} response")
+    }
+
+    fn assert_no_transfer_response(&mut self, duration: Duration) -> Result<()> {
+        let deadline = Instant::now() + duration;
+        while let Some(frame) = self.read_frame_until(deadline)? {
+            ensure!(
+                !matches!(frame.tag, TAG_FILE_ACK | TAG_FILE_RESULT | TAG_FILE_ABORT),
+                "unexpected transfer response tag {}",
+                frame.tag
+            );
+        }
+        Ok(())
+    }
+
+    fn test_probe(&mut self) -> Result<()> {
+        self.reset_input();
+        self.send_frame(TAG_REQUEST_AGENT_STATUS, &[])?;
+        self.expect_exact(TAG_DEBUG_MSG, PROBE_OK)
+    }
+
+    fn test_handshake(&mut self) -> Result<()> {
+        self.reset_input();
+        self.send_frame(TAG_REQUEST_AGENT_STATUS, HANDSHAKE)?;
+        self.expect_exact(TAG_DEBUG_MSG, HANDSHAKE_OK)
+    }
+
+    fn test_fragmented_frame(&mut self) -> Result<()> {
+        self.reset_input();
+        let frame = encode_frame(TAG_REQUEST_AGENT_STATUS, HANDSHAKE)?;
+        for byte in frame {
+            self.send_raw(&[byte])?;
+            thread::sleep(Duration::from_millis(2));
+        }
+        self.expect_exact(TAG_DEBUG_MSG, HANDSHAKE_OK)
+    }
+
+    fn test_coalesced_frames(&mut self) -> Result<()> {
+        self.reset_input();
+        let mut frames = encode_frame(TAG_REQUEST_AGENT_STATUS, &[])?;
+        frames.extend_from_slice(&encode_frame(TAG_REQUEST_AGENT_STATUS, HANDSHAKE)?);
+        self.send_raw(&frames)?;
+        self.expect_exact(TAG_DEBUG_MSG, PROBE_OK)?;
+        self.expect_exact(TAG_DEBUG_MSG, HANDSHAKE_OK)
+    }
+
+    fn test_unknown_tag(&mut self) -> Result<()> {
+        self.reset_input();
+        self.send_frame(UNKNOWN_TAG, &[])?;
+        self.assert_no_transfer_response(Duration::from_millis(150))?;
+        self.send_frame(TAG_REQUEST_AGENT_STATUS, &[])?;
+        self.expect_exact(TAG_DEBUG_MSG, PROBE_OK)
+    }
+
+    fn test_malformed_secure_open(&mut self) -> Result<()> {
+        self.reset_input();
+        self.send_frame(TAG_FILE_OPEN, &[2, 0])?;
+        self.assert_no_transfer_response(Duration::from_millis(150))?;
+        self.send_frame(TAG_REQUEST_AGENT_STATUS, &[])?;
+        self.expect_exact(TAG_DEBUG_MSG, PROBE_OK)
+    }
+
+    fn test_legacy_secure_open(&mut self) -> Result<()> {
+        self.reset_input();
+        let mut payload = [0_u8; FILE_OPEN_HEADER_LEN];
+        payload[0..2].copy_from_slice(&1_u16.to_le_bytes());
+        self.send_frame(TAG_FILE_OPEN, &payload)?;
+        self.assert_no_transfer_response(Duration::from_millis(150))?;
+        self.send_frame(TAG_REQUEST_AGENT_STATUS, &[])?;
+        self.expect_exact(TAG_DEBUG_MSG, PROBE_OK)
+    }
+
+    fn test_unknown_secure_chunk(&mut self) -> Result<()> {
+        self.reset_input();
+        let transfer_id = self.transfer_id_seed ^ 0x21;
+        let mut payload = [0_u8; TLV_MAX_PAYLOAD];
+        let payload_len = encode_secure_chunk(
+            &mut payload,
+            &[0x31; 16],
+            transfer_id,
+            0,
+            &[0xa5; FILE_TAG_LEN],
+        )
+        .map_err(|error| anyhow!("encode synthetic FILE_CHUNK: {error:?}"))?;
+        self.send_frame(TAG_FILE_CHUNK, &payload[..payload_len])?;
+
+        let response = self.expect_transfer_response(transfer_id)?;
+        ensure!(response.tag == TAG_FILE_ABORT, "expected FILE_ABORT tag");
+        let abort = decode_abort(&response.payload)?;
+        ensure!(
+            abort.reason == FILE_ABORT_REASON_UNKNOWN_TRANSFER,
+            "expected unknown-transfer reason {}, got {}",
+            FILE_ABORT_REASON_UNKNOWN_TRANSFER,
+            abort.reason
+        );
+        Ok(())
+    }
+
+    fn test_secure_open_without_browser(&mut self) -> Result<()> {
+        self.reset_input();
+        let transfer_id = self.transfer_id_seed ^ 0x20;
+        let mut payload = [0_u8; TLV_MAX_PAYLOAD];
+        let ciphertext = [0x5a; MANIFEST_PLAINTEXT_BASE_LEN + FILE_TAG_LEN];
+        let payload_len = encode_secure_open(
+            &mut payload,
+            &[0x30; 16],
+            transfer_id,
+            &[0x40; 32],
+            MAX_PLAINTEXT_CHUNK as u16,
+            1,
+            &ciphertext,
+        )
+        .map_err(|error| anyhow!("encode synthetic FILE_OPEN: {error:?}"))?;
+        self.send_frame(TAG_FILE_OPEN, &payload[..payload_len])?;
+
+        let response = self.expect_transfer_response(transfer_id)?;
+        if response.tag == TAG_FILE_ACK {
+            let cleanup = encode_abort(transfer_id, FILE_ABORT_REASON_CAPACITY, b"test cleanup")?;
+            self.send_frame(TAG_FILE_ABORT, &cleanup)?;
+            bail!("received FILE_ACK; a browser relay appears to be active")
+        }
+        ensure!(response.tag == TAG_FILE_ABORT, "expected FILE_ABORT tag");
+        let abort = decode_abort(&response.payload)?;
+        ensure!(
+            abort.reason == FILE_ABORT_REASON_CAPACITY,
+            "expected relay-unavailable reason {}, got {}",
+            FILE_ABORT_REASON_CAPACITY,
+            abort.reason
+        );
+        ensure!(
+            abort.detail == "secure browser relay unavailable",
+            "unexpected safe abort detail"
+        );
+        Ok(())
+    }
+
+    fn test_oversized_header_resync(&mut self) -> Result<()> {
+        self.reset_input();
+
+        // The firmware's sliding header decoder temporarily recognizes a valid
+        // 2047-byte unknown frame while resynchronizing this stream. Supplying
+        // that bounded payload lets it reach the following known frame without
+        // depending on timing or USB packet boundaries.
+        self.send_raw(&[0x99, 0xff, 0xff, 0xff, 0xff, 0x07, 0x00, 0x00])?;
+        self.send_raw(&vec![0_u8; TLV_MAX_PAYLOAD - 1])?;
+        self.send_frame(TAG_REQUEST_AGENT_STATUS, &[])?;
+        self.expect_exact(TAG_DEBUG_MSG, PROBE_OK)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Abort<'a> {
+    transfer_id: u64,
+    reason: u8,
+    detail: &'a str,
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    ensure!(args.wait_secs > 0, "--wait-secs must be greater than zero");
+    ensure!(
+        args.response_timeout_ms > 0,
+        "--response-timeout-ms must be greater than zero"
+    );
+
+    let ports = wait_for_matching_ports(args.vid, args.pid, Duration::from_secs(args.wait_secs))?;
+    if !args.list {
+        ensure!(
+            ports.len() >= 2,
+            "expected both logger and control CDC interfaces; found {} matching port(s)",
+            ports.len()
+        );
+    }
+    print_port_inventory(args.vid, args.pid, &ports);
+    if args.list {
+        return Ok(());
+    }
+
+    let port_name = discover_control_port(
+        &ports,
+        args.port.as_deref(),
+        Duration::from_millis(args.response_timeout_ms),
+    )?;
+    println!("[PASS] Discovered exactly one responsive control CDC: {port_name}");
+
+    let port = open_port(&port_name)
+        .with_context(|| format!("open control CDC {port_name} exclusively"))?;
+    DeviceRunner::new(port, Duration::from_millis(args.response_timeout_ms)).run()
+}
+
+fn parse_u16(raw: &str) -> std::result::Result<u16, String> {
+    let raw = raw.trim();
+    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        u16::from_str_radix(hex, 16).map_err(|error| error.to_string())
+    } else {
+        raw.parse::<u16>().map_err(|error| error.to_string())
+    }
+}
+
+fn wait_for_matching_ports(vid: u16, pid: u16, timeout: Duration) -> Result<Vec<SerialPortInfo>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let ports = matching_ports(vid, pid).context("enumerate serial ports")?;
+        if !ports.is_empty() {
+            return Ok(prefer_callout_ports(ports));
+        }
+        if Instant::now() >= deadline {
+            bail!("no USB CDC ports with VID {vid:#06x} PID {pid:#06x} enumerated");
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn matching_ports(vid: u16, pid: u16) -> serialport::Result<Vec<SerialPortInfo>> {
+    let mut ports = serialport::available_ports()?
+        .into_iter()
+        .filter(|info| {
+            matches!(
+                &info.port_type,
+                SerialPortType::UsbPort(usb) if usb.vid == vid && usb.pid == pid
+            )
+        })
+        .collect::<Vec<_>>();
+    ports.sort_by(|left, right| left.port_name.cmp(&right.port_name));
+    Ok(ports)
+}
+
+fn prefer_callout_ports(ports: Vec<SerialPortInfo>) -> Vec<SerialPortInfo> {
+    #[cfg(target_os = "macos")]
+    {
+        let callout = ports
+            .iter()
+            .filter(|port| port.port_name.starts_with("/dev/cu."))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !callout.is_empty() {
+            return callout;
+        }
+    }
+    ports
+}
+
+fn print_port_inventory(vid: u16, pid: u16, ports: &[SerialPortInfo]) {
+    println!(
+        "[PASS] Enumerated {} CDC port(s) for VID {vid:#06x} PID {pid:#06x}",
+        ports.len()
+    );
+    for info in ports {
+        let SerialPortType::UsbPort(usb) = &info.port_type else {
+            continue;
+        };
+        println!(
+            "[INFO] {} interface={:?} manufacturer={} product={} serial={}",
+            info.port_name,
+            usb.interface,
+            presence(&usb.manufacturer),
+            presence(&usb.product),
+            if usb.serial_number.is_some() {
+                "present"
+            } else {
+                "absent"
+            }
+        );
+    }
+}
+
+fn presence(value: &Option<String>) -> &'static str {
+    if value.is_some() { "present" } else { "absent" }
+}
+
+fn discover_control_port(
+    ports: &[SerialPortInfo],
+    requested: Option<&str>,
+    timeout: Duration,
+) -> Result<String> {
+    let candidates = if let Some(requested) = requested {
+        let port = ports
+            .iter()
+            .find(|port| port.port_name == requested)
+            .ok_or_else(|| {
+                anyhow!("requested port {requested} does not match the selected VID/PID")
+            })?;
+        vec![port]
+    } else {
+        ports.iter().collect::<Vec<_>>()
+    };
+
+    let mut controls = Vec::new();
+    for info in candidates {
+        match probe_port(&info.port_name, timeout) {
+            Ok(ProbeOutcome::Control) => controls.push(info.port_name.clone()),
+            Ok(ProbeOutcome::Noisy) => {
+                println!(
+                    "[INFO] {} classified as non-control/noisy CDC",
+                    info.port_name
+                );
+            }
+            Ok(ProbeOutcome::Quiet) => {
+                println!(
+                    "[INFO] {} classified as non-control/quiet CDC",
+                    info.port_name
+                );
+            }
+            Err(error) => {
+                println!("[INFO] {} probe failed: {error:#}", info.port_name);
+            }
+        }
+    }
+
+    ensure!(
+        controls.len() == 1,
+        "expected exactly one responsive control CDC; found {}",
+        controls.len()
+    );
+    Ok(controls.remove(0))
+}
+
+fn probe_port(name: &str, timeout: Duration) -> Result<ProbeOutcome> {
+    let mut port = open_port(name).with_context(|| format!("open candidate {name}"))?;
+    let _ = port.clear(ClearBuffer::Input);
+    let frame = encode_frame(TAG_REQUEST_AGENT_STATUS, &[])?;
+    port.write_all(&frame).context("write control probe")?;
+    port.flush().context("flush control probe")?;
+
+    let deadline = Instant::now() + timeout;
+    let mut decoder = FrameDecoder::default();
+    let mut saw_bytes = false;
+    loop {
+        while let Some(frame) = decoder.next() {
+            if frame.tag == TAG_DEBUG_MSG && frame.payload == PROBE_OK {
+                return Ok(ProbeOutcome::Control);
+            }
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let _ = port.set_timeout(remaining.min(IO_POLL));
+        let mut buf = [0_u8; 256];
+        match port.read(&mut buf) {
+            Ok(0) => {}
+            Ok(count) => {
+                saw_bytes = true;
+                decoder.push(&buf[..count]);
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(error).context("read candidate CDC"),
+        }
+    }
+
+    Ok(if saw_bytes {
+        ProbeOutcome::Noisy
+    } else {
+        ProbeOutcome::Quiet
+    })
+}
+
+fn open_port(name: &str) -> serialport::Result<Box<dyn SerialPort>> {
+    let builder = serialport::new(name, BAUD_RATE)
+        .data_bits(DataBits::Eight)
+        .flow_control(FlowControl::None)
+        .parity(Parity::None)
+        .stop_bits(StopBits::One)
+        .timeout(IO_POLL)
+        .dtr_on_open(false);
+    #[cfg(unix)]
+    let builder = builder.exclusive(true);
+    let mut port = builder.open()?;
+    let _ = port.write_data_terminal_ready(false);
+    let _ = port.write_request_to_send(false);
+    Ok(port)
+}
+
+fn encode_frame(tag: u8, payload: &[u8]) -> Result<Vec<u8>> {
+    ensure!(
+        payload.len() <= TLV_MAX_PAYLOAD,
+        "TLV payload exceeds {TLV_MAX_PAYLOAD} bytes"
+    );
+    let payload_len = u32::try_from(payload.len()).context("TLV payload length conversion")?;
+    let mut frame = Vec::with_capacity(TLV_HEADER_LEN + payload.len());
+    frame.push(tag);
+    frame.extend_from_slice(&payload_len.to_le_bytes());
+    frame.extend_from_slice(payload);
+    Ok(frame)
+}
+
+fn decode_abort(payload: &[u8]) -> Result<Abort<'_>> {
+    ensure!(payload.len() >= 11, "truncated FILE_ABORT payload");
+    let transfer_id = u64::from_le_bytes(payload[0..8].try_into().expect("length checked"));
+    let reason = payload[8];
+    let detail_len =
+        u16::from_le_bytes(payload[9..11].try_into().expect("length checked")) as usize;
+    ensure!(
+        payload.len() == 11 + detail_len,
+        "FILE_ABORT detail length mismatch"
+    );
+    let detail = std::str::from_utf8(&payload[11..]).context("FILE_ABORT detail is not UTF-8")?;
+    Ok(Abort {
+        transfer_id,
+        reason,
+        detail,
+    })
+}
+
+fn encode_abort(transfer_id: u64, reason: u8, detail: &[u8]) -> Result<Vec<u8>> {
+    let detail_len = u16::try_from(detail.len()).context("FILE_ABORT detail is too long")?;
+    let mut payload = Vec::with_capacity(11 + detail.len());
+    payload.extend_from_slice(&transfer_id.to_le_bytes());
+    payload.push(reason);
+    payload.extend_from_slice(&detail_len.to_le_bytes());
+    payload.extend_from_slice(detail);
+    Ok(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_codec_handles_fragmentation_and_coalescing() {
+        let first = encode_frame(TAG_REQUEST_AGENT_STATUS, &[]).unwrap();
+        let second = encode_frame(TAG_DEBUG_MSG, PROBE_OK).unwrap();
+        let split = second.len() / 2;
+        let mut decoder = FrameDecoder::default();
+
+        decoder.push(&first);
+        decoder.push(&second[..split]);
+        assert_eq!(
+            decoder.next(),
+            Some(Frame {
+                tag: TAG_REQUEST_AGENT_STATUS,
+                payload: Vec::new()
+            })
+        );
+        assert_eq!(decoder.next(), None);
+
+        decoder.push(&second[split..]);
+        assert_eq!(
+            decoder.next(),
+            Some(Frame {
+                tag: TAG_DEBUG_MSG,
+                payload: PROBE_OK.to_vec()
+            })
+        );
+        assert_eq!(decoder.next(), None);
+    }
+
+    #[test]
+    fn frame_decoder_resynchronizes_after_oversized_length() {
+        let mut bytes = vec![0x99, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+        bytes.extend_from_slice(&encode_frame(TAG_DEBUG_MSG, PROBE_OK).unwrap());
+        let mut decoder = FrameDecoder::default();
+        decoder.push(&bytes);
+
+        let mut found = None;
+        while let Some(frame) = decoder.next() {
+            if frame.tag == TAG_DEBUG_MSG && frame.payload == PROBE_OK {
+                found = Some(frame);
+                break;
+            }
+        }
+        assert!(found.is_some());
+    }
+
+    #[test]
+    fn abort_codec_is_exact_and_rejects_trailing_data() {
+        let encoded = encode_abort(42, FILE_ABORT_REASON_CAPACITY, b"unavailable").unwrap();
+        assert_eq!(
+            decode_abort(&encoded).unwrap(),
+            Abort {
+                transfer_id: 42,
+                reason: FILE_ABORT_REASON_CAPACITY,
+                detail: "unavailable"
+            }
+        );
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(decode_abort(&trailing).is_err());
+    }
+
+    #[test]
+    fn numeric_usb_ids_accept_hex_and_decimal() {
+        assert_eq!(parse_u16("0x1209").unwrap(), 0x1209);
+        assert_eq!(parse_u16("4617").unwrap(), 0x1209);
+        assert!(parse_u16("0x10000").is_err());
+    }
+}

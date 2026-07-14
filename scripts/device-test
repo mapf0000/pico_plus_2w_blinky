@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Safe USB device test orchestrator.
+#
+# Usage: scripts/device-test [options]
+#
+#   --flash                    Build, verify-flash, and execute firmware first.
+#   --elf PATH                 Flash this ELF with --flash instead of building.
+#   --port PATH                Require a particular control CDC port.
+#   --vid ID                   USB vendor ID (default 0x1209).
+#   --pid ID                   USB product ID (default 0x0001).
+#   --wait-secs N              Enumeration timeout (default 45).
+#   --response-timeout-ms N    Per-response timeout (default 2500).
+#   --msc-label LABEL          Expected mounted volume label (default PICO_AGENT).
+#   --skip-msc                 Skip host read-only mass-storage metadata checks.
+#   --list                     List matching CDC metadata without protocol tests.
+#   -h, --help                 Show this help.
+#
+# The default invocation never flashes, resets, writes to mass storage, sends HID
+# reports, opens a host file, or uses Wi-Fi. Flashing is possible only with the
+# explicit --flash flag. The ELF load does not erase the persistent config slots.
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TARGET="thumbv8m.main-none-eabihf"
+DEFAULT_ELF="$ROOT_DIR/target/$TARGET/release/pico_rust"
+
+FLASH=0
+ELF=""
+SKIP_MSC=0
+LIST_ONLY=0
+MSC_LABEL="PICO_AGENT"
+RUNNER_ARGS=()
+
+usage() {
+  sed -n '2,20s/^# \{0,1\}//p' "$0"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --flash)
+      FLASH=1
+      shift
+      ;;
+    --elf)
+      [[ $# -ge 2 ]] || { echo "--elf requires a path" >&2; exit 2; }
+      ELF="$2"
+      shift 2
+      ;;
+    --port|--vid|--pid|--wait-secs|--response-timeout-ms)
+      [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
+      RUNNER_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --msc-label)
+      [[ $# -ge 2 ]] || { echo "--msc-label requires a value" >&2; exit 2; }
+      MSC_LABEL="$2"
+      shift 2
+      ;;
+    --skip-msc)
+      SKIP_MSC=1
+      shift
+      ;;
+    --list)
+      LIST_ONLY=1
+      RUNNER_ARGS+=("--list")
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -n "$ELF" && $FLASH -ne 1 ]]; then
+  echo "--elf is valid only together with --flash" >&2
+  exit 2
+fi
+
+cd "$ROOT_DIR"
+
+if [[ $FLASH -eq 1 ]]; then
+  command -v picotool >/dev/null 2>&1 || {
+    echo "[FAIL] picotool is required for --flash" >&2
+    exit 2
+  }
+
+  if [[ -z "$ELF" ]]; then
+    ELF="$DEFAULT_ELF"
+    echo "[INFO] Building embedded release firmware"
+    cargo build -p pico_rust --release --target "$TARGET"
+  fi
+  [[ -f "$ELF" ]] || { echo "[FAIL] Firmware ELF not found: $ELF" >&2; exit 2; }
+
+  echo "[INFO] Verified update-flash; persistent config slots are outside the ELF"
+  picotool load -u -v -x -t elf "$ELF"
+  echo "[PASS] Firmware flash verified and application execution requested"
+fi
+
+set +e
+if [[ -n "${RUNNER_ARGS[0]+present}" ]]; then
+  cargo run -p device-test -- "${RUNNER_ARGS[@]}"
+else
+  cargo run -p device-test
+fi
+SUITE_STATUS=$?
+set -e
+
+if [[ $LIST_ONLY -eq 1 || $SKIP_MSC -eq 1 ]]; then
+  if [[ $SKIP_MSC -eq 1 && $LIST_ONLY -ne 1 ]]; then
+    echo "[SKIP] Mass-storage metadata check disabled by --skip-msc"
+  fi
+  exit "$SUITE_STATUS"
+fi
+
+MSC_STATUS=0
+case "$(uname -s)" in
+  Darwin)
+    VOLUME="/Volumes/$MSC_LABEL"
+    deadline=$((SECONDS + 15))
+    while [[ ! -d "$VOLUME" && $SECONDS -lt $deadline ]]; do
+      sleep 0.2
+    done
+
+    if [[ ! -d "$VOLUME" ]]; then
+      echo "[FAIL] Mass-storage volume did not mount at $VOLUME" >&2
+      MSC_STATUS=1
+    else
+      INFO="$(diskutil info "$VOLUME" 2>/dev/null || true)"
+      if printf '%s\n' "$INFO" | grep -Eq 'Media Read-Only:[[:space:]]+Yes' \
+        && printf '%s\n' "$INFO" | grep -Eq 'Volume Read-Only:[[:space:]]+Yes'; then
+        echo "[PASS] Mass-storage media and mounted volume are read-only"
+      else
+        echo "[FAIL] macOS did not report both media and volume read-only" >&2
+        MSC_STATUS=1
+      fi
+      if printf '%s\n' "$INFO" | grep -Eq 'Protocol:[[:space:]]+USB' \
+        && printf '%s\n' "$INFO" | grep -Eq 'File System Personality:[[:space:]]+MS-DOS FAT16' \
+        && printf '%s\n' "$INFO" | grep -Eq 'Disk Size:.*\(8388608 Bytes\)'; then
+        echo "[PASS] Mass-storage is an exact 8 MiB USB FAT16 device"
+      else
+        echo "[FAIL] Unexpected mass-storage protocol, filesystem, or size" >&2
+        MSC_STATUS=1
+      fi
+
+      for path in README.TXT MAC WIN LINUX; do
+        if [[ -e "$VOLUME/$path" ]]; then
+          echo "[PASS] Mass-storage entry present: /$path"
+        else
+          echo "[FAIL] Missing mass-storage entry: /$path" >&2
+          MSC_STATUS=1
+        fi
+      done
+      if [[ -f "$VOLUME/MAC/HOSTAGNT" ]]; then
+        echo "[PASS] Required macOS host-agent artifact is present"
+      else
+        echo "[FAIL] Required /MAC/HOSTAGNT artifact is missing" >&2
+        MSC_STATUS=1
+      fi
+    fi
+    ;;
+  Linux)
+    VOLUME=""
+    for candidate in "/run/media/${USER:-}/$MSC_LABEL" "/media/${USER:-}/$MSC_LABEL" "/media/$MSC_LABEL"; do
+      if [[ -d "$candidate" ]]; then
+        VOLUME="$candidate"
+        break
+      fi
+    done
+    if [[ -z "$VOLUME" ]]; then
+      echo "[SKIP] Could not locate the auto-mounted $MSC_LABEL volume on Linux"
+    elif command -v findmnt >/dev/null 2>&1 && findmnt -no OPTIONS "$VOLUME" | tr ',' '\n' | grep -qx ro; then
+      echo "[PASS] Mass-storage mount is read-only"
+    else
+      echo "[FAIL] Mass-storage mount is not reported read-only" >&2
+      MSC_STATUS=1
+    fi
+    ;;
+  *)
+    echo "[SKIP] Automated mass-storage metadata checks are not implemented on this host OS"
+    ;;
+esac
+
+if [[ $SUITE_STATUS -ne 0 || $MSC_STATUS -ne 0 ]]; then
+  exit 1
+fi
