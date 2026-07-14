@@ -10,6 +10,10 @@
 #   --pid ID                   USB product ID (default 0x0001).
 #   --wait-secs N              Enumeration timeout (default 45).
 #   --response-timeout-ms N    Per-response timeout (default 2500).
+#   --host-keepalives N        Host-agent keepalive round-trips (default 2).
+#   --host-interval-ms N       Host-agent keepalive interval (default 10000).
+#   --host-timeout-ms N        Host-agent response timeout (default 2500).
+#   --skip-host-agent          Skip the production host-agent transport phase.
 #   --msc-label LABEL          Expected mounted volume label (default PICO_AGENT).
 #   --skip-msc                 Skip host read-only mass-storage metadata checks.
 #   --list                     List matching CDC metadata without protocol tests.
@@ -28,12 +32,19 @@ DEFAULT_ELF="$ROOT_DIR/target/$TARGET/release/pico_rust"
 FLASH=0
 ELF=""
 SKIP_MSC=0
+SKIP_HOST_AGENT=0
 LIST_ONLY=0
 MSC_LABEL="PICO_AGENT"
+VID="0x1209"
+PID="0x0001"
+PORT=""
+HOST_KEEPALIVES="2"
+HOST_INTERVAL_MS="10000"
+HOST_TIMEOUT_MS="2500"
 RUNNER_ARGS=()
 
 usage() {
-  sed -n '2,20s/^# \{0,1\}//p' "$0"
+  sed -n '2,/^$/s/^# \{0,1\}//p' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -47,10 +58,47 @@ while [[ $# -gt 0 ]]; do
       ELF="$2"
       shift 2
       ;;
-    --port|--vid|--pid|--wait-secs|--response-timeout-ms)
+    --port)
+      [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
+      PORT="$2"
+      RUNNER_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --vid)
+      [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
+      VID="$2"
+      RUNNER_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --pid)
+      [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
+      PID="$2"
+      RUNNER_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --wait-secs|--response-timeout-ms)
       [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
       RUNNER_ARGS+=("$1" "$2")
       shift 2
+      ;;
+    --host-keepalives)
+      [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
+      HOST_KEEPALIVES="$2"
+      shift 2
+      ;;
+    --host-interval-ms)
+      [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
+      HOST_INTERVAL_MS="$2"
+      shift 2
+      ;;
+    --host-timeout-ms)
+      [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
+      HOST_TIMEOUT_MS="$2"
+      shift 2
+      ;;
+    --skip-host-agent)
+      SKIP_HOST_AGENT=1
+      shift
       ;;
     --msc-label)
       [[ $# -ge 2 ]] || { echo "--msc-label requires a value" >&2; exit 2; }
@@ -112,11 +160,39 @@ fi
 SUITE_STATUS=$?
 set -e
 
-if [[ $LIST_ONLY -eq 1 || $SKIP_MSC -eq 1 ]]; then
-  if [[ $SKIP_MSC -eq 1 && $LIST_ONLY -ne 1 ]]; then
-    echo "[SKIP] Mass-storage metadata check disabled by --skip-msc"
-  fi
+if [[ $LIST_ONLY -eq 1 ]]; then
   exit "$SUITE_STATUS"
+fi
+
+HOST_STATUS=0
+if [[ $SKIP_HOST_AGENT -eq 1 ]]; then
+  echo "[SKIP] Host-agent production transport phase disabled by --skip-host-agent"
+else
+  HOST_ARGS=(
+    --device-self-test
+    --self-test-keepalives "$HOST_KEEPALIVES"
+    --self-test-interval-ms "$HOST_INTERVAL_MS"
+    --self-test-timeout-ms "$HOST_TIMEOUT_MS"
+  )
+  if [[ -n "$PORT" ]]; then
+    HOST_ARGS+=(--port "$PORT")
+  else
+    HOST_ARGS+=(--vid "$VID" --pid "$PID")
+  fi
+
+  echo "[INFO] Running restricted host-agent production transport tests"
+  set +e
+  cargo run -p host-agent -- "${HOST_ARGS[@]}"
+  HOST_STATUS=$?
+  set -e
+fi
+
+if [[ $SKIP_MSC -eq 1 ]]; then
+  echo "[SKIP] Mass-storage metadata check disabled by --skip-msc"
+  if [[ $SUITE_STATUS -ne 0 || $HOST_STATUS -ne 0 ]]; then
+    exit 1
+  fi
+  exit 0
 fi
 
 MSC_STATUS=0
@@ -187,6 +263,6 @@ case "$(uname -s)" in
     ;;
 esac
 
-if [[ $SUITE_STATUS -ne 0 || $MSC_STATUS -ne 0 ]]; then
+if [[ $SUITE_STATUS -ne 0 || $HOST_STATUS -ne 0 || $MSC_STATUS -ne 0 ]]; then
   exit 1
 fi

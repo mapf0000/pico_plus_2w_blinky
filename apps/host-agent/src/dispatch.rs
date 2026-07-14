@@ -31,7 +31,6 @@ const TAG_DB_CREDENTIALS_RESPONSE: u8 = 12;
 const TAG_FILE_START_REQUEST: u8 = 27;
 const TAG_FILE_SET_DEFAULT_PATH: u8 = 28;
 const HANDSHAKE_PAYLOAD: &[u8] = b"handshake";
-const AGENT_STATUS_MAGIC: &[u8] = b"PICOAGENT\0";
 const HANDSHAKE_OK_MSG: &str = "handshake-ok";
 const PROBE_OK_MSG: &str = "probe-ok";
 const KEEPALIVE_INTERVAL_SECS: u64 = 10;
@@ -93,7 +92,10 @@ pub async fn run(
         }
         if state
             .outbound
-            .send(Frame::new(TAG_AGENT_STATUS, agent_status_payload()))
+            .send(Frame::new(
+                TAG_AGENT_STATUS,
+                crate::agent_status::production_payload(),
+            ))
             .await
             .is_err()
         {
@@ -149,7 +151,7 @@ async fn handle_frame(frame: Frame, state: &mut DispatchState) -> Result<()> {
             if handshake {
                 info!("handshake request received");
             }
-            let response = Frame::new(TAG_AGENT_STATUS, agent_status_payload());
+            let response = Frame::new(TAG_AGENT_STATUS, crate::agent_status::production_payload());
             state.outbound.send(response).await?;
             info!("sent agent status");
             if handshake {
@@ -318,19 +320,6 @@ async fn handle_secure_action(action: SecureAction, state: &mut DispatchState) -
         }
     }
     Ok(())
-}
-
-fn agent_status_payload() -> Bytes {
-    let hostname = hostname::get().unwrap_or_else(|_| "unknown".into());
-    let hostname = hostname.to_string_lossy();
-    let version = env!("CARGO_PKG_VERSION");
-    let mut payload =
-        Vec::with_capacity(AGENT_STATUS_MAGIC.len() + version.len() + 1 + hostname.len());
-    payload.extend_from_slice(AGENT_STATUS_MAGIC);
-    payload.extend_from_slice(version.as_bytes());
-    payload.push(0);
-    payload.extend_from_slice(hostname.as_bytes());
-    Bytes::from(payload)
 }
 
 fn spawn_transfer_worker(
@@ -933,22 +922,4 @@ fn format_hex(bytes: &Bytes) -> String {
         .map(|byte| format!("{:02x}", byte))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-#[cfg(test)]
-mod capability_tests {
-    use super::*;
-
-    #[test]
-    fn agent_status_contains_magic_version_and_hostname() {
-        let payload = agent_status_payload();
-        assert!(payload.starts_with(AGENT_STATUS_MAGIC));
-        let fields = &payload[AGENT_STATUS_MAGIC.len()..];
-        let split = fields
-            .iter()
-            .position(|byte| *byte == 0)
-            .expect("version and hostname separator");
-        assert_eq!(&fields[..split], env!("CARGO_PKG_VERSION").as_bytes());
-        assert!(!fields[split + 1..].is_empty());
-    }
 }

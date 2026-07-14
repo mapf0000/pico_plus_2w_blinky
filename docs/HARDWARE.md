@@ -152,7 +152,7 @@ The volume label defaults to `PICO_AGENT` and can be overridden at build time wi
 
 The aarch64 macOS artifact is considered required by the image builder; Windows and Linux artifacts are optional. Missing artifacts are represented by `MISSING.TXT` in the corresponding directory. The custom MSC implementation rejects writes and should be treated as immutable distribution media: copy the agent to a writable host directory before running it.
 
-Safe, no-Wi-Fi automated coverage for enumeration, CDC framing, encrypted-transfer rejection, and read-only mass-storage metadata is provided by `scripts/device-test`. See [DEVICE_TESTING.md](DEVICE_TESTING.md) for its safeguards, commands, and coverage limits.
+Safe, no-Wi-Fi automated coverage for enumeration, CDC framing, encrypted-transfer rejection, restricted production host-agent handshake/keepalive behavior, and read-only mass-storage metadata is provided by `scripts/device-test`. See [DEVICE_TESTING.md](DEVICE_TESTING.md) for its safeguards, commands, and coverage limits.
 
 USB starts automatically during boot in the current implementation. `USB_UNREGISTER` detaches the entire composite device; re-registration rebuilds all classes and descriptors. Changing identity while USB is enabled is rejected because descriptors are fixed for the active session.
 
@@ -307,7 +307,7 @@ Use this checklist for changes to startup, pins, memory, network, USB, transfer,
 
 ### Composite USB
 
-- [ ] `scripts/device-test` passes its no-Wi-Fi CDC and mass-storage checks.
+- [ ] `scripts/device-test` passes its no-Wi-Fi raw CDC, host-agent, and mass-storage checks.
 - [ ] Both CDC-ACM interfaces enumerate.
 - [ ] Logger output is readable and the host agent identifies the control interface.
 - [ ] HID enumerates as a boot keyboard.

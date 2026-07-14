@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -15,6 +15,10 @@ pub struct Config {
     pub send_files: Vec<PathBuf>,
     pub raw: bool,
     pub debug: bool,
+    pub device_self_test: bool,
+    pub self_test_keepalives: u8,
+    pub self_test_interval_ms: u64,
+    pub self_test_timeout_ms: u64,
 }
 
 #[derive(Parser, Debug)]
@@ -44,6 +48,17 @@ struct Args {
     raw: bool,
     #[arg(long)]
     debug: bool,
+    #[arg(
+        long,
+        help = "Run a bounded handshake/keepalive device test without the general dispatcher"
+    )]
+    device_self_test: bool,
+    #[arg(long, default_value_t = 2)]
+    self_test_keepalives: u8,
+    #[arg(long, default_value_t = 10_000)]
+    self_test_interval_ms: u64,
+    #[arg(long, default_value_t = 2_500)]
+    self_test_timeout_ms: u64,
 }
 
 impl Config {
@@ -61,6 +76,19 @@ impl Config {
             None => None,
         };
 
+        ensure!(
+            (1..=10).contains(&args.self_test_keepalives),
+            "self-test keepalive count must be between 1 and 10"
+        );
+        ensure!(
+            args.self_test_interval_ms > 0,
+            "self-test interval must be greater than zero"
+        );
+        ensure!(
+            args.self_test_timeout_ms > 0,
+            "self-test timeout must be greater than zero"
+        );
+
         Ok(Self {
             vid,
             pid,
@@ -73,6 +101,10 @@ impl Config {
             send_files: args.send_file,
             raw: args.raw,
             debug: args.debug,
+            device_self_test: args.device_self_test,
+            self_test_keepalives: args.self_test_keepalives,
+            self_test_interval_ms: args.self_test_interval_ms,
+            self_test_timeout_ms: args.self_test_timeout_ms,
         })
     }
 }

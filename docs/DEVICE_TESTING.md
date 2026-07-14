@@ -15,6 +15,8 @@ The default command does not flash or reset the board. Neither the default comma
 
 The CDC security checks send fixed synthetic protocol bytes only. The valid `FILE_OPEN` envelope contains a dummy ciphertext-shaped value, not host data. It is expected to receive `FILE_ABORT` reason 5 because no browser WebSocket relay exists. An unexpected ACK is treated as evidence of an active browser and fails the test; the harness sends a bounded cleanup abort.
 
+After raw fault injection releases the control port, the real host-agent binary runs with `--device-self-test`. This mode uses production port selection, asynchronous serial I/O, and TLV framing, but it never enters the general dispatcher or reconnect daemon. It has no handlers for shell execution, credentials, filesystem browsing, pairing, or file transfer. It sends a fixed `device-self-test` status identity instead of reading or transmitting the machine hostname, and it bypasses the persistent port cache.
+
 Serial ports are opened exclusively. Stop the host agent before running the suite. The runner never kills another process to obtain a port.
 
 ## Commands
@@ -39,6 +41,7 @@ Useful focused invocations:
 scripts/device-test --list --skip-msc
 scripts/device-test --port /dev/cu.usbmodem12302
 scripts/device-test --skip-msc
+scripts/device-test --skip-host-agent
 scripts/device-test --flash --elf target/thumbv8m.main-none-eabihf/release/pico_rust
 ```
 
@@ -47,13 +50,15 @@ Run the hardware-independent harness tests directly:
 ```sh
 cargo test -p device-test
 cargo clippy -p device-test --all-targets -- -D warnings
+cargo test -p host-agent
+cargo clippy -p host-agent --all-targets -- -D warnings
 ```
 
-Use `--vid`, `--pid`, or `--msc-label` only when the corresponding firmware descriptor/build setting was deliberately changed. `--port` is validated against the selected VID/PID before it is opened.
+Use `--vid`, `--pid`, or `--msc-label` only when the corresponding firmware descriptor/build setting was deliberately changed. `--port` is validated against the selected VID/PID by the raw phase before it is opened by the host agent. The host-agent phase performs two keepalive round-trips at the production 10-second cadence by default; `--host-keepalives`, `--host-interval-ms`, and `--host-timeout-ms` provide bounded diagnostic overrides.
 
 ## Automated checks
 
-The Rust runner performs these checks in order:
+The raw Rust runner performs these checks first:
 
 1. At least two matching CDC ports enumerate for the composite USB device.
 2. Exactly one candidate responds to an empty tag-7 probe with tag 2 `probe-ok`; port numbers are never assumed.
@@ -68,6 +73,16 @@ The Rust runner performs these checks in order:
 11. A structurally valid encrypted open with no browser receives abort reason 5 and the safe `secure browser relay unavailable` detail.
 12. The firmware decoder recovers from an over-limit TLV header and a bounded false frame without a reset.
 13. A final probe confirms that all negative cases left the control path responsive.
+
+The wrapper then starts the real host-agent executable in its restricted one-shot mode and verifies:
+
+1. Production port enumeration/probing selects the control CDC without reading or writing the cached-port file.
+2. Production asynchronous serial tasks and TLV framing complete the handshake.
+3. A valid agent-status payload with the fixed test identity is sent without exposing the hostname; tag 8 has no explicit firmware ACK.
+4. Two subsequent empty tag-7 keepalives receive `probe-ok` at the normal 10-second interval, confirming continued control-path liveness.
+5. The process exits successfully instead of entering the reconnect daemon.
+
+Unit tests additionally inject a device-side shell-command tag and verify that restricted mode rejects it without invoking the general dispatcher.
 
 On macOS the wrapper then checks, without attempting a write, that both the media and mounted `PICO_AGENT` volume are reported read-only, that it is an exact 8 MiB USB FAT16 device, and that `/README.TXT`, `/MAC`, `/WIN`, `/LINUX`, and the required `/MAC/HOSTAGNT` artifact exist. Linux read-only mount metadata is checked when the common auto-mount paths and `findmnt` are available. Unsupported or unlocatable mount layouts are reported as skipped, not silently passed.
 

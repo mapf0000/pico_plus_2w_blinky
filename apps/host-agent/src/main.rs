@@ -1,4 +1,6 @@
+mod agent_status;
 mod config;
+mod device_self_test;
 mod dispatch;
 mod file_transfer;
 mod filesystem;
@@ -17,6 +19,11 @@ async fn main() -> Result<()> {
 
     if let Some(cwd) = &config.cwd {
         std::env::set_current_dir(cwd)?;
+    }
+
+    if config.device_self_test {
+        device_self_test::run(&config).await?;
+        return Ok(());
     }
 
     run_daemon(config).await?;

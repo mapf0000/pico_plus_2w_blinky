@@ -87,7 +87,7 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
   - `/LINUX/HOSTAGNT` (if provided)
 - Set `PICO_MSC_LABEL` to override the volume label (11 ASCII chars max).
 - Safe device checks without Wi-Fi or HID/file activity:
-  - `scripts/device-test` tests already installed firmware.
+  - `scripts/device-test` runs raw protocol injection, restricted production host-agent transport tests, and read-only MSC checks against installed firmware.
   - `scripts/device-test --flash` builds, verify-flashes, executes, and tests a BOOTSEL device.
   - See `docs/DEVICE_TESTING.md` for safeguards and exact coverage.
 - Host agent credential prompt (macOS):

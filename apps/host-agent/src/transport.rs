@@ -58,6 +58,14 @@ pub enum Event {
 }
 
 pub async fn select_port(config: &Config) -> Result<String> {
+    select_port_with_cache(config, true).await
+}
+
+pub async fn select_port_uncached(config: &Config) -> Result<String> {
+    select_port_with_cache(config, false).await
+}
+
+async fn select_port_with_cache(config: &Config, use_cache: bool) -> Result<String> {
     if let Some(port) = &config.port {
         info!(port = %port, "using configured serial port");
         return Ok(port.clone());
@@ -95,7 +103,7 @@ pub async fn select_port(config: &Config) -> Result<String> {
         "candidate ports"
     );
 
-    if let Some(cached) = load_cached_port() {
+    if use_cache && let Some(cached) = load_cached_port() {
         debug!(port = %cached, "found cached serial port");
         if let Some(info) = candidates.iter().find(|info| info.port_name == cached) {
             match probe_port(info, Duration::from_millis(config.probe_timeout_ms)).await {
@@ -139,7 +147,9 @@ pub async fn select_port(config: &Config) -> Result<String> {
     if usb_candidates.len() > 1
         && let Some(selected) = probe_control_port(&usb_candidates, config.probe_timeout_ms).await?
     {
-        store_cached_port(&selected);
+        if use_cache {
+            store_cached_port(&selected);
+        }
         return Ok(selected);
     }
 
