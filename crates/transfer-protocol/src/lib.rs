@@ -1,7 +1,7 @@
 #![no_std]
 
 pub const TRANSFER_PROTOCOL_VERSION: u16 = 2;
-pub const SESSION_PROTOCOL_VERSION: u16 = 1;
+pub const SESSION_PROTOCOL_VERSION: u16 = 2;
 
 pub const TAG_TRANSFER_SESSION_TO_HOST: u8 = 32;
 pub const TAG_TRANSFER_SESSION_TO_BROWSER: u8 = 33;
@@ -12,7 +12,6 @@ pub const WS_BINARY_KIND_SECURE_CHUNK: u8 = 5;
 pub const WS_BINARY_KIND_SECURE_CLOSE: u8 = 6;
 
 pub const SESSION_ID_LEN: usize = 16;
-pub const PAIRING_ID_LEN: usize = 16;
 pub const FILE_SALT_LEN: usize = 32;
 pub const FILE_TAG_LEN: usize = 16;
 pub const SHA256_LEN: usize = 32;
@@ -20,8 +19,8 @@ pub const TLV_MAX_PAYLOAD: usize = 2048;
 pub const MAX_SECURE_SESSION_FRAME: usize = 768;
 pub const NOISE_TAG_LEN: usize = 16;
 
-pub const SESSION_KIND_PAIR_REQUEST: u8 = 1;
-pub const SESSION_KIND_PAIR_READY: u8 = 2;
+pub const SESSION_KIND_REQUEST: u8 = 1;
+pub const SESSION_KIND_READY: u8 = 2;
 pub const SESSION_KIND_HANDSHAKE: u8 = 3;
 pub const SESSION_KIND_TRANSPORT: u8 = 4;
 pub const SESSION_KIND_ERROR: u8 = 5;

@@ -96,12 +96,12 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
 
 ## Secure file transfer
 
-- Start the host agent, open the Web UI, and request a new file-transfer pairing code.
-- Read the single-use code from the host-agent terminal and enter it in the UI.
+- Start the host agent and open the Web UI. The browser automatically negotiates an encrypted file-transfer session.
 - After the UI reports an encrypted session, select or enter a host file path and queue it.
 - The host streams the file through bounded plaintext buffers, encrypts each record before USB transfer, and waits for an authenticated browser hash receipt.
-- The Pico display reports transfer progress but intentionally cannot start an unpaired transfer. Plaintext transfer commands and legacy simulation/drop mode are disabled.
-- `--send-file <path>` records a default candidate but does not bypass browser pairing.
+- The Pico display reports transfer progress but intentionally cannot start a transfer without an active encrypted session. Plaintext transfer commands and legacy simulation/drop mode are disabled.
+- `--send-file <path>` records a default candidate but does not bypass browser session negotiation.
+- Unattended negotiation does not authenticate the browser: every client that can access the Pico Web UI can establish a session and request host files.
 - Security scope, trust assumptions, metadata leakage, and follow-up work are documented in [Secure file-transfer design](docs/SECURE_FILE_TRANSFER.md).
 
 ## Source filesystem browser

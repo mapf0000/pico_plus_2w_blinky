@@ -41,7 +41,7 @@ struct Args {
     debug_log: Option<PathBuf>,
     #[arg(
         long = "send-file",
-        help = "Set a default file candidate; a paired browser must still request the transfer"
+        help = "Set a default file candidate; a browser session must still request the transfer"
     )]
     send_file: Vec<PathBuf>,
     #[arg(long)]

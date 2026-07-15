@@ -276,7 +276,7 @@ The presence flag is a freshness signal, not authentication. It says that a proc
 
 ## File-transfer path and backpressure
 
-The transfer path sends a host file to a browser download through the Pico. The paired browser and host agent are the cryptographic endpoints; firmware is an opaque ciphertext relay and never stores the whole file or receives a key. See [SECURE_FILE_TRANSFER.md](SECURE_FILE_TRANSFER.md) for the threat model and lifecycle.
+The transfer path sends a host file to a browser download through the Pico. The browser and host agent are the cryptographic endpoints. Firmware relays the unattended bootstrap secret and ciphertext, never stores the whole file, and never receives the session master or a file key. See [SECURE_FILE_TRANSFER.md](SECURE_FILE_TRANSFER.md) for the trust model and lifecycle.
 
 ```mermaid
 sequenceDiagram
@@ -286,10 +286,10 @@ sequenceDiagram
     participant H as Host transfer worker
     participant DB as Browser IndexedDB
 
-    B->>W: Binary kind 3: pair request
+    B->>W: Binary kind 3: session request
     W->>C: SecureTransfer envelope
     C->>H: TLV tag 32
-    H-->>B: Pairing code via host terminal/user
+    H-->>B: Session-ready + ephemeral bootstrap secret via firmware
     B->>H: Noise handshake via firmware relay
     B->>H: Browser-generated session master in Noise
     B->>H: Noise-encrypted start path
@@ -324,7 +324,7 @@ Backpressure boundaries:
 - If the last browser disconnects, firmware drains the queue to wake blocked producers; the producer observes no active client and aborts the transfer.
 - WebSocket transmission is downstream of queue admission. USB ACK does not wait for browser decryption, IndexedDB persistence, or final hash verification.
 - Browser persistence is batched in JavaScript. Finalization explicitly waits for the persistence queue before saving.
-- Host completion additionally requires the paired browser's Noise-encrypted receipt with a matching SHA-256.
+- Host completion additionally requires the connected browser's Noise-encrypted receipt with a matching SHA-256.
 
 The receipt proves authenticated browser processing through the final hash, but not durable filesystem storage or successful user handling of the save dialog.
 

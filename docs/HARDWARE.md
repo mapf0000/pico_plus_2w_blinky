@@ -320,7 +320,7 @@ Use this checklist for changes to startup, pins, memory, network, USB, transfer,
 - [ ] Host-agent `HELLO` presence/version/hostname becomes visible; after stopping the agent and waiting 25 seconds, a fresh/reconnected `HELLO` reports it absent.
 - [ ] Keepalive traffic survives at least several intervals without reconnect churn.
 - [ ] Filesystem browsing handles home, root, pagination, hidden entries, cancellation, and permission errors.
-- [ ] A wrong pairing code fails; a fresh code establishes an encrypted session without exposing secrets in structured logs.
+- [ ] Unattended negotiation establishes an encrypted session without exposing bootstrap or session secrets in structured logs.
 - [ ] A small encrypted transfer completes with the correct name, size, authenticated SHA-256 receipt, and downloaded bytes.
 - [ ] A multi-window transfer exercises backpressure and completes without out-of-order errors.
 - [ ] Browser disconnect during transfer aborts cleanly and does not deadlock the USB sender.

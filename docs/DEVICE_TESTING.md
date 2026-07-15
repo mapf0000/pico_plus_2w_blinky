@@ -15,7 +15,7 @@ The default command does not flash or reset the board. Neither the default comma
 
 The CDC security checks send fixed synthetic protocol bytes only. The valid `FILE_OPEN` envelope contains a dummy ciphertext-shaped value, not host data. It is expected to receive `FILE_ABORT` reason 5 because no browser WebSocket relay exists. An unexpected ACK is treated as evidence of an active browser and fails the test; the harness sends a bounded cleanup abort.
 
-After raw fault injection releases the control port, the real host-agent binary runs with `--device-self-test`. This mode uses production port selection, asynchronous serial I/O, and TLV framing, but it never enters the general dispatcher or reconnect daemon. It has no handlers for shell execution, credentials, filesystem browsing, pairing, or file transfer. It sends a fixed `device-self-test` status identity instead of reading or transmitting the machine hostname, and it bypasses the persistent port cache.
+After raw fault injection releases the control port, the real host-agent binary runs with `--device-self-test`. This mode uses production port selection, asynchronous serial I/O, and TLV framing, but it never enters the general dispatcher or reconnect daemon. It has no handlers for shell execution, credentials, filesystem browsing, secure-session negotiation, or file transfer. It sends a fixed `device-self-test` status identity instead of reading or transmitting the machine hostname, and it bypasses the persistent port cache.
 
 Serial ports are opened exclusively. Stop the host agent before running the suite. The runner never kills another process to obtain a port.
 
@@ -92,11 +92,11 @@ Every assertion prints `[PASS]`, `[FAIL]`, or `[SKIP]`, and any failure produces
 
 The suite intentionally cannot prove the successful browser-to-host security path. The following require a Wi-Fi client, the Web UI, and its WebSocket:
 
-- pairing-code authentication and the Noise handshake;
+- unattended session negotiation and the Noise handshake;
 - browser-generated in-memory session master delivery;
 - successful AEAD manifest/chunk/close decryption;
 - IndexedDB staging, final SHA-256 verification, and the authenticated browser receipt;
 - real USB-to-WebSocket backpressure and browser-disconnect cleanup;
 - a successful end-to-end encrypted file transfer.
 
-Those belong in a later connected-browser suite. They should not be simulated here in a way that weakens the production pairing or encryption boundary.
+Those belong in a later connected-browser suite. They should not be simulated here in a way that weakens the production encryption boundary.

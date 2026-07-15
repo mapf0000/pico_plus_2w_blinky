@@ -12,7 +12,7 @@ use transfer_protocol::{
 use zeroize::{Zeroize, Zeroizing};
 
 const NOISE_PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_SHA256";
-const PAIRING_CONTEXT: &[u8] = b"pico-transfer-pairing-v1";
+const SESSION_BOOTSTRAP_CONTEXT: &[u8] = b"pico-transfer-unattended-v2";
 const FILE_KEY_INFO: &[u8] = b"pico-transfer-v2/file-key";
 const SESSION_MASTER_LEN: usize = 32;
 
@@ -20,8 +20,8 @@ const SESSION_MASTER_LEN: usize = 32;
 pub enum CryptoError {
     #[error("cryptographic random source unavailable")]
     Random,
-    #[error("invalid pairing code")]
-    PairingCode,
+    #[error("invalid session bootstrap secret")]
+    BootstrapSecret,
     #[error("noise protocol failure")]
     Noise,
     #[error("key derivation failure")]
@@ -38,7 +38,7 @@ pub fn fill_random(out: &mut [u8]) -> Result<(), CryptoError> {
     getrandom::fill(out).map_err(|_| CryptoError::Random)
 }
 
-pub fn generate_pairing_code() -> Result<Zeroizing<String>, CryptoError> {
+pub fn generate_bootstrap_secret() -> Result<Zeroizing<String>, CryptoError> {
     let mut bytes = Zeroizing::new([0u8; 16]);
     fill_random(bytes.as_mut())?;
     let mut out = Zeroizing::new(String::with_capacity(32));
@@ -55,21 +55,22 @@ pub fn new_session_master() -> Result<SessionMaster, CryptoError> {
     Ok(master)
 }
 
-pub fn derive_pairing_psk(
+pub fn derive_session_psk(
     code: &str,
-    pairing_id: &[u8; SESSION_ID_LEN],
+    session_id: &[u8; SESSION_ID_LEN],
 ) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
     if code.len() != 32 || !code.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(CryptoError::PairingCode);
+        return Err(CryptoError::BootstrapSecret);
     }
     let mut code_bytes = Zeroizing::new([0u8; 16]);
     for (index, chunk) in code.as_bytes().chunks_exact(2).enumerate() {
-        let text = core::str::from_utf8(chunk).map_err(|_| CryptoError::PairingCode)?;
-        code_bytes[index] = u8::from_str_radix(text, 16).map_err(|_| CryptoError::PairingCode)?;
+        let text = core::str::from_utf8(chunk).map_err(|_| CryptoError::BootstrapSecret)?;
+        code_bytes[index] =
+            u8::from_str_radix(text, 16).map_err(|_| CryptoError::BootstrapSecret)?;
     }
     let mut hasher = Sha256::new();
-    hasher.update(PAIRING_CONTEXT);
-    hasher.update(pairing_id);
+    hasher.update(SESSION_BOOTSTRAP_CONTEXT);
+    hasher.update(session_id);
     hasher.update(code_bytes.as_slice());
     Ok(Zeroizing::new(hasher.finalize().into()))
 }
@@ -384,7 +385,7 @@ mod tests {
     use transfer_protocol::{RECORD_CLOSE, RECORD_MANIFEST};
 
     #[test]
-    fn noise_pairing_transports_browser_session_master() {
+    fn noise_session_transports_browser_session_master() {
         let psk = [9; 32];
         let (browser, first) = BrowserHandshake::start(&psk).unwrap();
         let host = HostHandshake::new(&psk).unwrap();

@@ -1,59 +1,32 @@
 use super::super::*;
 
 #[derive(Properties, PartialEq, Clone)]
-pub(crate) struct SecurePairingProps {
+pub(crate) struct SecureSessionProps {
     pub connected: bool,
     pub state: transfer::SecureSessionView,
-    pub code: String,
     pub on_request: Callback<()>,
-    pub on_code: Callback<String>,
-    pub on_pair: Callback<()>,
 }
 
-#[function_component(SecurePairingCard)]
-pub(crate) fn secure_pairing_card(props: &SecurePairingProps) -> Html {
+#[function_component(SecureSessionCard)]
+pub(crate) fn secure_session_card(props: &SecureSessionProps) -> Html {
     let on_request = {
         let callback = props.on_request.clone();
         Callback::from(move |_| callback.emit(()))
     };
-    let on_code = {
-        let callback = props.on_code.clone();
-        Callback::from(move |event: InputEvent| {
-            callback.emit(
-                event
-                    .target_unchecked_into::<web_sys::HtmlInputElement>()
-                    .value(),
-            );
-        })
-    };
-    let on_pair = {
-        let callback = props.on_pair.clone();
-        Callback::from(move |_| callback.emit(()))
-    };
-    let waiting_for_code = props.state == transfer::SecureSessionView::WaitingForCode;
+    let busy = matches!(
+        props.state,
+        transfer::SecureSessionView::Negotiating | transfer::SecureSessionView::Handshaking
+    );
 
     html! {
-        <section class="card secure-pairing-card">
+        <section class="card secure-session-card">
             <div class="card-header">
-                <div><span class="eyebrow">{"File-transfer security"}</span><h2>{"Pair with the host agent"}</h2></div>
+                <div><span class="eyebrow">{"File-transfer security"}</span><h2>{"Host encryption session"}</h2></div>
                 <span class={classes!("connection-pill", props.state.established().then_some("is-good"))}>{props.state.label()}</span>
             </div>
-            <p class="hint">{"Request a single-use code, read it from the host-agent terminal, then enter it here. The code authenticates an ephemeral encrypted session; it is not stored on the device."}</p>
+            <p class="hint">{"The browser connects automatically and encrypts file transfers. Unattended mode trusts every client that can access this Pico Web UI."}</p>
             <div class="transfer-path-row">
-                <button class="btn-secondary" disabled={!props.connected} onclick={on_request}>{"Request new code"}</button>
-                <input
-                    type="text"
-                    inputmode="text"
-                    autocomplete="off"
-                    spellcheck="false"
-                    maxlength="32"
-                    aria-label="Single-use host pairing code"
-                    placeholder="32-character code from host agent"
-                    value={props.code.clone()}
-                    disabled={!waiting_for_code}
-                    oninput={on_code}
-                />
-                <button class="btn-primary" disabled={!waiting_for_code || props.code.trim().len() != 32} onclick={on_pair}>{"Pair securely"}</button>
+                <button class="btn-secondary" disabled={!props.connected || props.state.established()} onclick={on_request}>{if busy { "Retry now" } else { "Reconnect" }}</button>
             </div>
         </section>
     }

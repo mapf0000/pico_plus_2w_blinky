@@ -39,11 +39,12 @@ identifier advertised by HELLO. It is normalized to a bounded ASCII token.
 
 ## Secure file transfer
 
-File transfer requires an ephemeral, paired host session. Request a code in the
-Transfers section, copy the single-use 32-character code from the host-agent's
-controlling terminal, and complete pairing before selecting a file. The browser
-generates the session master, decrypts authenticated per-file records, verifies
-the streamed SHA-256, and sends an encrypted receipt to the host.
+File transfer uses an ephemeral unattended host session. When a compatible host
+agent is present, the browser negotiates the session automatically without a
+terminal code. The browser generates the session master, decrypts authenticated
+per-file records, verifies the streamed SHA-256, and sends an encrypted receipt
+to the host. This mode does not authenticate the browser: every client that can
+access the Pico Web UI can establish a session and request host files.
 
 The session is memory-only and is cleared on WebSocket disconnect or page
 refresh. Decrypted chunks are staged in IndexedDB for download; filesystem

@@ -15,7 +15,7 @@ mod ui;
 use app::App;
 pub(crate) use app::{BrowseRequest, ConfigState, ConnectionState, StatusState};
 use ui::{
-    DownloadManagerCard, FileBrowserCard, IdentityCard, LogCard, ScriptingCard, SecurePairingCard,
+    DownloadManagerCard, FileBrowserCard, IdentityCard, LogCard, ScriptingCard, SecureSessionCard,
     StatusCard, ToastBar, TransferStartCard, UsbCard,
 };
 

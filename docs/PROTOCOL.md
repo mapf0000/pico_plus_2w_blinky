@@ -103,8 +103,8 @@ Implementation:
 | 29 | `FS_LIST_REQUEST` | D -> H | Versioned filesystem request | Active. |
 | 30 | `FS_LIST_PAGE` | H -> D | Versioned filesystem page | Active. |
 | 31 | `FS_LIST_CANCEL` | D -> H | `request_id: u64` | Active. |
-| 32 | `TRANSFER_SESSION_TO_HOST` | D -> H | Versioned pairing or Noise transport envelope | Active for file transfer only. |
-| 33 | `TRANSFER_SESSION_TO_BROWSER` | H -> D | Versioned pairing or Noise transport envelope | Active for file transfer only. |
+| 32 | `TRANSFER_SESSION_TO_HOST` | D -> H | Versioned session negotiation or Noise transport envelope | Active for file transfer only. |
+| 33 | `TRANSFER_SESSION_TO_BROWSER` | H -> D | Versioned session negotiation or Noise transport envelope | Active for file transfer only. |
 
 Tags are globally allocated. Do not reuse a reserved or legacy value for a different payload. Search all three components and tests before changing this table.
 
@@ -157,27 +157,29 @@ File-transfer paths are not simple control payloads in v2. They are Noise transp
 
 ## Secure file-transfer protocol v2
 
-### Security boundary and pairing
+### Security boundary and unattended session negotiation
 
 Only file-transfer initiation, the selected transfer path, file name, file bytes, exact byte count, and final SHA-256 are protected. Filesystem listing, shell commands, credentials, general diagnostics, ACK/result flow control, packet lengths, timing, session/transfer identifiers, chunk size, and chunk count are not covered by this version.
 
-The browser and host agent establish an in-memory session using `Noise_NNpsk0_25519_ChaChaPoly_SHA256`. The host generates a 128-bit, single-use hexadecimal pairing code and prints it directly to its controlling terminal. The user enters that code in the frontend. Both sides derive the Noise PSK as:
+The browser and host agent establish an in-memory session using `Noise_NNpsk0_25519_ChaChaPoly_SHA256`. The host generates a 128-bit, single-use hexadecimal bootstrap secret and sends it to the browser in the session-ready envelope through the firmware relay. No terminal or user input is involved. Both sides derive the Noise PSK as:
 
 ```text
-SHA-256("pico-transfer-pairing-v1" || session_id || decoded_pairing_code)
+SHA-256("pico-transfer-unattended-v2" || session_id || decoded_bootstrap_secret)
 ```
 
-The browser generates the random 256-bit session master after the authenticated Noise handshake and sends it to the host inside Noise transport encryption. The Pico is an opaque relay and never receives the pairing code, session master, or a file key. Session secrets are not flashed or persisted. A WebSocket disconnect clears the browser state; starting a new pairing invalidates the host's prior session.
+The browser generates the random 256-bit session master after the Noise handshake and sends it to the host inside Noise transport encryption. The Pico relays and can observe the bootstrap secret, but never receives the session master or a file key. Session secrets are not flashed or persisted. A WebSocket disconnect clears the browser state; starting a new negotiation invalidates the host's prior session.
+
+This unattended mode provides encrypted transport but no browser authentication. Any client that can access the Pico Web UI can request a bootstrap secret, establish a session, and request host files. It protects established transfers from passive observers that did not participate in negotiation, but it does not protect against an active firmware/USB relay or another authorized Pico Web UI client.
 
 The session envelope used inside USB tags 32/33 and WebSocket binary kind 3 is:
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `session_protocol_version` | `u16` | Must be 1 |
-| `kind` | `u8` | 1 pair request, 2 pair ready, 3 Noise handshake, 4 Noise transport, 5 error/reserved |
-| `session_id` | `bytes[16]` | Pair request uses all zeroes; host chooses a random value in pair ready |
+| `session_protocol_version` | `u16` | Must be 2 |
+| `kind` | `u8` | 1 session request, 2 session ready, 3 Noise handshake, 4 Noise transport, 5 error/reserved |
+| `session_id` | `bytes[16]` | Session request uses all zeroes; host chooses a random value in session ready |
 | `body_len` | `u16` | Exact remaining length |
-| `body` | `bytes[body_len]` | Empty, Noise handshake bytes, or Noise ciphertext |
+| `body` | `bytes[body_len]` | Session ready carries exactly 32 lowercase hexadecimal bootstrap bytes; otherwise empty, Noise handshake bytes, or Noise ciphertext |
 
 Authenticated browser-to-host control plaintexts inside Noise transport are:
 
@@ -186,7 +188,7 @@ Authenticated browser-to-host control plaintexts inside Noise transport are:
 | 1 | Non-empty UTF-8 start path, maximum 512 bytes |
 | 2 | Non-empty UTF-8 default path, maximum 512 bytes |
 | 3 | `transfer_id: u64` followed by `sha256: bytes[32]` browser receipt |
-| 4 | Empty body; start the host's configured/default path inside the paired session |
+| 4 | Empty body; start the host's configured/default path inside the encrypted session |
 
 ### Per-file encryption
 
@@ -272,7 +274,7 @@ Implementation:
 
 - Shared formats and bounds: `crates/transfer-protocol`
 - Noise, HKDF, AEAD, and record codecs: `crates/transfer-crypto`
-- Host pairing/control and streaming sender: `apps/host-agent/src/secure_transfer.rs`, `file_transfer.rs`
+- Host session/control and streaming sender: `apps/host-agent/src/secure_transfer.rs`, `file_transfer.rs`
 - Opaque firmware relay/backpressure: `firmware/src/usb/ctrl/relay.rs`
 - Frontend session/decryption/receipt and state: `apps/frontend/src/transfer/secure.rs`, `store.rs`
 
@@ -582,7 +584,7 @@ Schema:
 
 `host_agent.version` and `hostname` are `null` when unknown. `privileged_operations` is empty while the host agent is absent. `firmware.build` defaults to `<package-version>-<Cargo-profile>` and can be overridden at build time with `PICO_FIRMWARE_BUILD`.
 
-`privileged_operations` describes capabilities the connected host agent can service; it does not by itself create a browser RPC command. Filesystem browsing uses WebSocket RPC. File-transfer initiation uses the paired binary session so its path is not exposed as RPC text. Execute and credential requests originate from the on-device daemon page.
+`privileged_operations` describes capabilities the connected host agent can service; it does not by itself create a browser RPC command. Filesystem browsing uses WebSocket RPC. File-transfer initiation uses the encrypted binary session so its path is not exposed as RPC text. Execute and credential requests originate from the on-device daemon page.
 
 The current frontend:
 
@@ -636,8 +638,8 @@ Parameters after a command use `key=value&key=value`; string values are percent-
 | `USB_REGISTER` | Optional `assistant=1`, `os=mac|windows` | `{"ok":true}` | Starts/enables composite USB if needed |
 | `USB_UNREGISTER` | None | `{"ok":true}` | Detaches USB after 150 ms |
 | `SCRIPT_RUN_HEX` | Hex-encoded `KBD1` bytes | `{"ok":true,"queued":true}` | Maximum decoded bytecode 4096; returns `busy` if HID queue is full |
-| `TRANSFER_START` | `path` | Error | Disabled plaintext legacy command; use paired binary control kind 1 |
-| `TRANSFER_DEFAULT_SET` | `path` | Error | Disabled plaintext legacy command; use paired binary control kind 2 |
+| `TRANSFER_START` | `path` | Error | Disabled plaintext legacy command; use encrypted binary control kind 1 |
+| `TRANSFER_DEFAULT_SET` | `path` | Error | Disabled plaintext legacy command; use encrypted binary control kind 2 |
 | `TRANSFER_START_DEFAULT` | None | Error | Disabled because a browser-authenticated session is required |
 | `FS_LIST` | `request_id`, `cursor`, `limit`, `flags`, `path` | `{"ok":true,"queued":true}` | Result arrives asynchronously as binary kind 2 |
 | `FS_LIST_CANCEL` | `request_id` | `{"ok":true,"queued":true}` | Best effort |

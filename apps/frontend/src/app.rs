@@ -104,7 +104,6 @@ pub(crate) fn app() -> Html {
     let transfer_path = use_state(String::new);
     let secure_session = use_mut_ref(transfer::SecureSession::new);
     let secure_session_view = use_state(|| transfer::SecureSessionView::Idle);
-    let pairing_code = use_state(String::new);
     let filesystem_store = use_mut_ref(filesystem::BrowserStore::new);
     let filesystem_view = use_state(filesystem::BrowserView::default);
     let dsl_text = use_state(|| STARTER_SCRIPT.to_string());
@@ -327,7 +326,6 @@ pub(crate) fn app() -> Html {
         let transfers_state = transfers.clone();
         let secure_session = secure_session.clone();
         let secure_session_view = secure_session_view.clone();
-        let pairing_code = pairing_code.clone();
         let filesystem_store = filesystem_store.clone();
         let filesystem_view = filesystem_view.clone();
         use_effect_with((), move |_| {
@@ -345,7 +343,6 @@ pub(crate) fn app() -> Html {
                     let pending_actions = pending_actions.clone();
                     let secure_session = secure_session.clone();
                     let secure_session_view = secure_session_view.clone();
-                    let pairing_code = pairing_code.clone();
                     move |connected| {
                         ws_connected.set(connected);
                         if connected {
@@ -354,7 +351,6 @@ pub(crate) fn app() -> Html {
                         } else if *was_connected.borrow() {
                             secure_session.borrow_mut().reset();
                             secure_session_view.set(transfer::SecureSessionView::Idle);
-                            pairing_code.set(String::new());
                             hello_state.set(None);
                             handshake_error.set(None);
                             pending_actions.set(PendingActions::default());
@@ -362,7 +358,6 @@ pub(crate) fn app() -> Html {
                         } else {
                             secure_session.borrow_mut().reset();
                             secure_session_view.set(transfer::SecureSessionView::Idle);
-                            pairing_code.set(String::new());
                             hello_state.set(None);
                             pending_actions.set(PendingActions::default());
                             connection_state.set(ConnectionState::Unavailable);
@@ -414,7 +409,6 @@ pub(crate) fn app() -> Html {
                     let transfers_state = transfers_state.clone();
                     let secure_session = secure_session.clone();
                     let secure_session_view = secure_session_view.clone();
-                    let pairing_code = pairing_code.clone();
                     move |kind, binary| {
                         let result = (|| -> Result<(), String> {
                             match kind {
@@ -424,7 +418,6 @@ pub(crate) fn app() -> Html {
                                     let view = secure_session.borrow().view();
                                     secure_session_view.set(view);
                                     if view.established() {
-                                        pairing_code.set(String::new());
                                         push_log.emit(
                                             "encrypted file-transfer session established".into(),
                                         );
@@ -825,41 +818,21 @@ pub(crate) fn app() -> Html {
         })
     };
 
-    let on_request_pairing = {
+    let on_request_session = {
         let secure_session = secure_session.clone();
         let secure_session_view = secure_session_view.clone();
-        let pairing_code = pairing_code.clone();
         let push_log = push_log.clone();
         let toast_cb = show_toast.clone();
         Callback::from(move |_| {
-            pairing_code.set(String::new());
             let result = secure_session
                 .borrow_mut()
-                .request_pairing()
+                .request_session()
                 .map_err(api::ApiError::Protocol)
                 .and_then(|payload| api::send_secure_transfer(&payload));
             secure_session_view.set(secure_session.borrow().view());
             match result {
-                Ok(()) => push_log.emit("requested a single-use host pairing code".into()),
-                Err(error) => toast_cb.emit((format!("Pairing request failed: {error}"), false)),
-            }
-        })
-    };
-
-    let on_pair = {
-        let secure_session = secure_session.clone();
-        let secure_session_view = secure_session_view.clone();
-        let pairing_code = pairing_code.clone();
-        let toast_cb = show_toast.clone();
-        Callback::from(move |_| {
-            let result = secure_session
-                .borrow_mut()
-                .begin_pairing(pairing_code.trim())
-                .map_err(api::ApiError::Protocol)
-                .and_then(|payload| api::send_secure_transfer(&payload));
-            secure_session_view.set(secure_session.borrow().view());
-            if let Err(error) = result {
-                toast_cb.emit((format!("Secure pairing failed: {error}"), false));
+                Ok(()) => push_log.emit("started unattended host negotiation".into()),
+                Err(error) => toast_cb.emit((format!("Host connection failed: {error}"), false)),
             }
         })
     };
@@ -907,7 +880,7 @@ pub(crate) fn app() -> Html {
     let script_ready = device_ready
         && capabilities
             .as_ref()
-            .is_some_and(|snapshot| snapshot.supports_feature("script_bytecode"));
+            .is_some_and(|snapshot| snapshot.supports_keyboard_feature("script_bytecode"));
     let transfer_capable = device_ready
         && capabilities.as_ref().is_some_and(|snapshot| {
             snapshot.transfer_compatible()
@@ -915,6 +888,29 @@ pub(crate) fn app() -> Html {
                 && snapshot.host_agent.version.is_some()
         });
     let transfer_ready = transfer_capable && secure_session_view.established();
+    {
+        let on_request_session = on_request_session.clone();
+        use_effect_with(
+            (transfer_capable, *secure_session_view),
+            move |(capable, view)| {
+                if *capable && *view == transfer::SecureSessionView::Idle {
+                    on_request_session.emit(());
+                }
+                let retry = (*capable
+                    && matches!(
+                        *view,
+                        transfer::SecureSessionView::Negotiating
+                            | transfer::SecureSessionView::Handshaking
+                    ))
+                .then(|| {
+                    gloo_timers::callback::Timeout::new(10_000, move || {
+                        on_request_session.emit(());
+                    })
+                });
+                move || drop(retry)
+            },
+        );
+    }
     let filesystem_ready = device_ready
         && capabilities.as_ref().is_some_and(|snapshot| {
             snapshot.filesystem_compatible()
@@ -1063,16 +1059,10 @@ pub(crate) fn app() -> Html {
                         },
                         AppSection::Transfers => html! {
                             <div class="transfer-workspace">
-                                <SecurePairingCard
+                                <SecureSessionCard
                                     connected={transfer_capable}
                                     state={*secure_session_view}
-                                    code={(*pairing_code).clone()}
-                                    on_request={on_request_pairing.clone()}
-                                    on_code={{
-                                        let pairing_code = pairing_code.clone();
-                                        Callback::from(move |value: String| pairing_code.set(value))
-                                    }}
-                                    on_pair={on_pair.clone()} />
+                                    on_request={on_request_session.clone()} />
                                 <TransferStartCard
                                     path={(*transfer_path).clone()}
                                     connected={transfer_ready}

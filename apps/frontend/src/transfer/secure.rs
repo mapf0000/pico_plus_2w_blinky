@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use transfer_crypto::{
     BrowserHandshake, BrowserTransport, FileCipher, SessionMaster, decode_close, decode_manifest,
-    derive_pairing_psk, encode_receipt, new_session_master,
+    derive_session_psk, encode_receipt, new_session_master,
 };
 use transfer_protocol::{
     CONTROL_SET_DEFAULT_PATH, CONTROL_START_DEFAULT_TRANSFER, CONTROL_START_TRANSFER,
     MAX_TRANSFER_PATH_LEN, RECORD_CLOSE, RECORD_MANIFEST, SESSION_ENVELOPE_HEADER_LEN,
-    SESSION_ID_LEN, SESSION_KIND_HANDSHAKE, SESSION_KIND_PAIR_READY, SESSION_KIND_PAIR_REQUEST,
+    SESSION_ID_LEN, SESSION_KIND_HANDSHAKE, SESSION_KIND_READY, SESSION_KIND_REQUEST,
     SESSION_KIND_TRANSPORT, decode_secure_chunk, decode_secure_close, decode_secure_open,
     decode_session_envelope, encode_session_envelope,
 };
@@ -19,8 +19,7 @@ const MAX_SESSION_ENVELOPE: usize = transfer_protocol::MAX_SECURE_SESSION_FRAME;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecureSessionView {
     Idle,
-    RequestingCode,
-    WaitingForCode,
+    Negotiating,
     Handshaking,
     Established,
     Failed,
@@ -29,12 +28,11 @@ pub enum SecureSessionView {
 impl SecureSessionView {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Idle => "Not paired",
-            Self::RequestingCode => "Waiting for host code",
-            Self::WaitingForCode => "Enter the host code",
-            Self::Handshaking => "Authenticating",
+            Self::Idle => "Not connected",
+            Self::Negotiating => "Negotiating with host",
+            Self::Handshaking => "Establishing encryption",
             Self::Established => "Encrypted session ready",
-            Self::Failed => "Pairing failed",
+            Self::Failed => "Connection failed",
         }
     }
 
@@ -46,9 +44,6 @@ impl SecureSessionView {
 enum State {
     Idle,
     Requested,
-    Ready {
-        session_id: [u8; SESSION_ID_LEN],
-    },
     Handshaking {
         session_id: [u8; SESSION_ID_LEN],
         handshake: Box<BrowserHandshake>,
@@ -94,8 +89,7 @@ impl SecureSession {
     pub fn view(&self) -> SecureSessionView {
         match self.state {
             State::Idle => SecureSessionView::Idle,
-            State::Requested => SecureSessionView::RequestingCode,
-            State::Ready { .. } => SecureSessionView::WaitingForCode,
+            State::Requested => SecureSessionView::Negotiating,
             State::Handshaking { .. } | State::AwaitingConfirmation { .. } => {
                 SecureSessionView::Handshaking
             }
@@ -108,23 +102,9 @@ impl SecureSession {
         self.state = State::Idle;
     }
 
-    pub fn request_pairing(&mut self) -> Result<Vec<u8>, String> {
-        let payload = encode_session(SESSION_KIND_PAIR_REQUEST, &[0; SESSION_ID_LEN], &[])?;
+    pub fn request_session(&mut self) -> Result<Vec<u8>, String> {
+        let payload = encode_session(SESSION_KIND_REQUEST, &[0; SESSION_ID_LEN], &[])?;
         self.state = State::Requested;
-        Ok(payload)
-    }
-
-    pub fn begin_pairing(&mut self, code: &str) -> Result<Vec<u8>, String> {
-        let State::Ready { session_id } = self.state else {
-            return Err("request a pairing code before authenticating".into());
-        };
-        let psk = derive_pairing_psk(code.trim(), &session_id).map_err(crypto_error)?;
-        let (handshake, body) = BrowserHandshake::start(&psk).map_err(crypto_error)?;
-        let payload = encode_session(SESSION_KIND_HANDSHAKE, &session_id, &body)?;
-        self.state = State::Handshaking {
-            session_id,
-            handshake: Box::new(handshake),
-        };
         Ok(payload)
     }
 
@@ -132,11 +112,17 @@ impl SecureSession {
         let envelope = decode_session_envelope(payload).map_err(protocol_error)?;
         let state = std::mem::replace(&mut self.state, State::Failed);
         match (state, envelope.kind) {
-            (State::Requested, SESSION_KIND_PAIR_READY) => {
-                self.state = State::Ready {
+            (State::Requested, SESSION_KIND_READY) => {
+                let code = core::str::from_utf8(envelope.body)
+                    .map_err(|_| "host returned an invalid session bootstrap secret")?;
+                let psk = derive_session_psk(code, &envelope.session_id).map_err(crypto_error)?;
+                let (handshake, body) = BrowserHandshake::start(&psk).map_err(crypto_error)?;
+                let outbound = encode_session(SESSION_KIND_HANDSHAKE, &envelope.session_id, &body)?;
+                self.state = State::Handshaking {
                     session_id: envelope.session_id,
+                    handshake: Box::new(handshake),
                 };
-                Ok(None)
+                Ok(Some(outbound))
             }
             (
                 State::Handshaking {
@@ -369,22 +355,20 @@ mod tests {
     use transfer_crypto::HostHandshake;
 
     #[test]
-    fn pairing_establishes_transport_for_encrypted_path_control() {
+    fn unattended_session_establishes_transport_for_encrypted_path_control() {
         let code = "00112233445566778899aabbccddeeff";
         let session_id = [0x35; SESSION_ID_LEN];
         let mut browser = SecureSession::new();
 
-        let request = browser.request_pairing().unwrap();
+        let request = browser.request_session().unwrap();
         let request = decode_session_envelope(&request).unwrap();
-        assert_eq!(request.kind, SESSION_KIND_PAIR_REQUEST);
+        assert_eq!(request.kind, SESSION_KIND_REQUEST);
 
-        let ready = encode_session(SESSION_KIND_PAIR_READY, &session_id, &[]).unwrap();
-        assert!(browser.handle_session(&ready).unwrap().is_none());
-        assert_eq!(browser.view(), SecureSessionView::WaitingForCode);
-
-        let first = browser.begin_pairing(code).unwrap();
+        let ready = encode_session(SESSION_KIND_READY, &session_id, code.as_bytes()).unwrap();
+        let first = browser.handle_session(&ready).unwrap().unwrap();
+        assert_eq!(browser.view(), SecureSessionView::Handshaking);
         let first = decode_session_envelope(&first).unwrap();
-        let psk = derive_pairing_psk(code, &session_id).unwrap();
+        let psk = derive_session_psk(code, &session_id).unwrap();
         let host = HostHandshake::new(&psk).unwrap();
         let (mut host, response) = host.respond(first.body).unwrap();
 
@@ -404,5 +388,16 @@ mod tests {
         let path = host.open(path.body).unwrap();
         assert_eq!(path[0], CONTROL_START_TRANSFER);
         assert_eq!(&path[1..], b"/private/example.bin");
+    }
+
+    #[test]
+    fn unattended_session_rejects_malformed_bootstrap_secret() {
+        let session_id = [0x35; SESSION_ID_LEN];
+        let mut browser = SecureSession::new();
+        browser.request_session().unwrap();
+
+        let ready = encode_session(SESSION_KIND_READY, &session_id, b"not-a-secret").unwrap();
+        assert!(browser.handle_session(&ready).is_err());
+        assert_eq!(browser.view(), SecureSessionView::Failed);
     }
 }

@@ -3,21 +3,21 @@ use bytes::Bytes;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use transfer_crypto::{
-    HostHandshake, HostTransport, SessionMaster, derive_pairing_psk, fill_random,
-    generate_pairing_code,
+    HostHandshake, HostTransport, SessionMaster, derive_session_psk, fill_random,
+    generate_bootstrap_secret,
 };
 use transfer_protocol::{
     CONTROL_SET_DEFAULT_PATH, CONTROL_START_DEFAULT_TRANSFER, CONTROL_START_TRANSFER,
-    CONTROL_TRANSFER_RECEIPT, PAIRING_ID_LEN, SESSION_ID_LEN, SESSION_KIND_HANDSHAKE,
-    SESSION_KIND_PAIR_READY, SESSION_KIND_PAIR_REQUEST, SESSION_KIND_TRANSPORT,
-    TAG_TRANSFER_SESSION_TO_BROWSER, decode_session_envelope, encode_session_envelope,
+    CONTROL_TRANSFER_RECEIPT, SESSION_ID_LEN, SESSION_KIND_HANDSHAKE, SESSION_KIND_READY,
+    SESSION_KIND_REQUEST, SESSION_KIND_TRANSPORT, TAG_TRANSFER_SESSION_TO_BROWSER,
+    decode_session_envelope, encode_session_envelope,
 };
 use zeroize::Zeroizing;
 
 const READY_TEXT: &[u8] = b"pico-transfer-ready-v1";
 const MAX_SESSION_FRAME: usize = transfer_protocol::MAX_SECURE_SESSION_FRAME;
-const PAIRING_LIFETIME: Duration = Duration::from_secs(5 * 60);
-const PAIRING_REQUEST_MIN_INTERVAL: Duration = Duration::from_secs(2);
+const NEGOTIATION_LIFETIME: Duration = Duration::from_secs(5 * 60);
+const SESSION_REQUEST_MIN_INTERVAL: Duration = Duration::from_secs(2);
 
 pub enum SecureAction {
     Send(Bytes),
@@ -28,12 +28,12 @@ pub enum SecureAction {
     Receipt { transfer_id: u64, sha256: [u8; 32] },
 }
 
-enum PairingState {
+enum SessionState {
     Idle,
     AwaitHandshake {
         session_id: [u8; SESSION_ID_LEN],
         handshake: Box<HostHandshake>,
-        _code: Zeroizing<String>,
+        _bootstrap_secret: Zeroizing<String>,
         expires_at: Instant,
     },
     AwaitMaster {
@@ -49,21 +49,21 @@ enum PairingState {
 }
 
 pub struct SecureTransferState {
-    state: PairingState,
-    last_pairing_request: Option<Instant>,
+    state: SessionState,
+    last_session_request: Option<Instant>,
 }
 
 impl SecureTransferState {
     pub fn new() -> Self {
         Self {
-            state: PairingState::Idle,
-            last_pairing_request: None,
+            state: SessionState::Idle,
+            last_session_request: None,
         }
     }
 
     pub fn session_material(&self) -> Option<([u8; SESSION_ID_LEN], SessionMaster)> {
         match &self.state {
-            PairingState::Established {
+            SessionState::Established {
                 session_id, master, ..
             } => Some((*session_id, Zeroizing::new(**master))),
             _ => None,
@@ -74,52 +74,43 @@ impl SecureTransferState {
         let envelope = decode_session_envelope(payload)
             .map_err(|_| anyhow::anyhow!("invalid secure session envelope"))?;
         match envelope.kind {
-            SESSION_KIND_PAIR_REQUEST => self.start_pairing(envelope.session_id, envelope.body),
+            SESSION_KIND_REQUEST => self.start_session(envelope.session_id, envelope.body),
             SESSION_KIND_HANDSHAKE => self.handle_handshake(envelope.session_id, envelope.body),
             SESSION_KIND_TRANSPORT => self.handle_transport(envelope.session_id, envelope.body),
             _ => bail!("unsupported secure session message"),
         }
     }
 
-    fn start_pairing(
+    fn start_session(
         &mut self,
         requested_session_id: [u8; SESSION_ID_LEN],
         body: &[u8],
     ) -> Result<Vec<SecureAction>> {
         if !body.is_empty() || requested_session_id != [0; SESSION_ID_LEN] {
-            bail!("invalid pair request");
+            bail!("invalid session request");
         }
         let now = Instant::now();
         if self
-            .last_pairing_request
-            .is_some_and(|previous| now.duration_since(previous) < PAIRING_REQUEST_MIN_INTERVAL)
+            .last_session_request
+            .is_some_and(|previous| now.duration_since(previous) < SESSION_REQUEST_MIN_INTERVAL)
         {
-            bail!("pairing requests are rate limited");
+            bail!("session requests are rate limited");
         }
-        self.last_pairing_request = Some(now);
+        self.last_session_request = Some(now);
         let mut session_id = [0; SESSION_ID_LEN];
-        fill_random(&mut session_id).context("generate pairing id")?;
-        let code = generate_pairing_code().context("generate pairing code")?;
-        let psk = derive_pairing_psk(&code, &session_id).context("derive pairing key")?;
-        let handshake = HostHandshake::new(&psk).context("initialize pairing handshake")?;
+        fill_random(&mut session_id).context("generate session id")?;
+        let secret = generate_bootstrap_secret().context("generate bootstrap secret")?;
+        let psk = derive_session_psk(&secret, &session_id).context("derive session key")?;
+        let handshake = HostHandshake::new(&psk).context("initialize session handshake")?;
+        let ready = encode(SESSION_KIND_READY, &session_id, secret.as_bytes())?;
 
-        // Deliberately bypass tracing so the single-use code is not copied to log sinks.
-        eprintln!(
-            "\nPico secure file-transfer pairing code: {}\n",
-            code.as_str()
-        );
-
-        self.state = PairingState::AwaitHandshake {
+        self.state = SessionState::AwaitHandshake {
             session_id,
             handshake: Box::new(handshake),
-            _code: code,
-            expires_at: now + PAIRING_LIFETIME,
+            _bootstrap_secret: secret,
+            expires_at: now + NEGOTIATION_LIFETIME,
         };
-        Ok(vec![SecureAction::Send(encode(
-            SESSION_KIND_PAIR_READY,
-            &session_id,
-            &[],
-        )?)])
+        Ok(vec![SecureAction::Send(ready)])
     }
 
     fn handle_handshake(
@@ -127,26 +118,26 @@ impl SecureTransferState {
         session_id: [u8; SESSION_ID_LEN],
         body: &[u8],
     ) -> Result<Vec<SecureAction>> {
-        let state = core::mem::replace(&mut self.state, PairingState::Idle);
-        let PairingState::AwaitHandshake {
+        let state = core::mem::replace(&mut self.state, SessionState::Idle);
+        let SessionState::AwaitHandshake {
             session_id: expected,
             handshake,
             expires_at,
             ..
         } = state
         else {
-            bail!("pairing handshake is not expected");
+            bail!("session handshake is not expected");
         };
         if session_id != expected {
-            bail!("pairing session mismatch");
+            bail!("session handshake mismatch");
         }
         if Instant::now() > expires_at {
-            bail!("pairing code expired");
+            bail!("session negotiation expired");
         }
         let (transport, response) = (*handshake)
             .respond(body)
-            .context("complete pairing handshake")?;
-        self.state = PairingState::AwaitMaster {
+            .context("complete session handshake")?;
+        self.state = SessionState::AwaitMaster {
             session_id,
             transport,
             expires_at,
@@ -163,18 +154,18 @@ impl SecureTransferState {
         session_id: [u8; SESSION_ID_LEN],
         body: &[u8],
     ) -> Result<Vec<SecureAction>> {
-        let state = core::mem::replace(&mut self.state, PairingState::Idle);
+        let state = core::mem::replace(&mut self.state, SessionState::Idle);
         match state {
-            PairingState::AwaitMaster {
+            SessionState::AwaitMaster {
                 session_id: expected,
                 mut transport,
                 expires_at,
             } => {
                 if session_id != expected {
-                    bail!("pairing session mismatch");
+                    bail!("session handshake mismatch");
                 }
                 if Instant::now() > expires_at {
-                    bail!("pairing code expired");
+                    bail!("session negotiation expired");
                 }
                 let plaintext =
                     Zeroizing::new(transport.open(body).context("open session master")?);
@@ -186,7 +177,7 @@ impl SecureTransferState {
                 let confirmation = transport
                     .seal(READY_TEXT)
                     .context("seal session confirmation")?;
-                self.state = PairingState::Established {
+                self.state = SessionState::Established {
                     session_id,
                     transport,
                     master,
@@ -196,7 +187,7 @@ impl SecureTransferState {
                     SecureAction::Established,
                 ])
             }
-            PairingState::Established {
+            SessionState::Established {
                 session_id: expected,
                 mut transport,
                 master,
@@ -210,7 +201,7 @@ impl SecureTransferState {
                         .context("open secure transfer control")?,
                 );
                 let action = decode_control(&plaintext)?;
-                self.state = PairingState::Established {
+                self.state = SessionState::Established {
                     session_id,
                     transport,
                     master,
@@ -268,4 +259,31 @@ fn encode(kind: u8, session_id: &[u8; SESSION_ID_LEN], body: &[u8]) -> Result<By
 
 pub const TO_BROWSER_TAG: u8 = TAG_TRANSFER_SESSION_TO_BROWSER;
 
-const _: () = assert!(PAIRING_ID_LEN == SESSION_ID_LEN);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use transfer_protocol::{SESSION_KIND_READY, SESSION_KIND_REQUEST};
+
+    #[test]
+    fn session_request_returns_unattended_bootstrap_secret() {
+        let mut request = [0; transfer_protocol::SESSION_ENVELOPE_HEADER_LEN];
+        let request_len = encode_session_envelope(
+            &mut request,
+            SESSION_KIND_REQUEST,
+            &[0; SESSION_ID_LEN],
+            &[],
+        )
+        .unwrap();
+        let mut state = SecureTransferState::new();
+
+        let actions = state.handle(&request[..request_len]).unwrap();
+        let SecureAction::Send(ready) = &actions[0] else {
+            panic!("session request must return a ready envelope");
+        };
+        let ready = decode_session_envelope(ready).unwrap();
+        assert_eq!(ready.kind, SESSION_KIND_READY);
+        assert_ne!(ready.session_id, [0; SESSION_ID_LEN]);
+        assert_eq!(ready.body.len(), 32);
+        assert!(ready.body.iter().all(u8::is_ascii_hexdigit));
+    }
+}

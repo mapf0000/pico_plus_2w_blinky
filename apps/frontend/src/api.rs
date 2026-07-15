@@ -102,6 +102,13 @@ impl Hello {
         self.features.iter().any(|candidate| candidate == feature)
     }
 
+    pub fn supports_keyboard_feature(&self, feature: &str) -> bool {
+        self.keyboard
+            .features
+            .iter()
+            .any(|candidate| candidate == feature)
+    }
+
     pub fn supports_layout(&self, layout: &str) -> bool {
         self.keyboard
             .layouts
@@ -779,6 +786,15 @@ mod tests {
             .compatibility_error()
             .expect("protocol mismatch should be rejected");
         assert!(error.contains("WebSocket protocol"));
+    }
+
+    #[test]
+    fn keyboard_features_are_read_from_keyboard_capabilities() {
+        let mut hello = hello(WEBSOCKET_PROTOCOL_VERSION);
+        hello.keyboard.features.push("script_bytecode".into());
+
+        assert!(hello.supports_keyboard_feature("script_bytecode"));
+        assert!(!hello.supports_feature("script_bytecode"));
     }
 
     #[test]
