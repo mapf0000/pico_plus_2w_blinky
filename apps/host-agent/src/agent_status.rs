@@ -18,6 +18,17 @@ pub(crate) fn payload_for(hostname: &str) -> Bytes {
     Bytes::from(payload)
 }
 
+pub(crate) fn host_os_payload() -> Bytes {
+    Bytes::from_static(detected_host_os().as_bytes())
+}
+
+fn detected_host_os() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "mac",
+        os => os,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,5 +53,10 @@ mod tests {
         assert!(payload.starts_with(prefix.as_bytes()));
         assert!(payload.ends_with(b"device-self-test"));
         assert_eq!(payload.len(), prefix.len() + "device-self-test".len());
+    }
+
+    #[test]
+    fn host_os_payload_uses_the_normalized_target_os() {
+        assert_eq!(host_os_payload(), detected_host_os().as_bytes());
     }
 }

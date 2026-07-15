@@ -24,6 +24,7 @@ const TAG_WS_DISCONNECT: u8 = 5;
 const TAG_WS_DATA_RECV: u8 = 6;
 const TAG_REQUEST_AGENT_STATUS: u8 = 7;
 const TAG_AGENT_STATUS: u8 = 8;
+const TAG_HOST_OS: u8 = 34;
 const TAG_EXECUTE_RESULT: u8 = 9;
 const TAG_MIC_PCM_DATA: u8 = 10;
 const TAG_DB_CREDENTIALS_REQUEST: u8 = 11;
@@ -90,15 +91,7 @@ pub async fn run(
         } else {
             warn!("handshake request failed");
         }
-        if state
-            .outbound
-            .send(Frame::new(
-                TAG_AGENT_STATUS,
-                crate::agent_status::production_payload(),
-            ))
-            .await
-            .is_err()
-        {
+        if send_agent_identity(&state.outbound).await.is_err() {
             warn!("initial agent status failed");
         }
     }
@@ -151,8 +144,7 @@ async fn handle_frame(frame: Frame, state: &mut DispatchState) -> Result<()> {
             if handshake {
                 info!("handshake request received");
             }
-            let response = Frame::new(TAG_AGENT_STATUS, crate::agent_status::production_payload());
-            state.outbound.send(response).await?;
+            send_agent_identity(&state.outbound).await?;
             info!("sent agent status");
             if handshake {
                 info!("handshake response sent");
@@ -253,6 +245,22 @@ async fn handle_frame(frame: Frame, state: &mut DispatchState) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+async fn send_agent_identity(outbound: &mpsc::Sender<Frame>) -> Result<()> {
+    outbound
+        .send(Frame::new(
+            TAG_AGENT_STATUS,
+            crate::agent_status::production_payload(),
+        ))
+        .await?;
+    outbound
+        .send(Frame::new(
+            TAG_HOST_OS,
+            crate::agent_status::host_os_payload(),
+        ))
+        .await?;
     Ok(())
 }
 
@@ -922,4 +930,24 @@ fn format_hex(bytes: &Bytes) -> String {
         .map(|byte| format!("{:02x}", byte))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn agent_identity_sends_compatible_status_then_host_os() {
+        let (outbound, mut inbound) = mpsc::channel(2);
+
+        send_agent_identity(&outbound).await.unwrap();
+
+        let status = inbound.recv().await.unwrap();
+        assert_eq!(status.tag, TAG_AGENT_STATUS);
+        assert!(status.payload.starts_with(b"PICOAGENT\0"));
+
+        let host_os = inbound.recv().await.unwrap();
+        assert_eq!(host_os.tag, TAG_HOST_OS);
+        assert_eq!(host_os.payload, crate::agent_status::host_os_payload());
+    }
 }

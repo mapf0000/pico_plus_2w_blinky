@@ -40,7 +40,7 @@ Types used in layout tables:
 
 | Surface | Current version | Where carried | Compatibility behavior |
 | --- | ---: | --- | --- |
-| WebSocket command/event protocol | 1 | `HELLO.protocols.websocket`; response/event `version` fields | The frontend reports a compatibility error when the WebSocket version differs. |
+| WebSocket command/event protocol | 2 | `HELLO.protocols.websocket`; response/event `version` fields | The frontend reports a compatibility error when the WebSocket version differs. Version 2 adds encrypted chunk batching. |
 | `HELLO` schema | 1 | Top-level `HELLO.version` | The frontend requires `event_type = "hello"` and `version = 1`. |
 | File-transfer protocol | 2 | `FILE_OPEN.protocol_version`; WebSocket transfer event `version` | There is no plaintext downgrade: the host and frontend reject the v1 file path. |
 | Filesystem protocol | 1 | First `u16` in list requests and pages | Host agent and frontend reject unsupported versions; firmware refuses to forward mismatched pages. |
@@ -105,6 +105,7 @@ Implementation:
 | 31 | `FS_LIST_CANCEL` | D -> H | `request_id: u64` | Active. |
 | 32 | `TRANSFER_SESSION_TO_HOST` | D -> H | Versioned session negotiation or Noise transport envelope | Active for file transfer only. |
 | 33 | `TRANSFER_SESSION_TO_BROWSER` | H -> D | Versioned session negotiation or Noise transport envelope | Active for file transfer only. |
+| 34 | `HOST_OS` | H -> D | UTF-8 target OS name, at most 24 bytes in firmware | Active; `macos` is normalized to `mac`. |
 
 Tags are globally allocated. Do not reuse a reserved or legacy value for a different payload. Search all three components and tests before changing this table.
 
@@ -113,7 +114,7 @@ Tags are globally allocated. Do not reuse a reserved or legacy value for a diffe
 On a normal host-agent connection:
 
 1. The host sends tag 7 with payload `handshake`.
-2. The host sends tag 8 with its status payload.
+2. The host sends tag 8 with its status payload, followed by tag 34 with its target OS.
 3. Firmware replies to the handshake with tag 2 and payload `handshake-ok`.
 4. During inactivity, the host sends tag 7 with an empty payload as a keepalive/probe.
 5. Firmware replies to an empty tag 7 with tag 2 and payload `probe-ok`.
@@ -126,7 +127,7 @@ The current tag 8 payload is:
 "PICOAGENT\0" + version_utf8 + "\0" + hostname_utf8
 ```
 
-Firmware also accepts the legacy form containing only a UTF-8 hostname. It stores at most 32 bytes of version and 96 bytes of hostname. A status or status request marks the agent as seen; the capability snapshot reports it absent after 25 seconds without activity. Opening the firmware control CDC clears the previous health state.
+The separate tag 34 payload uses Rust's target OS name, except that `macos` is normalized to `mac` for compatibility with the existing UI value. Keeping tag 8 unchanged preserves compatibility with older firmware. Firmware also accepts the legacy tag 8 form containing only a UTF-8 hostname. It stores at most 32 bytes of version, 96 bytes of hostname, and 24 bytes of host OS. A status, host OS, or status request marks the agent as seen; the capability snapshot reports it absent after 25 seconds without activity. Opening the firmware control CDC clears the previous health state. `STATUS.host_os` reports the OS from a present current-format agent, or `unknown` when the agent is absent or does not supply it.
 
 Host keepalive timing:
 
@@ -221,6 +222,7 @@ Record types are 1 manifest, 2 chunk, and 3 close. Manifest and close use index 
 | Encrypted start/default path | 512 UTF-8 bytes |
 | Concurrent firmware relay states | 4 |
 | Firmware WebSocket event queue | 16 |
+| Encrypted chunks per WebSocket batch | 8 |
 | Initial/advertised sender window | 8 chunks |
 | Maximum accepted window | 64 chunks |
 | ACK timeout / retry limit | 5 seconds / 5 retries |
@@ -531,6 +533,7 @@ Implementation:
 - Maximum inbound firmware command buffer: 2048 bytes.
 - Maximum queued text event: 768 bytes.
 - Maximum queued binary event: 2049 bytes.
+- Maximum transmitted encrypted chunk batch: 16,402 bytes including its binary-kind byte.
 - Shared firmware event queue depth: 16.
 - Browser-to-firmware binary kind 3 carries bounded secure file-session envelopes; other binary command kinds are ignored.
 - Standard WebSocket ping receives pong.
@@ -554,7 +557,7 @@ Schema:
     "build": "0.1.0-release"
   },
   "protocols": {
-    "websocket": 1,
+    "websocket": 2,
     "transfer": 2,
     "filesystem": 1
   },
@@ -659,7 +662,7 @@ Text messages use these `event_type` values, all with `version: 2`. They contain
 | `transfer/failed` | `transfer_id`, `reason` |
 | `transfer/aborted` | `transfer_id`, `reason_code`, `detail` |
 
-Progress is emitted at open, every 16 accepted chunks, and at the final chunk. Some status/progress events use nonblocking queue insertion and may be omitted under pressure; open, terminal events, and chunk data use the awaited queue path where implemented.
+Progress is emitted at open, every 64 accepted chunks, and at the final chunk. Some status/progress events use nonblocking queue insertion and may be omitted under pressure; open, terminal events, and chunk data use the awaited queue path where implemented. The lower progress cadence avoids forcing extra TCP flushes between encrypted chunk batches; the browser still updates authenticated byte/chunk counters from every batch.
 
 ### Binary messages
 
@@ -673,8 +676,9 @@ The first byte selects the binary kind:
 | 4 | Encrypted file open | Exact v2 `FILE_OPEN` payload |
 | 5 | Encrypted file chunk | Exact v2 `FILE_CHUNK` payload |
 | 6 | Encrypted file close | Exact v2 `FILE_CLOSE` payload |
+| 7 | Encrypted file chunk batch | `chunk_count: u8`, then `chunk_count` repetitions of `payload_len: u16` and an exact v2 `FILE_CHUNK` payload |
 
-Kinds 4–6 are host-to-browser only. Firmware prepends the kind byte without decrypting or re-encoding the TLV payload. The maximum binary WebSocket message remains 2049 bytes including the kind.
+Kinds 4–7 are host-to-browser only. Firmware prepends kinds 4–6 without decrypting or re-encoding the TLV payload. For kind 7 it groups two to eight queued chunks from the same transfer without changing their authenticated ciphertext. A batch is at most 16,402 bytes including the kind byte. The WebSocket sender flushes once per batch, while the existing firmware event queue and USB ACK timing continue to carry backpressure.
 
 ## Compatibility and change rules
 

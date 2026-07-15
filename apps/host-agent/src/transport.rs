@@ -29,6 +29,7 @@ const TAG_WS_DISCONNECT: u8 = 5;
 const TAG_WS_DATA_RECV: u8 = 6;
 const TAG_REQUEST_AGENT_STATUS: u8 = 7;
 const TAG_AGENT_STATUS: u8 = 8;
+const TAG_HOST_OS: u8 = 34;
 const TAG_EXECUTE_RESULT: u8 = 9;
 const TAG_MIC_PCM_DATA: u8 = 10;
 const TAG_DB_CREDENTIALS_REQUEST: u8 = 11;
@@ -372,6 +373,7 @@ fn is_known_tag(tag: u8) -> bool {
             | TAG_FS_LIST_CANCEL
             | TAG_TRANSFER_SESSION_TO_HOST
             | TAG_TRANSFER_SESSION_TO_BROWSER
+            | TAG_HOST_OS
     )
 }
 

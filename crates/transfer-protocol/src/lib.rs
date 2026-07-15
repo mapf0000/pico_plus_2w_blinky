@@ -10,6 +10,7 @@ pub const WS_BINARY_KIND_SESSION: u8 = 3;
 pub const WS_BINARY_KIND_SECURE_OPEN: u8 = 4;
 pub const WS_BINARY_KIND_SECURE_CHUNK: u8 = 5;
 pub const WS_BINARY_KIND_SECURE_CLOSE: u8 = 6;
+pub const WS_BINARY_KIND_SECURE_CHUNK_BATCH: u8 = 7;
 
 pub const SESSION_ID_LEN: usize = 16;
 pub const FILE_SALT_LEN: usize = 32;
@@ -46,6 +47,11 @@ pub const CLOSE_PLAINTEXT_LEN: usize = 8 + 4 + SHA256_LEN;
 pub const MAX_MANIFEST_CIPHERTEXT_LEN: usize =
     MANIFEST_PLAINTEXT_BASE_LEN + MAX_FILE_NAME_LEN + FILE_TAG_LEN;
 pub const CLOSE_CIPHERTEXT_LEN: usize = CLOSE_PLAINTEXT_LEN + FILE_TAG_LEN;
+pub const SECURE_CHUNK_BATCH_MAX_CHUNKS: usize = 8;
+pub const SECURE_CHUNK_BATCH_HEADER_LEN: usize = 1;
+pub const SECURE_CHUNK_BATCH_ENTRY_HEADER_LEN: usize = 2;
+pub const MAX_SECURE_CHUNK_BATCH_LEN: usize = SECURE_CHUNK_BATCH_HEADER_LEN
+    + SECURE_CHUNK_BATCH_MAX_CHUNKS * (SECURE_CHUNK_BATCH_ENTRY_HEADER_LEN + TLV_MAX_PAYLOAD);
 const _: () = assert!(
     SESSION_ENVELOPE_HEADER_LEN + 1 + MAX_TRANSFER_PATH_LEN + NOISE_TAG_LEN
         <= MAX_SECURE_SESSION_FRAME
@@ -82,6 +88,52 @@ pub struct SecureClose<'a> {
     pub transfer_id: u64,
     pub ciphertext: &'a [u8],
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SecureChunkBatch<'a> {
+    chunk_count: u8,
+    entries: &'a [u8],
+}
+
+impl<'a> SecureChunkBatch<'a> {
+    pub fn chunk_count(&self) -> usize {
+        self.chunk_count as usize
+    }
+
+    pub fn chunks(&self) -> SecureChunkBatchIter<'a> {
+        SecureChunkBatchIter {
+            remaining: self.chunk_count,
+            entries: self.entries,
+        }
+    }
+}
+
+pub struct SecureChunkBatchIter<'a> {
+    remaining: u8,
+    entries: &'a [u8],
+}
+
+impl<'a> Iterator for SecureChunkBatchIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let chunk_len = read_u16(self.entries.get(..2)?) as usize;
+        let chunk = self.entries.get(2..2 + chunk_len)?;
+        self.entries = self.entries.get(2 + chunk_len..)?;
+        self.remaining -= 1;
+        Some(chunk)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.remaining as usize;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for SecureChunkBatchIter<'_> {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecodeError {
@@ -252,6 +304,30 @@ pub fn decode_secure_chunk(input: &[u8]) -> Result<SecureChunk<'_>, DecodeError>
     })
 }
 
+pub fn decode_secure_chunk_batch(input: &[u8]) -> Result<SecureChunkBatch<'_>, DecodeError> {
+    let (&chunk_count, entries) = input.split_first().ok_or(DecodeError::Truncated)?;
+    if chunk_count == 0 || chunk_count as usize > SECURE_CHUNK_BATCH_MAX_CHUNKS {
+        return Err(DecodeError::InvalidField);
+    }
+
+    let mut at = 0;
+    for _ in 0..chunk_count {
+        let chunk_len = take_u16(entries, &mut at)? as usize;
+        if chunk_len == 0 || chunk_len > TLV_MAX_PAYLOAD {
+            return Err(DecodeError::InvalidLength);
+        }
+        decode_secure_chunk(take(entries, &mut at, chunk_len)?)?;
+    }
+    if at != entries.len() {
+        return Err(DecodeError::TrailingData);
+    }
+
+    Ok(SecureChunkBatch {
+        chunk_count,
+        entries,
+    })
+}
+
 pub fn encode_secure_close(
     out: &mut [u8],
     session_id: &[u8; SESSION_ID_LEN],
@@ -375,5 +451,67 @@ mod tests {
         assert_eq!(open.transfer_id, 42);
         assert_eq!(open.chunk_count, 9);
         assert_eq!(open.ciphertext, ciphertext);
+    }
+
+    #[test]
+    fn secure_chunk_batch_validates_and_iterates_entries() {
+        let ciphertext = [0x5a; FILE_TAG_LEN + 5];
+        let mut first = [0; 128];
+        let first_len = encode_secure_chunk(&mut first, &[1; 16], 9, 3, &ciphertext).unwrap();
+        let mut second = [0; 128];
+        let second_len = encode_secure_chunk(&mut second, &[1; 16], 9, 4, &ciphertext).unwrap();
+
+        let mut batch = [0; 512];
+        batch[0] = 2;
+        let mut at = 1;
+        for chunk in [&first[..first_len], &second[..second_len]] {
+            batch[at..at + 2].copy_from_slice(&(chunk.len() as u16).to_le_bytes());
+            at += 2;
+            batch[at..at + chunk.len()].copy_from_slice(chunk);
+            at += chunk.len();
+        }
+
+        let decoded = decode_secure_chunk_batch(&batch[..at]).unwrap();
+        assert_eq!(decoded.chunk_count(), 2);
+        let mut chunks = decoded.chunks();
+        assert_eq!(
+            decode_secure_chunk(chunks.next().unwrap())
+                .unwrap()
+                .chunk_index,
+            3
+        );
+        assert_eq!(
+            decode_secure_chunk(chunks.next().unwrap())
+                .unwrap()
+                .chunk_index,
+            4
+        );
+        assert!(chunks.next().is_none());
+    }
+
+    #[test]
+    fn secure_chunk_batch_rejects_invalid_counts_and_trailing_data() {
+        assert_eq!(decode_secure_chunk_batch(&[]), Err(DecodeError::Truncated));
+        assert_eq!(
+            decode_secure_chunk_batch(&[0]),
+            Err(DecodeError::InvalidField)
+        );
+        assert_eq!(
+            decode_secure_chunk_batch(&[SECURE_CHUNK_BATCH_MAX_CHUNKS as u8 + 1]),
+            Err(DecodeError::InvalidField)
+        );
+
+        let ciphertext = [0x5a; FILE_TAG_LEN];
+        let mut chunk = [0; 128];
+        let chunk_len = encode_secure_chunk(&mut chunk, &[1; 16], 9, 0, &ciphertext).unwrap();
+        let mut batch = [0; 256];
+        batch[0] = 1;
+        batch[1..3].copy_from_slice(&(chunk_len as u16).to_le_bytes());
+        batch[3..3 + chunk_len].copy_from_slice(&chunk[..chunk_len]);
+        batch[3 + chunk_len] = 0xff;
+        assert_eq!(
+            decode_secure_chunk_batch(&batch[..4 + chunk_len]),
+            Err(DecodeError::TrailingData)
+        );
     }
 }

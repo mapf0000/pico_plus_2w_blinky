@@ -394,7 +394,7 @@ Layouts affect compile-time text-to-key mapping only. Firmware bytecode remains 
 | Yew UI models | Browser `app.rs` | Yew state handles; pure stores behind mutable refs |
 | Transfer chunks | Browser IndexedDB | Serialized/batched JavaScript persistence queue |
 | Transfer relay states | Firmware USB control task | Task-local fixed-capacity vector, maximum four |
-| WebSocket transfer queue | Firmware | Embassy channel, depth 16, shared across active clients |
+| WebSocket transfer queue | Firmware | Embassy channel, depth 16, shared across active clients; queued chunks from one transfer are sent in batches of up to eight |
 | USB/HID commands | Firmware | Embassy channels, each depth 8 |
 | Host-agent health | Firmware | Critical-section mutex plus atomics with 25-second freshness |
 | Persistent USB identity | Firmware | Embassy mutex plus two alternating flash slots |
@@ -413,7 +413,7 @@ When adding a feature, keep ownership at one layer and pass bounded messages acr
 - Secure transfer records use ChaCha20-Poly1305 authentication; the browser also enforces ordering/size and checks the final streamed SHA-256 before issuing its encrypted receipt.
 - Filesystem errors are encoded as status pages rather than terminating the host agent.
 - Display initialization is best effort; buttons and LED continue if the ST7789 fails.
-- PSRAM detection is best effort; HTTP has SRAM fallback buffers.
+- PSRAM detection is best effort; each HTTP worker normally owns disjoint PSRAM TCP buffers and has 4 KiB SRAM fallbacks.
 
 ## Where to make changes
 

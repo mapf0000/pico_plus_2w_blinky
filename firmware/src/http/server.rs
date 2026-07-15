@@ -9,14 +9,14 @@ pub const WEB_TASK_POOL_SIZE: usize = 4;
 type TimerDuration = embassy_time_legacy::Duration;
 
 // Centralized HTTP sizes and limits for maintainability
-#[cfg(feature = "psram")]
-const RX_BUF_SIZE: usize = crate::psram_pool::HTTP_RX_SIZE;
-#[cfg(feature = "psram")]
-const TX_BUF_SIZE: usize = crate::psram_pool::HTTP_TX_SIZE;
 #[cfg(not(feature = "psram"))]
 const RX_BUF_SIZE: usize = 4096;
 #[cfg(not(feature = "psram"))]
 const TX_BUF_SIZE: usize = 4096;
+#[cfg(feature = "psram")]
+const FALLBACK_RX_BUF_SIZE: usize = 4096;
+#[cfg(feature = "psram")]
+const FALLBACK_TX_BUF_SIZE: usize = 4096;
 // Request parse buffer (headers + small body staging).
 const REQ_BUF_SIZE: usize = 4096;
 
@@ -33,11 +33,11 @@ static mut HTTP_REQ_BUFS: [[u8; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
 
 // If PSRAM is unavailable at runtime for a worker, fall back to SRAM per-worker.
 #[cfg(feature = "psram")]
-static mut FALLBACK_RX_BUFS: [[u8; RX_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
-    [[0; RX_BUF_SIZE]; WEB_TASK_POOL_SIZE];
+static mut FALLBACK_RX_BUFS: [[u8; FALLBACK_RX_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
+    [[0; FALLBACK_RX_BUF_SIZE]; WEB_TASK_POOL_SIZE];
 #[cfg(feature = "psram")]
-static mut FALLBACK_TX_BUFS: [[u8; TX_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
-    [[0; TX_BUF_SIZE]; WEB_TASK_POOL_SIZE];
+static mut FALLBACK_TX_BUFS: [[u8; FALLBACK_TX_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
+    [[0; FALLBACK_TX_BUF_SIZE]; WEB_TASK_POOL_SIZE];
 #[cfg(feature = "psram")]
 static mut FALLBACK_HTTP_REQ_BUFS: [[u8; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
     [[0; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE];
@@ -71,7 +71,7 @@ pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
     // --- Buffer selection per worker ---
     #[cfg(feature = "psram")]
     let (rx_buf, tx_buf, http_buf): (&mut [u8], &mut [u8], &mut [u8]) =
-        match crate::psram_pool::http_buffers() {
+        match crate::psram_pool::http_buffers(id) {
             Some((rx, tx)) => {
                 let http: &mut [u8] = unsafe { &mut FALLBACK_HTTP_REQ_BUFS[id] };
                 (rx, tx, http)
@@ -91,8 +91,8 @@ pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
 
     log::info!(
         "http[{id}]: buffers ready (rx={}, tx={}, req={})",
-        RX_BUF_SIZE,
-        TX_BUF_SIZE,
+        rx_buf.len(),
+        tx_buf.len(),
         REQ_BUF_SIZE
     );
 
@@ -102,3 +102,6 @@ pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
         .await
         .into_never()
 }
+
+#[cfg(feature = "psram")]
+const _: () = assert!(WEB_TASK_POOL_SIZE == crate::psram_pool::HTTP_BUFFER_COUNT);

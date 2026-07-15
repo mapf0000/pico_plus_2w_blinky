@@ -51,6 +51,7 @@ const TAG_EXECUTE: u8 = 1;
 const TAG_DEBUG_MSG: u8 = 2;
 const TAG_REQUEST_AGENT_STATUS: u8 = 7;
 const TAG_AGENT_STATUS: u8 = 8;
+const TAG_HOST_OS: u8 = 34;
 const TAG_DB_CREDENTIALS_REQUEST: u8 = 11;
 const TAG_DB_CREDENTIALS_RESPONSE: u8 = 12;
 
@@ -87,7 +88,7 @@ pub const MAX_SECURE_TRANSFER_FRAME: usize = transfer_protocol::MAX_SECURE_SESSI
 const MAX_RELAY_TRANSFERS: usize = 4;
 const NONE_CONTIGUOUS_CHUNK: u32 = u32::MAX;
 const DEFAULT_ACK_WINDOW_CREDIT: u16 = 8;
-const PROGRESS_EMIT_EVERY_CHUNKS: u32 = 16;
+const PROGRESS_EMIT_EVERY_CHUNKS: u32 = 64;
 
 struct TlvStreamDecoder {
     header: [u8; TLV_HEADER_LEN],
@@ -336,6 +337,13 @@ where
                 snapshot.hostname.as_str()
             );
             let _ = ws::queue_transfer_text(crate::capabilities::hello_json());
+        }
+        TAG_HOST_OS => {
+            crate::capabilities::record_host_os(payload);
+            log::info!(
+                "usb: detected host OS: {}",
+                crate::capabilities::host_agent_snapshot().host_os.as_str()
+            );
         }
         TAG_REQUEST_AGENT_STATUS => {
             crate::capabilities::mark_host_agent_seen();

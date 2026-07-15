@@ -35,7 +35,7 @@ pub struct ScriptMeta {
     pub dsl: Option<String>,
 }
 
-pub const WEBSOCKET_PROTOCOL_VERSION: u16 = 1;
+pub const WEBSOCKET_PROTOCOL_VERSION: u16 = 2;
 pub const TRANSFER_PROTOCOL_VERSION: u16 = transfer_protocol::TRANSFER_PROTOCOL_VERSION;
 pub const FILESYSTEM_PROTOCOL_VERSION: u16 = 1;
 
@@ -350,7 +350,7 @@ fn connect_ws() {
                 bytes.copy_to(&mut payload);
                 match payload.split_first() {
                     Some((2, data)) => (callbacks.on_filesystem_binary)(data.to_vec()),
-                    Some((kind @ 3..=6, data)) => {
+                    Some((kind @ 3..=7, data)) => {
                         (callbacks.on_secure_transfer_binary)(*kind, data.to_vec())
                     }
                     Some((kind, _)) => {

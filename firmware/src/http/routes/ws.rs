@@ -1,5 +1,5 @@
 use embassy_futures::select::{Either as SelectEither, select};
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel, mutex::Mutex};
 use picoserve::futures::Either;
 use picoserve::io::embedded_io_async;
 use picoserve::response::ws; // for Read/Write trait bounds
@@ -14,6 +14,7 @@ use heapless::{String, Vec};
 
 pub const TRANSFER_TEXT_MAX: usize = 768;
 pub const TRANSFER_BINARY_MAX: usize = 2049;
+const TRANSFER_BATCH_BINARY_MAX: usize = 1 + transfer_protocol::MAX_SECURE_CHUNK_BATCH_LEN;
 pub const WS_BINARY_KIND_FILESYSTEM: u8 = 2;
 pub const WS_BINARY_KIND_SESSION: u8 = transfer_protocol::WS_BINARY_KIND_SESSION;
 const WS_COMMAND_MAX: usize = 2048;
@@ -31,6 +32,8 @@ pub struct TransferWsEvent {
 }
 
 pub static TRANSFER_WS_EVENTS: Channel<ThreadModeRawMutex, TransferWsEvent, 16> = Channel::new();
+static TRANSFER_BATCH_BUFFER: Mutex<ThreadModeRawMutex, [u8; TRANSFER_BATCH_BINARY_MAX]> =
+    Mutex::new([0; TRANSFER_BATCH_BINARY_MAX]);
 static ACTIVE_WS_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
 pub fn has_active_client() -> bool {
@@ -157,18 +160,25 @@ impl ws::WebSocketCallback for HelloWs {
         let _ = CTRL_CHAN.try_send(CtrlCommand::RequestStatus);
 
         let mut buf = [0u8; WS_COMMAND_MAX];
+        let mut pending_event = None;
         loop {
+            if let Some(event) = pending_event.take() {
+                match send_transfer_event(event, &mut tx).await {
+                    Ok(next) => pending_event = next,
+                    Err(_) => break,
+                }
+                continue;
+            }
             match select(
                 TRANSFER_WS_EVENTS.receive(),
                 rx.next_message(&mut buf, core::future::pending::<()>()),
             )
             .await
             {
-                SelectEither::First(event) => {
-                    if send_transfer_event(event, &mut tx).await.is_err() {
-                        break;
-                    }
-                }
+                SelectEither::First(event) => match send_transfer_event(event, &mut tx).await {
+                    Ok(next) => pending_event = next,
+                    Err(_) => break,
+                },
                 SelectEither::Second(result) => match result {
                     Ok(Either::First(Ok(ws::Message::Text(s)))) => {
                         let cmd = s.trim();
@@ -233,15 +243,76 @@ impl ws::WebSocketCallback for HelloWs {
 async fn send_transfer_event<W: embedded_io_async::Write>(
     event: TransferWsEvent,
     tx: &mut ws::SocketTx<W>,
-) -> Result<(), W::Error> {
+) -> Result<Option<TransferWsEvent>, W::Error> {
+    if let Some(transfer_id) = secure_chunk_transfer_id(&event) {
+        let Ok(next) = TRANSFER_WS_EVENTS.try_receive() else {
+            tx.send_binary(event.payload.as_slice()).await?;
+            return Ok(None);
+        };
+        if secure_chunk_transfer_id(&next) != Some(transfer_id) {
+            tx.send_binary(event.payload.as_slice()).await?;
+            return Ok(Some(next));
+        }
+
+        let mut buffer = TRANSFER_BATCH_BUFFER.lock().await;
+        buffer[0] = transfer_protocol::WS_BINARY_KIND_SECURE_CHUNK_BATCH;
+        buffer[1] = 0;
+        let mut len = 2;
+        let mut chunk_count = 0u8;
+        append_secure_chunk(&mut buffer, &mut len, &mut chunk_count, &event);
+        append_secure_chunk(&mut buffer, &mut len, &mut chunk_count, &next);
+
+        let mut pending = None;
+        while usize::from(chunk_count) < transfer_protocol::SECURE_CHUNK_BATCH_MAX_CHUNKS {
+            let Ok(candidate) = TRANSFER_WS_EVENTS.try_receive() else {
+                break;
+            };
+            if secure_chunk_transfer_id(&candidate) != Some(transfer_id) {
+                pending = Some(candidate);
+                break;
+            }
+            append_secure_chunk(&mut buffer, &mut len, &mut chunk_count, &candidate);
+        }
+        buffer[1] = chunk_count;
+        tx.send_binary(&buffer[..len]).await?;
+        return Ok(pending);
+    }
+
     match event.kind {
         TransferWsEventKind::Text => {
             let text = core::str::from_utf8(event.payload.as_slice())
                 .expect("text WebSocket events originate from UTF-8 strings");
-            tx.send_text(text).await
+            tx.send_text(text).await?;
         }
-        TransferWsEventKind::Binary => tx.send_binary(event.payload.as_slice()).await,
+        TransferWsEventKind::Binary => tx.send_binary(event.payload.as_slice()).await?,
     }
+    Ok(None)
+}
+
+fn secure_chunk_transfer_id(event: &TransferWsEvent) -> Option<u64> {
+    if !matches!(event.kind, TransferWsEventKind::Binary)
+        || event.payload.first().copied() != Some(transfer_protocol::WS_BINARY_KIND_SECURE_CHUNK)
+    {
+        return None;
+    }
+    transfer_protocol::decode_secure_chunk(&event.payload[1..])
+        .ok()
+        .map(|chunk| chunk.transfer_id)
+}
+
+fn append_secure_chunk(
+    buffer: &mut [u8; TRANSFER_BATCH_BINARY_MAX],
+    len: &mut usize,
+    chunk_count: &mut u8,
+    event: &TransferWsEvent,
+) {
+    let chunk = &event.payload[1..];
+    let chunk_len = chunk.len() as u16;
+    buffer[*len..*len + 2].copy_from_slice(&chunk_len.to_le_bytes());
+    *len += 2;
+    buffer[*len..*len + chunk.len()].copy_from_slice(chunk);
+    *len += chunk.len();
+    *chunk_count += 1;
 }
 
 // ---- WS command handling ----
@@ -264,14 +335,18 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
     if cmd.eq_ignore_ascii_case("STATUS") {
         let enabled = usb_supervisor::USB_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
         let ready = USB_READY.load(core::sync::atomic::Ordering::SeqCst);
+        let host_agent = crate::capabilities::host_agent_snapshot();
+        let host_os = if host_agent.present && !host_agent.host_os.is_empty() {
+            host_agent.host_os.as_str()
+        } else {
+            "unknown"
+        };
         let mut body: String<96> = String::new();
         let _ = core::fmt::write(
             &mut body,
             format_args!(
                 "{{\"usb_enabled\":{},\"usb_ready\":{},\"host_os\":\"{}\"}}",
-                enabled,
-                ready,
-                host::host_os_str()
+                enabled, ready, host_os
             ),
         );
         let _ = response.push_str(body.as_str());

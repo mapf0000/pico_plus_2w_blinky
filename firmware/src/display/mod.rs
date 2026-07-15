@@ -162,7 +162,7 @@ fn adc_temp_to_celsius(raw: u16) -> f32 {
 fn psram_status_line() -> String<32> {
     #[cfg(feature = "psram")]
     {
-        let status = if crate::psram_pool::http_buffers().is_some() {
+        let status = if crate::psram_pool::is_available() {
             "ok"
         } else {
             "not detected"

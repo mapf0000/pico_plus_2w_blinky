@@ -82,11 +82,10 @@ fn serial_buffer() -> &'static mut heapless::String<16> {
 #[embassy_executor::task]
 pub async fn usb_task(
     cancel: &'static Signal<ThreadModeRawMutex, u64>,
-    _start_req: &'static Signal<ThreadModeRawMutex, bool>,
+    start_req: &'static Signal<ThreadModeRawMutex, bool>,
 ) -> ! {
     loop {
-        // Auto-start USB immediately (was waiting for HTTP/WebSocket trigger).
-        let run_mac_assistant = false;
+        let run_mac_assistant = start_req.wait().await;
 
         if !crate::usb::usb_supervisor::USB_ENABLED.load(Ordering::SeqCst) {
             // Request was cancelled before bring-up completed.

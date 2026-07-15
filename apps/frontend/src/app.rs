@@ -445,7 +445,26 @@ pub(crate) fn app() -> Html {
                                         plaintext.as_slice(),
                                         now_ms,
                                     )?;
-                                    transfers_state.set(store.snapshots());
+                                }
+                                transfer_protocol::WS_BINARY_KIND_SECURE_CHUNK_BATCH => {
+                                    let batch =
+                                        transfer_protocol::decode_secure_chunk_batch(&binary)
+                                            .map_err(|_| {
+                                                "invalid encrypted chunk batch".to_string()
+                                            })?;
+                                    let now_ms = monotonic_now_ms();
+                                    let session = secure_session.borrow();
+                                    let mut store = transfer_store.borrow_mut();
+                                    for chunk in batch.chunks() {
+                                        let (transfer_id, chunk_index, plaintext) =
+                                            session.decrypt_chunk(chunk)?;
+                                        store.apply_secure_chunk(
+                                            transfer_id,
+                                            chunk_index,
+                                            plaintext.as_slice(),
+                                            now_ms,
+                                        )?;
+                                    }
                                 }
                                 transfer_protocol::WS_BINARY_KIND_SECURE_CLOSE => {
                                     let close =
@@ -838,10 +857,12 @@ pub(crate) fn app() -> Html {
     };
 
     let on_usb_stop = {
+        let status = status.clone();
         let set_pending = set_pending.clone();
         let push_log = push_log.clone();
         let toast_cb = show_toast.clone();
         Callback::from(move |_| {
+            let status = status.clone();
             let set_pending = set_pending.clone();
             let push_log = push_log.clone();
             let show_toast = toast_cb.clone();
@@ -849,8 +870,14 @@ pub(crate) fn app() -> Html {
                 set_pending.emit((PendingAction::UsbStop, true));
                 match api::usb_unregister().await {
                     Ok(()) => {
-                        push_log.emit("USB disabling request sent".into());
-                        show_toast.emit(("USB disabling…".into(), true));
+                        let next_status = (*status).clone().map(|mut state| {
+                            state.usb_enabled = false;
+                            state.usb_ready = false;
+                            state
+                        });
+                        status.set(next_status);
+                        push_log.emit("USB disabled".into());
+                        show_toast.emit(("USB disabled".into(), true));
                     }
                     Err(e) => {
                         push_log.emit(format!("usb stop error: {e}"));

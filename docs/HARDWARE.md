@@ -113,8 +113,9 @@ The default `psram` feature probes the external memory through QMI CS1 using an 
 
 Current explicit PSRAM consumers reserve:
 
-- 8 KiB HTTP receive buffer.
-- 4 KiB HTTP transmit buffer.
+- Four disjoint 8 KiB HTTP receive buffers in PSRAM, one per HTTP worker.
+- Four disjoint 32 KiB HTTP transmit buffers in PSRAM, sized for batched transfer traffic.
+- 4 KiB SRAM receive/transmit buffers per worker when PSRAM is unavailable.
 
 If detection fails or the memory is too small, firmware logs a warning and HTTP workers use statically allocated SRAM fallback buffers. The rest of PSRAM is not a general allocator; code cannot assume `Vec`/heap allocation becomes available merely because the feature is enabled.
 

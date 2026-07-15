@@ -8,8 +8,8 @@ use transfer_protocol::{
     CONTROL_SET_DEFAULT_PATH, CONTROL_START_DEFAULT_TRANSFER, CONTROL_START_TRANSFER,
     MAX_TRANSFER_PATH_LEN, RECORD_CLOSE, RECORD_MANIFEST, SESSION_ENVELOPE_HEADER_LEN,
     SESSION_ID_LEN, SESSION_KIND_HANDSHAKE, SESSION_KIND_READY, SESSION_KIND_REQUEST,
-    SESSION_KIND_TRANSPORT, decode_secure_chunk, decode_secure_close, decode_secure_open,
-    decode_session_envelope, encode_session_envelope,
+    SESSION_KIND_TRANSPORT, decode_secure_chunk, decode_secure_chunk_batch, decode_secure_close,
+    decode_secure_open, decode_session_envelope, encode_session_envelope,
 };
 use zeroize::Zeroizing;
 
@@ -316,6 +316,12 @@ pub fn secure_transfer_id(kind: u8, payload: &[u8]) -> Option<u64> {
             .map(|frame| frame.transfer_id),
         transfer_protocol::WS_BINARY_KIND_SECURE_CHUNK => decode_secure_chunk(payload)
             .ok()
+            .map(|frame| frame.transfer_id),
+        transfer_protocol::WS_BINARY_KIND_SECURE_CHUNK_BATCH => decode_secure_chunk_batch(payload)
+            .ok()?
+            .chunks()
+            .next()
+            .and_then(|chunk| decode_secure_chunk(chunk).ok())
             .map(|frame| frame.transfer_id),
         transfer_protocol::WS_BINARY_KIND_SECURE_CLOSE => decode_secure_close(payload)
             .ok()

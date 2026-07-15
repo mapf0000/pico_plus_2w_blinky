@@ -10,7 +10,7 @@ use portable_atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::http::util::escape_json_str;
 
 pub const HELLO_VERSION: u16 = 1;
-pub const WEBSOCKET_PROTOCOL_VERSION: u16 = 1;
+pub const WEBSOCKET_PROTOCOL_VERSION: u16 = 2;
 pub const TRANSFER_PROTOCOL_VERSION: u16 = transfer_protocol::TRANSFER_PROTOCOL_VERSION;
 pub const FILESYSTEM_PROTOCOL_VERSION: u16 = 1;
 pub const HELLO_TEXT_MAX: usize = 768;
@@ -19,10 +19,12 @@ const AGENT_STATUS_MAGIC: &[u8] = b"PICOAGENT\0";
 const HOST_AGENT_STALE_AFTER_MS: u64 = 25_000;
 const HOST_AGENT_VERSION_MAX: usize = 32;
 const HOSTNAME_MAX: usize = 96;
+const HOST_OS_MAX: usize = 24;
 
 struct HostAgentState {
     version: String<HOST_AGENT_VERSION_MAX>,
     hostname: String<HOSTNAME_MAX>,
+    host_os: String<HOST_OS_MAX>,
 }
 
 impl HostAgentState {
@@ -30,6 +32,7 @@ impl HostAgentState {
         Self {
             version: String::new(),
             hostname: String::new(),
+            host_os: String::new(),
         }
     }
 }
@@ -39,6 +42,7 @@ pub struct HostAgentSnapshot {
     pub present: bool,
     pub version: String<HOST_AGENT_VERSION_MAX>,
     pub hostname: String<HOSTNAME_MAX>,
+    pub host_os: String<HOST_OS_MAX>,
 }
 
 static HOST_AGENT_STATE: Mutex<CriticalSectionRawMutex, RefCell<HostAgentState>> =
@@ -53,6 +57,7 @@ pub fn clear_host_agent() {
         let mut state = cell.borrow_mut();
         state.version.clear();
         state.hostname.clear();
+        state.host_os.clear();
     });
 }
 
@@ -67,6 +72,7 @@ pub fn record_host_agent_status(payload: &[u8]) {
         let mut state = cell.borrow_mut();
         state.version.clear();
         state.hostname.clear();
+        state.host_os.clear();
 
         if let Some(encoded) = payload.strip_prefix(AGENT_STATUS_MAGIC) {
             let mut fields = encoded.splitn(2, |byte| *byte == 0);
@@ -93,6 +99,17 @@ pub fn record_host_agent_status(payload: &[u8]) {
     });
 }
 
+pub fn record_host_os(payload: &[u8]) {
+    mark_host_agent_seen();
+    HOST_AGENT_STATE.lock(|cell| {
+        let mut state = cell.borrow_mut();
+        state.host_os.clear();
+        if let Ok(host_os) = core::str::from_utf8(payload) {
+            store_safe_token(&mut state.host_os, host_os);
+        }
+    });
+}
+
 fn store_safe_token<const N: usize>(target: &mut String<N>, value: &str) {
     for character in value.chars() {
         let safe =
@@ -113,6 +130,7 @@ pub fn host_agent_snapshot() -> HostAgentSnapshot {
             present,
             version: state.version.clone(),
             hostname: state.hostname.clone(),
+            host_os: state.host_os.clone(),
         }
     })
 }

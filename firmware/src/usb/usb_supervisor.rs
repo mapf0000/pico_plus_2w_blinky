@@ -20,8 +20,10 @@ pub fn init(spawner: Spawner) {
         "usb_task",
         crate::usb::task::usb_task(&USB_CANCEL, &START_REQ),
     );
-    // Auto-enable so CDC logs come up without a trigger.
+    // Auto-enable so CDC logs come up without an external trigger. The task still
+    // waits for a request between sessions so it yields after USB is stopped.
     USB_ENABLED.store(true, Ordering::SeqCst);
+    START_REQ.signal(false);
 }
 
 pub async fn start(run_mac_assistant: bool) -> Result<(), ()> {
