@@ -9,6 +9,7 @@ mod frontend_static {
 }
 
 pub(crate) async fn route_frontend_index() -> impl picoserve::response::IntoResponse {
+    crate::health::mark(crate::health::Stage::HttpIndex);
     log::debug!("http: serve index.html");
     Response::ok(BytesWithType {
         ty: "text/html; charset=utf-8",
@@ -18,6 +19,7 @@ pub(crate) async fn route_frontend_index() -> impl picoserve::response::IntoResp
 }
 
 pub(crate) async fn route_frontend_js() -> impl picoserve::response::IntoResponse {
+    crate::health::mark(crate::health::Stage::HttpJavascript);
     log::debug!(
         "http: serve app.js ({} bytes)",
         frontend_static::APP_JS.len()
@@ -30,6 +32,7 @@ pub(crate) async fn route_frontend_js() -> impl picoserve::response::IntoRespons
 }
 
 pub(crate) async fn route_frontend_wasm() -> impl picoserve::response::IntoResponse {
+    crate::health::mark(crate::health::Stage::HttpWasm);
     log::debug!(
         "http: serve app.wasm ({} bytes)",
         frontend_static::APP_WASM.len()
@@ -42,6 +45,7 @@ pub(crate) async fn route_frontend_wasm() -> impl picoserve::response::IntoRespo
 }
 
 pub(crate) async fn route_frontend_style() -> impl picoserve::response::IntoResponse {
+    crate::health::mark(crate::health::Stage::HttpStylesheet);
     log::debug!(
         "http: serve style.css ({} bytes)",
         frontend_static::STYLE_CSS.len()
@@ -54,6 +58,7 @@ pub(crate) async fn route_frontend_style() -> impl picoserve::response::IntoResp
 }
 
 pub(crate) async fn route_frontend_idb_js() -> impl picoserve::response::IntoResponse {
+    crate::health::mark(crate::health::Stage::HttpIndexedDb);
     log::debug!(
         "http: serve idb.js ({} bytes)",
         frontend_static::IDB_JS.len()

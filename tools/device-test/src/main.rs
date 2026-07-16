@@ -1,4 +1,5 @@
 use std::io::{ErrorKind, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -10,7 +11,8 @@ use serialport::{
 };
 use transfer_protocol::{
     FILE_OPEN_HEADER_LEN, FILE_TAG_LEN, MANIFEST_PLAINTEXT_BASE_LEN, MAX_PLAINTEXT_CHUNK,
-    TLV_MAX_PAYLOAD, encode_secure_chunk, encode_secure_open,
+    TLV_MAX_PAYLOAD, WS_BINARY_KIND_SECURE_CHUNK, WS_BINARY_KIND_SECURE_CHUNK_BATCH,
+    decode_secure_chunk, decode_secure_chunk_batch, encode_secure_chunk, encode_secure_open,
 };
 
 const BAUD_RATE: u32 = 115_200;
@@ -60,6 +62,14 @@ struct Args {
     /// Print matching USB CDC metadata without opening a port or sending data.
     #[arg(long)]
     list: bool,
+
+    /// Exercise the singleton WebSocket server and encrypted chunk batching.
+    #[arg(long)]
+    websocket_batch_test: bool,
+
+    /// Socket address used by --websocket-batch-test.
+    #[arg(long, default_value = "192.168.4.1:81")]
+    websocket_address: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,12 +131,19 @@ struct DeviceRunner {
     decoder: FrameDecoder,
     response_timeout: Duration,
     transfer_id_seed: u64,
+    websocket_address: Option<String>,
+    websocket_wait: Duration,
     passed: usize,
     failures: Vec<(&'static str, String)>,
 }
 
 impl DeviceRunner {
-    fn new(port: Box<dyn SerialPort>, response_timeout: Duration) -> Self {
+    fn new(
+        port: Box<dyn SerialPort>,
+        response_timeout: Duration,
+        websocket_address: Option<String>,
+        websocket_wait: Duration,
+    ) -> Self {
         let transfer_id_seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -137,6 +154,8 @@ impl DeviceRunner {
             decoder: FrameDecoder::default(),
             response_timeout,
             transfer_id_seed,
+            websocket_address,
+            websocket_wait,
             passed: 0,
             failures: Vec::new(),
         }
@@ -172,6 +191,13 @@ impl DeviceRunner {
             Self::test_oversized_header_resync,
         );
         self.case("final control health probe", Self::test_probe);
+        if self.websocket_address.is_some() {
+            self.case(
+                "singleton WebSocket encrypted chunk batching",
+                Self::test_websocket_batching,
+            );
+            self.case("post-WebSocket control health probe", Self::test_probe);
+        }
 
         println!(
             "[SUMMARY] {} passed; {} failed",
@@ -424,6 +450,283 @@ impl DeviceRunner {
         self.send_frame(TAG_REQUEST_AGENT_STATUS, &[])?;
         self.expect_exact(TAG_DEBUG_MSG, PROBE_OK)
     }
+
+    fn test_websocket_batching(&mut self) -> Result<()> {
+        let address = self
+            .websocket_address
+            .as_deref()
+            .expect("test is called only when a WebSocket address is configured");
+        let mut websocket = WebSocketProbe::connect(address, self.websocket_wait)?;
+
+        self.reset_input();
+        let transfer_id = self.transfer_id_seed ^ 0x81;
+        let session_id = [0x51; 16];
+        let mut payload = [0_u8; TLV_MAX_PAYLOAD];
+        let manifest_ciphertext = [0x5a; MANIFEST_PLAINTEXT_BASE_LEN + FILE_TAG_LEN];
+        let open_len = encode_secure_open(
+            &mut payload,
+            &session_id,
+            transfer_id,
+            &[0x61; 32],
+            1,
+            8,
+            &manifest_ciphertext,
+        )
+        .map_err(|error| anyhow!("encode batch-test FILE_OPEN: {error:?}"))?;
+        self.send_frame(TAG_FILE_OPEN, &payload[..open_len])?;
+        ensure!(
+            self.expect_transfer_response(transfer_id)?.tag == TAG_FILE_ACK,
+            "batch-test FILE_OPEN was not acknowledged"
+        );
+
+        for chunk_index in 0..8 {
+            let ciphertext = [chunk_index as u8; FILE_TAG_LEN + 1];
+            let chunk_len = encode_secure_chunk(
+                &mut payload,
+                &session_id,
+                transfer_id,
+                chunk_index,
+                &ciphertext,
+            )
+            .map_err(|error| anyhow!("encode batch-test FILE_CHUNK: {error:?}"))?;
+            self.send_frame(TAG_FILE_CHUNK, &payload[..chunk_len])?;
+        }
+        for _ in 0..8 {
+            ensure!(
+                self.expect_transfer_response(transfer_id)?.tag == TAG_FILE_ACK,
+                "batch-test FILE_CHUNK was not acknowledged"
+            );
+        }
+
+        let deadline = Instant::now() + self.response_timeout.max(Duration::from_secs(5));
+        let mut received_chunks = 0;
+        let mut saw_batch = false;
+        while received_chunks < 8 {
+            let frame = websocket
+                .next_frame(deadline)?
+                .ok_or_else(|| anyhow!("timed out waiting for relayed WebSocket chunks"))?;
+            if frame.opcode != 2 {
+                continue;
+            }
+            let Some((&kind, body)) = frame.payload.split_first() else {
+                continue;
+            };
+            match kind {
+                WS_BINARY_KIND_SECURE_CHUNK => {
+                    let chunk = decode_secure_chunk(body)
+                        .map_err(|error| anyhow!("decode individual relayed chunk: {error:?}"))?;
+                    if chunk.transfer_id == transfer_id {
+                        received_chunks += 1;
+                    }
+                }
+                WS_BINARY_KIND_SECURE_CHUNK_BATCH => {
+                    let batch = decode_secure_chunk_batch(body)
+                        .map_err(|error| anyhow!("decode relayed chunk batch: {error:?}"))?;
+                    let mut matching_chunks = 0;
+                    for encoded_chunk in batch.chunks() {
+                        let chunk = decode_secure_chunk(encoded_chunk)
+                            .map_err(|error| anyhow!("decode chunk in relayed batch: {error:?}"))?;
+                        if chunk.transfer_id == transfer_id {
+                            matching_chunks += 1;
+                        }
+                    }
+                    if matching_chunks > 0 {
+                        ensure!(
+                            matching_chunks >= 2,
+                            "batch contained fewer than two chunks"
+                        );
+                        received_chunks += matching_chunks;
+                        saw_batch = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        ensure!(saw_batch, "firmware relayed all chunks without batching");
+        ensure!(received_chunks == 8, "received duplicate relayed chunks");
+
+        let cleanup = encode_abort(transfer_id, FILE_ABORT_REASON_CAPACITY, b"test cleanup")?;
+        self.send_frame(TAG_FILE_ABORT, &cleanup)?;
+        ensure!(
+            self.expect_transfer_response(transfer_id)?.tag == TAG_FILE_RESULT,
+            "batch-test cleanup did not complete"
+        );
+        Ok(())
+    }
+}
+
+struct WebSocketFrame {
+    opcode: u8,
+    payload: Vec<u8>,
+}
+
+struct WebSocketProbe {
+    stream: TcpStream,
+    bytes: Vec<u8>,
+}
+
+impl WebSocketProbe {
+    fn connect(address: &str, wait: Duration) -> Result<Self> {
+        let deadline = Instant::now() + wait;
+        let mut last_error = None;
+        let stream = loop {
+            let socket_addresses = address
+                .to_socket_addrs()
+                .with_context(|| format!("resolve WebSocket address {address}"))?;
+            let mut connected = None;
+            for socket_address in socket_addresses {
+                match TcpStream::connect_timeout(&socket_address, Duration::from_secs(1)) {
+                    Ok(stream) => {
+                        connected = Some(stream);
+                        break;
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            if let Some(stream) = connected {
+                break stream;
+            }
+            if Instant::now() >= deadline {
+                return Err(last_error
+                    .map(anyhow::Error::from)
+                    .unwrap_or_else(|| anyhow!("no socket addresses resolved for {address}")))
+                .with_context(|| format!("connect to WebSocket server {address}"));
+            }
+            thread::sleep(Duration::from_millis(200));
+        };
+
+        stream
+            .set_read_timeout(Some(IO_POLL))
+            .context("set WebSocket read timeout")?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .context("set WebSocket write timeout")?;
+        let mut probe = Self {
+            stream,
+            bytes: Vec::new(),
+        };
+        let request = format!(
+            "GET /ws HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        probe
+            .stream
+            .write_all(request.as_bytes())
+            .context("write WebSocket upgrade request")?;
+        probe.stream.flush().context("flush WebSocket upgrade")?;
+        probe.read_upgrade_response(Instant::now() + Duration::from_secs(5))?;
+        Ok(probe)
+    }
+
+    fn read_upgrade_response(&mut self, deadline: Instant) -> Result<()> {
+        loop {
+            if let Some(header_end) = self.bytes.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                let frame_start = header_end + 4;
+                let headers = std::str::from_utf8(&self.bytes[..header_end])
+                    .context("WebSocket upgrade response is not UTF-8")?;
+                ensure!(
+                    headers.starts_with("HTTP/1.1 101") || headers.starts_with("HTTP/1.0 101"),
+                    "WebSocket upgrade failed: {headers}"
+                );
+                self.bytes.drain(..frame_start);
+                return Ok(());
+            }
+            ensure!(
+                self.bytes.len() <= 8192,
+                "WebSocket upgrade headers exceed 8192 bytes"
+            );
+            ensure!(
+                Instant::now() < deadline,
+                "timed out waiting for WebSocket upgrade response"
+            );
+            self.read_more()?;
+        }
+    }
+
+    fn next_frame(&mut self, deadline: Instant) -> Result<Option<WebSocketFrame>> {
+        loop {
+            if let Some(frame) = decode_websocket_frame(&mut self.bytes)? {
+                return Ok(Some(frame));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            self.read_more()?;
+        }
+    }
+
+    fn read_more(&mut self) -> Result<()> {
+        let mut buffer = [0_u8; 4096];
+        match self.stream.read(&mut buffer) {
+            Ok(0) => bail!("WebSocket server closed the connection"),
+            Ok(count) => self.bytes.extend_from_slice(&buffer[..count]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(error).context("read WebSocket frame"),
+        }
+        Ok(())
+    }
+}
+
+fn decode_websocket_frame(bytes: &mut Vec<u8>) -> Result<Option<WebSocketFrame>> {
+    if bytes.len() < 2 {
+        return Ok(None);
+    }
+    let opcode = bytes[0] & 0x0f;
+    let masked = bytes[1] & 0x80 != 0;
+    let mut at = 2;
+    let payload_len = match bytes[1] & 0x7f {
+        len @ 0..=125 => len as usize,
+        126 => {
+            if bytes.len() < at + 2 {
+                return Ok(None);
+            }
+            let len = u16::from_be_bytes(bytes[at..at + 2].try_into().expect("length checked"));
+            at += 2;
+            len as usize
+        }
+        127 => {
+            if bytes.len() < at + 8 {
+                return Ok(None);
+            }
+            let len = u64::from_be_bytes(bytes[at..at + 8].try_into().expect("length checked"));
+            at += 8;
+            usize::try_from(len).context("WebSocket frame is too large for this host")?
+        }
+        _ => unreachable!("the seven-bit WebSocket length discriminator is at most 127"),
+    };
+    ensure!(
+        payload_len <= 64 * 1024,
+        "WebSocket frame exceeds test limit"
+    );
+
+    let mask = if masked {
+        if bytes.len() < at + 4 {
+            return Ok(None);
+        }
+        let mask: [u8; 4] = bytes[at..at + 4].try_into().expect("length checked");
+        at += 4;
+        Some(mask)
+    } else {
+        None
+    };
+    let frame_len = at
+        .checked_add(payload_len)
+        .context("WebSocket frame length overflow")?;
+    if bytes.len() < frame_len {
+        return Ok(None);
+    }
+
+    let mut payload = bytes[at..frame_len].to_vec();
+    if let Some(mask) = mask {
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mask[index % mask.len()];
+        }
+    }
+    bytes.drain(..frame_len);
+    Ok(Some(WebSocketFrame { opcode, payload }))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -463,7 +766,14 @@ fn main() -> Result<()> {
 
     let port = open_port(&port_name)
         .with_context(|| format!("open control CDC {port_name} exclusively"))?;
-    DeviceRunner::new(port, Duration::from_millis(args.response_timeout_ms)).run()
+    let websocket_address = args.websocket_batch_test.then_some(args.websocket_address);
+    DeviceRunner::new(
+        port,
+        Duration::from_millis(args.response_timeout_ms),
+        websocket_address,
+        Duration::from_secs(args.wait_secs),
+    )
+    .run()
 }
 
 fn parse_u16(raw: &str) -> std::result::Result<u16, String> {
@@ -767,5 +1077,32 @@ mod tests {
         assert_eq!(parse_u16("0x1209").unwrap(), 0x1209);
         assert_eq!(parse_u16("4617").unwrap(), 0x1209);
         assert!(parse_u16("0x10000").is_err());
+    }
+
+    #[test]
+    fn websocket_decoder_handles_extended_binary_frames() {
+        let payload = vec![0x5a; 512];
+        let mut encoded = vec![0x82, 126];
+        encoded.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        encoded.extend_from_slice(&payload);
+
+        let frame = decode_websocket_frame(&mut encoded).unwrap().unwrap();
+        assert_eq!(frame.opcode, 2);
+        assert_eq!(frame.payload, payload);
+        assert!(encoded.is_empty());
+    }
+
+    #[test]
+    fn websocket_decoder_waits_for_complete_payload() {
+        let mut encoded = vec![0x82, 3, 1, 2];
+        assert!(decode_websocket_frame(&mut encoded).unwrap().is_none());
+        encoded.push(3);
+        assert_eq!(
+            decode_websocket_frame(&mut encoded)
+                .unwrap()
+                .unwrap()
+                .payload,
+            vec![1, 2, 3]
+        );
     }
 }

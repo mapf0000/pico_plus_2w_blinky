@@ -2,6 +2,7 @@
 
 pub const TRANSFER_PROTOCOL_VERSION: u16 = 2;
 pub const SESSION_PROTOCOL_VERSION: u16 = 2;
+pub const WEBSOCKET_PORT: u16 = 81;
 
 pub const TAG_TRANSFER_SESSION_TO_HOST: u8 = 32;
 pub const TAG_TRANSFER_SESSION_TO_BROWSER: u8 = 33;
@@ -93,6 +94,69 @@ pub struct SecureClose<'a> {
 pub struct SecureChunkBatch<'a> {
     chunk_count: u8,
     entries: &'a [u8],
+}
+
+/// Incrementally encodes a bounded secure-chunk batch without allocation.
+///
+/// The output contains the batch payload beginning with `chunk_count`; callers
+/// are responsible for prepending the WebSocket binary-kind byte.
+pub struct SecureChunkBatchEncoder<'a> {
+    output: &'a mut [u8],
+    len: usize,
+    chunk_count: u8,
+}
+
+impl<'a> SecureChunkBatchEncoder<'a> {
+    pub fn new(output: &'a mut [u8]) -> Result<Self, DecodeError> {
+        let Some(first) = output.first_mut() else {
+            return Err(DecodeError::Truncated);
+        };
+        *first = 0;
+        Ok(Self {
+            output,
+            len: SECURE_CHUNK_BATCH_HEADER_LEN,
+            chunk_count: 0,
+        })
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) -> Result<(), DecodeError> {
+        if self.chunk_count as usize >= SECURE_CHUNK_BATCH_MAX_CHUNKS {
+            return Err(DecodeError::InvalidField);
+        }
+        if chunk.is_empty() || chunk.len() > TLV_MAX_PAYLOAD {
+            return Err(DecodeError::InvalidLength);
+        }
+        decode_secure_chunk(chunk)?;
+
+        let needed = self
+            .len
+            .checked_add(SECURE_CHUNK_BATCH_ENTRY_HEADER_LEN)
+            .and_then(|len| len.checked_add(chunk.len()))
+            .ok_or(DecodeError::InvalidLength)?;
+        if needed > self.output.len() {
+            return Err(DecodeError::Truncated);
+        }
+
+        let chunk_len = u16::try_from(chunk.len()).map_err(|_| DecodeError::InvalidLength)?;
+        self.output[self.len..self.len + 2].copy_from_slice(&chunk_len.to_le_bytes());
+        self.len += SECURE_CHUNK_BATCH_ENTRY_HEADER_LEN;
+        self.output[self.len..self.len + chunk.len()].copy_from_slice(chunk);
+        self.len += chunk.len();
+        self.chunk_count += 1;
+        self.output[0] = self.chunk_count;
+        Ok(())
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.chunk_count as usize
+    }
+
+    pub fn finish(self) -> Result<usize, DecodeError> {
+        if self.chunk_count == 0 {
+            return Err(DecodeError::InvalidField);
+        }
+        Ok(self.len)
+    }
 }
 
 impl<'a> SecureChunkBatch<'a> {
@@ -462,14 +526,11 @@ mod tests {
         let second_len = encode_secure_chunk(&mut second, &[1; 16], 9, 4, &ciphertext).unwrap();
 
         let mut batch = [0; 512];
-        batch[0] = 2;
-        let mut at = 1;
-        for chunk in [&first[..first_len], &second[..second_len]] {
-            batch[at..at + 2].copy_from_slice(&(chunk.len() as u16).to_le_bytes());
-            at += 2;
-            batch[at..at + chunk.len()].copy_from_slice(chunk);
-            at += chunk.len();
-        }
+        let mut encoder = SecureChunkBatchEncoder::new(&mut batch).unwrap();
+        encoder.push(&first[..first_len]).unwrap();
+        encoder.push(&second[..second_len]).unwrap();
+        assert_eq!(encoder.chunk_count(), 2);
+        let at = encoder.finish().unwrap();
 
         let decoded = decode_secure_chunk_batch(&batch[..at]).unwrap();
         assert_eq!(decoded.chunk_count(), 2);
@@ -487,6 +548,36 @@ mod tests {
             4
         );
         assert!(chunks.next().is_none());
+    }
+
+    #[test]
+    fn secure_chunk_batch_encoder_enforces_bounds() {
+        assert!(matches!(
+            SecureChunkBatchEncoder::new(&mut []),
+            Err(DecodeError::Truncated)
+        ));
+
+        let ciphertext = [0x5a; FILE_TAG_LEN];
+        let mut chunk = [0; 128];
+        let chunk_len = encode_secure_chunk(&mut chunk, &[1; 16], 9, 0, &ciphertext).unwrap();
+
+        let mut too_small = [0; 2];
+        let mut encoder = SecureChunkBatchEncoder::new(&mut too_small).unwrap();
+        assert_eq!(
+            encoder.push(&chunk[..chunk_len]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(encoder.finish(), Err(DecodeError::InvalidField));
+
+        let mut batch = [0; MAX_SECURE_CHUNK_BATCH_LEN];
+        let mut encoder = SecureChunkBatchEncoder::new(&mut batch).unwrap();
+        for _ in 0..SECURE_CHUNK_BATCH_MAX_CHUNKS {
+            encoder.push(&chunk[..chunk_len]).unwrap();
+        }
+        assert_eq!(
+            encoder.push(&chunk[..chunk_len]),
+            Err(DecodeError::InvalidField)
+        );
     }
 
     #[test]

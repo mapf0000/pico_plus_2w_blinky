@@ -10,6 +10,8 @@
 #   --pid ID                   USB product ID (default 0x0001).
 #   --wait-secs N              Enumeration timeout (default 45).
 #   --response-timeout-ms N    Per-response timeout (default 2500).
+#   --websocket-batch-test     Exercise Wi-Fi WebSocket batching after USB tests.
+#   --websocket-address ADDR   WebSocket test address (default 192.168.4.1:81).
 #   --host-keepalives N        Host-agent keepalive round-trips (default 2).
 #   --host-interval-ms N       Host-agent keepalive interval (default 10000).
 #   --host-timeout-ms N        Host-agent response timeout (default 2500).
@@ -77,6 +79,15 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --wait-secs|--response-timeout-ms)
+      [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
+      RUNNER_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --websocket-batch-test)
+      RUNNER_ARGS+=("$1")
+      shift
+      ;;
+    --websocket-address)
       [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
       RUNNER_ARGS+=("$1" "$2")
       shift 2

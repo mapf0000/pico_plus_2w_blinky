@@ -157,7 +157,7 @@ sequenceDiagram
     participant Storage as PSRAM + flash config
     participant CYW as CYW43
     participant Net as Embassy net
-    participant HTTP as DHCP + HTTP workers
+    participant HTTP as DHCP + three HTTP workers + singleton WS
 
     Main->>Main: Initialize RP2350 peripherals
     Main->>USB: Spawn USB task and mark USB enabled
@@ -167,13 +167,13 @@ sequenceDiagram
     and Main initialization
         Main->>Storage: Initialize default device config
         Main->>Display: Spawn display/buttons/LED task
-        Main->>Storage: Detect PSRAM and assign HTTP buffers
+        Main->>Storage: Detect PSRAM and reserve optional HTTP buffers
         Main->>Storage: Install flash driver and load newest valid config slot
         Main->>CYW: Load firmware/NVRAM, initialize CLM, disable power saving
         Main->>Net: Create static 192.168.4.1/24 stack and spawn runner
         Main->>CYW: Start WPA2 AP
         Main->>Net: Wait for network configuration
-        Main->>HTTP: Spawn DHCP server and four HTTP workers
+        Main->>HTTP: Spawn DHCP, three HTTP asset workers, transfer pump, and singleton WS server
     end
     Main->>Main: Park forever while tasks run
 ```
@@ -184,7 +184,7 @@ The HTTP worker pool has four Embassy tasks sharing the picoserve router. Routes
 
 - `/`, `/ui`, and `/ui/*` for embedded frontend assets.
 - `/health` for a plain-text health probe.
-- `/ws` for all application commands and asynchronous events.
+- Port 81 `/ws` for all application commands and asynchronous events.
 
 ## Browser connection and request lifecycle
 
@@ -194,12 +194,12 @@ The frontend owns exactly one logical WebSocket in `apps/frontend/src/api.rs`.
 sequenceDiagram
     participant UI as Yew App
     participant API as Frontend API state
-    participant WS as Firmware /ws
+    participant WS as Firmware :81/ws
     participant USB as Firmware control task
     participant Agent as Host agent
 
     UI->>API: init_ws(callbacks)
-    API->>WS: Open ws(s)://page-host/ws
+    API->>WS: Open ws(s)://page-host:81/ws
     WS-->>API: Unsolicited HELLO (first text message)
     WS->>USB: Try REQUEST_AGENT_STATUS
     API-->>UI: connected + HELLO callbacks
@@ -267,6 +267,7 @@ Firmware health behavior:
 
 - A new control CDC connection clears the previous agent state.
 - `AGENT_STATUS` records version/hostname and the current monotonic time.
+- `HOST_OS` records the agent target platform separately so the identity payload remains compatible with older firmware.
 - Status requests also mark the agent seen.
 - `HELLO.host_agent.present` becomes false after 25 seconds without a mark.
 - Receiving a new status queues an updated `HELLO` for the browser.
@@ -394,7 +395,7 @@ Layouts affect compile-time text-to-key mapping only. Firmware bytecode remains 
 | Yew UI models | Browser `app.rs` | Yew state handles; pure stores behind mutable refs |
 | Transfer chunks | Browser IndexedDB | Serialized/batched JavaScript persistence queue |
 | Transfer relay states | Firmware USB control task | Task-local fixed-capacity vector, maximum four |
-| WebSocket transfer queue | Firmware | Embassy channel, depth 16, shared across active clients; queued chunks from one transfer are sent in batches of up to eight |
+| WebSocket transfer data plane | Firmware | Singleton pump with a 16-event input channel, one-frame output channel, and one uniquely owned PSRAM batch slot; the singleton port-81 server owns WebSocket I/O |
 | USB/HID commands | Firmware | Embassy channels, each depth 8 |
 | Host-agent health | Firmware | Critical-section mutex plus atomics with 25-second freshness |
 | Persistent USB identity | Firmware | Embassy mutex plus two alternating flash slots |
@@ -413,7 +414,8 @@ When adding a feature, keep ownership at one layer and pass bounded messages acr
 - Secure transfer records use ChaCha20-Poly1305 authentication; the browser also enforces ordering/size and checks the final streamed SHA-256 before issuing its encrypted receipt.
 - Filesystem errors are encoded as status pages rather than terminating the host agent.
 - Display initialization is best effort; buttons and LED continue if the ST7789 fails.
-- PSRAM detection is best effort; each HTTP worker normally owns disjoint PSRAM TCP buffers and has 4 KiB SRAM fallbacks.
+- PSRAM detection is best effort. Three HTTP workers and the singleton WebSocket server normally use disjoint 8 KiB/32 KiB PSRAM TCP windows. Each retains a statically reserved 4 KiB SRAM fallback; batching disables itself if its PSRAM slot is unavailable.
+- A six-second hardware watchdog recovers global executor stalls. HTTP/WebSocket stage markers and the retained last stage are reported over the logging CDC interface after reboot.
 
 ## Where to make changes
 

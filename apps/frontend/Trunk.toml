@@ -1,6 +1,6 @@
 [[proxy]]
 rewrite = "/ws"
-backend = "ws://192.168.4.1/ws"
+backend = "ws://192.168.4.1:81/ws"
 ws = true
 
 # UI assets are served locally. All device commands share the WebSocket above.

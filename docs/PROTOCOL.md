@@ -13,7 +13,7 @@ Related documents:
 
 There are two application transports:
 
-1. A text/binary WebSocket between the browser and firmware at `/ws`.
+1. A text/binary WebSocket between the browser and firmware at port 81 `/ws`.
 2. A TLV byte stream between firmware and the host agent over the USB control CDC-ACM interface.
 
 Unless stated otherwise:
@@ -40,7 +40,7 @@ Types used in layout tables:
 
 | Surface | Current version | Where carried | Compatibility behavior |
 | --- | ---: | --- | --- |
-| WebSocket command/event protocol | 2 | `HELLO.protocols.websocket`; response/event `version` fields | The frontend reports a compatibility error when the WebSocket version differs. Version 2 adds encrypted chunk batching. |
+| WebSocket command/event protocol | 2 | `HELLO.protocols.websocket`; response/event `version` fields | The frontend reports a compatibility error when the WebSocket version differs. Version 2 supports encrypted chunk batching; the singleton firmware transfer pump emits batches when PSRAM is available. |
 | `HELLO` schema | 1 | Top-level `HELLO.version` | The frontend requires `event_type = "hello"` and `version = 1`. |
 | File-transfer protocol | 2 | `FILE_OPEN.protocol_version`; WebSocket transfer event `version` | There is no plaintext downgrade: the host and frontend reject the v1 file path. |
 | Filesystem protocol | 1 | First `u16` in list requests and pages | Host agent and frontend reject unsupported versions; firmware refuses to forward mismatched pages. |
@@ -127,7 +127,7 @@ The current tag 8 payload is:
 "PICOAGENT\0" + version_utf8 + "\0" + hostname_utf8
 ```
 
-The separate tag 34 payload uses Rust's target OS name, except that `macos` is normalized to `mac` for compatibility with the existing UI value. Keeping tag 8 unchanged preserves compatibility with older firmware. Firmware also accepts the legacy tag 8 form containing only a UTF-8 hostname. It stores at most 32 bytes of version, 96 bytes of hostname, and 24 bytes of host OS. A status, host OS, or status request marks the agent as seen; the capability snapshot reports it absent after 25 seconds without activity. Opening the firmware control CDC clears the previous health state. `STATUS.host_os` reports the OS from a present current-format agent, or `unknown` when the agent is absent or does not supply it.
+The separate tag 34 payload uses Rust's target OS name, except that `macos` is normalized to `mac` for compatibility with the existing UI value. Keeping tag 8 unchanged preserves compatibility with older firmware. Firmware also accepts the legacy tag 8 form containing only a UTF-8 hostname. It stores at most 32 bytes of version, 96 bytes of hostname, and 24 bytes of host OS. A status, host OS, or status request marks the agent as seen; the capability snapshot reports it absent after 25 seconds without activity. Opening the firmware control CDC clears the previous health state. `STATUS.host_os` reports the OS from a present current-format agent, falling back to the browser-selected USB target and then `unknown` when no detected OS is available.
 
 Host keepalive timing:
 
@@ -222,7 +222,7 @@ Record types are 1 manifest, 2 chunk, and 3 close. Manifest and close use index 
 | Encrypted start/default path | 512 UTF-8 bytes |
 | Concurrent firmware relay states | 4 |
 | Firmware WebSocket event queue | 16 |
-| Encrypted chunks per WebSocket batch | 8 |
+| Encrypted chunks per accepted WebSocket batch | 8 |
 | Initial/advertised sender window | 8 chunks |
 | Maximum accepted window | 64 chunks |
 | ACK timeout / retry limit | 5 seconds / 5 retries |
@@ -528,19 +528,19 @@ Implementation:
 
 ### Transport and limits
 
-- Endpoint: `ws://<device-host>/ws`; normally `ws://192.168.4.1/ws`.
-- The frontend derives `ws:`/`wss:` and host from the page URL, falling back to `192.168.4.1`.
+- Endpoint: `ws://<device-host>:81/ws`; normally `ws://192.168.4.1:81/ws`.
+- The embedded frontend derives `ws:`/`wss:` and hostname from the page URL and selects port 81, falling back to `192.168.4.1:81`. A frontend served on a non-default development port keeps same-origin `/ws` so Trunk can proxy it.
 - Maximum inbound firmware command buffer: 2048 bytes.
 - Maximum queued text event: 768 bytes.
 - Maximum queued binary event: 2049 bytes.
-- Maximum transmitted encrypted chunk batch: 16,402 bytes including its binary-kind byte.
+- Maximum transmitted/accepted encrypted chunk batch: 16,402 bytes including its binary-kind byte.
 - Shared firmware event queue depth: 16.
 - Browser-to-firmware binary kind 3 carries bounded secure file-session envelopes; other binary command kinds are ignored.
 - Standard WebSocket ping receives pong.
 
 Firmware tracks an active-client count, but transfer events use one shared queue rather than per-client broadcast queues. Multiple simultaneous clients therefore must not be assumed to receive identical event streams. The supported operational model is one active UI session during transfer.
 
-HTTP remains deliberately small: `/health` returns `ok`, while application operations use `/ws`.
+HTTP remains deliberately small on port 80: `/health` returns `ok`, while application operations use the singleton WebSocket server on port 81.
 
 ### `HELLO` capability handshake
 
@@ -662,7 +662,7 @@ Text messages use these `event_type` values, all with `version: 2`. They contain
 | `transfer/failed` | `transfer_id`, `reason` |
 | `transfer/aborted` | `transfer_id`, `reason_code`, `detail` |
 
-Progress is emitted at open, every 64 accepted chunks, and at the final chunk. Some status/progress events use nonblocking queue insertion and may be omitted under pressure; open, terminal events, and chunk data use the awaited queue path where implemented. The lower progress cadence avoids forcing extra TCP flushes between encrypted chunk batches; the browser still updates authenticated byte/chunk counters from every batch.
+Progress is emitted at open, every 64 accepted chunks, and at the final chunk. Some status/progress events use nonblocking queue insertion and may be omitted under pressure; open, terminal events, and chunk data use the awaited queue path where implemented. The browser updates authenticated byte/chunk counters from every individual or batched chunk.
 
 ### Binary messages
 
@@ -678,7 +678,7 @@ The first byte selects the binary kind:
 | 6 | Encrypted file close | Exact v2 `FILE_CLOSE` payload |
 | 7 | Encrypted file chunk batch | `chunk_count: u8`, then `chunk_count` repetitions of `payload_len: u16` and an exact v2 `FILE_CHUNK` payload |
 
-Kinds 4–7 are host-to-browser only. Firmware prepends kinds 4–6 without decrypting or re-encoding the TLV payload. For kind 7 it groups two to eight queued chunks from the same transfer without changing their authenticated ciphertext. A batch is at most 16,402 bytes including the kind byte. The WebSocket sender flushes once per batch, while the existing firmware event queue and USB ACK timing continue to carry backpressure.
+Kinds 4–7 are host-to-browser only. Firmware prepends kinds 4–6 without decrypting or re-encoding the TLV payload. A singleton transfer pump coalesces two to eight queued kind-5 chunks from the same transfer into kind 7 after at most 500 microseconds. Its uniquely owned 16,402-byte buffer lives in PSRAM and moves to the WebSocket sender until the send completes. If PSRAM is unavailable, firmware emits individual kind-5 chunks. The 16-event input queue, one-frame output queue, and one batch slot remain bounded; USB does not acknowledge a chunk until it has entered this backpressure path.
 
 ## Compatibility and change rules
 

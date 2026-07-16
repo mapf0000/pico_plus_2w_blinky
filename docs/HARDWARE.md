@@ -100,24 +100,27 @@ Total on-chip SRAM represented by the linker map is 520 KiB. Most normal data, s
 
 Large fixed allocations to review before changing memory use include:
 
-- Four HTTP workers.
+- Three HTTP asset workers and one singleton WebSocket worker.
 - HTTP RX/TX/request buffers and SRAM fallbacks.
 - USB descriptor, logger, class, and control buffers.
 - TLV decoder payload buffer of 2048 bytes.
 - Display SPI staging buffer and render state.
 - Network stack resources for 16 sockets.
 
+The singleton-transfer build measured 291,904 bytes of `.bss`, 2,592 bytes of `.data`, and 1,024 bytes of `.uninit` in the 512 KiB `RAM` region, leaving 228,768 bytes before runtime use. The failed pooled-batching build used 465,888 bytes of `.bss`: batching state had become part of all four HTTP task futures. Isolating WebSocket I/O to one task and placing the uniquely owned batch slot in PSRAM therefore recovered 173,984 bytes of `.bss`. Treat async future sizes and task-pool multiplicity as part of every SRAM review; successful linking alone does not guarantee enough runtime headroom.
+
 ### External PSRAM
 
 The default `psram` feature probes the external memory through QMI CS1 using an APS6404L configuration. The reported board capacity is 8 MiB.
 
-Current explicit PSRAM consumers reserve:
+The PSRAM pool reserves address ranges for the network and transfer data planes:
 
-- Four disjoint 8 KiB HTTP receive buffers in PSRAM, one per HTTP worker.
-- Four disjoint 32 KiB HTTP transmit buffers in PSRAM, sized for batched transfer traffic.
-- 4 KiB SRAM receive/transmit buffers per worker when PSRAM is unavailable.
+- Three disjoint 8 KiB HTTP receive and 32 KiB transmit buffers.
+- One dedicated 8 KiB WebSocket receive and 32 KiB transmit buffer.
+- One 16,402-byte encrypted-chunk batch buffer.
+- Four 4 KiB SRAM receive/transmit fallback slots, plus four 4 KiB request buffers.
 
-If detection fails or the memory is too small, firmware logs a warning and HTTP workers use statically allocated SRAM fallback buffers. The rest of PSRAM is not a general allocator; code cannot assume `Vec`/heap allocation becomes available merely because the feature is enabled.
+In the default `psram` build, detection or capacity failure makes HTTP and WebSocket workers continue with their SRAM buffers while the transfer pump sends individual chunks. A build compiled without the `psram` feature reserves one SRAM batch slot instead. The rest of PSRAM is not a general allocator; code cannot assume `Vec`/heap allocation becomes available merely because the feature is enabled.
 
 ## Composite USB device
 
@@ -183,7 +186,7 @@ Current compile-time configuration:
 | HTTP port | 80 |
 | UI | `http://192.168.4.1/` |
 | Health check | `http://192.168.4.1/health` |
-| WebSocket | `ws://192.168.4.1/ws` |
+| WebSocket | `ws://192.168.4.1:81/ws` |
 
 The device does not provide an upstream internet route or DNS forwarding. The DNS address is supplied to satisfy client network configuration. Some operating systems may warn that the Pico network has no internet access.
 
@@ -270,7 +273,7 @@ Normal ELF flashing writes the sections present in the ELF. The persistent-confi
 | Flash succeeds but no CDC appears | Wait through re-enumeration; inspect both CDC devices; use `--no-wait` to separate flash from serial diagnosis; verify the USB task starts in early logs/RTT. |
 | Host agent selects the logger port | Pass `--port`, or let active probing evaluate all USB CDC candidates; remove stale cached selection by reconnecting/restarting after the failed dispatch. |
 | UI is unreachable | Join `PicoEndpoint`, verify the client has `192.168.4.x`, open `/health`, then inspect CYW43/AP/DHCP logs. |
-| UI loads but WebSocket reconnects | Open `/ws` through the served page host, check `HELLO`, confirm HTTP worker availability, and inspect firmware logs. |
+| UI loads but WebSocket reconnects | Open port 81 `/ws` through the served page host, check `HELLO`, confirm the singleton WebSocket worker started, and inspect firmware logs. |
 | Display is blank | Confirm the Pico Display 2.8 is seated correctly; verify GP16–GP20; inspect ST7789 initialization logs. Buttons/LED should remain functional on display init failure. |
 | PSRAM is not detected | Verify this is the Pico Plus 2 W variant and GP0/QMI CS1 assumptions; firmware should fall back to SRAM and log the condition. |
 | MSC mounts but agent is missing | Rebuild with `scripts/fw-deploy-with-agent`; inspect `README.TXT`/`MISSING.TXT`; confirm the artifact target path. |
@@ -303,7 +306,7 @@ Use this checklist for changes to startup, pins, memory, network, USB, transfer,
 - [ ] A client receives an address within `192.168.4.100`–`192.168.4.200`.
 - [ ] `http://192.168.4.1/health` returns `ok`.
 - [ ] The embedded UI, JavaScript, WebAssembly, CSS, and IndexedDB helper load without 404/integrity errors.
-- [ ] `/ws` opens and the first application message is a compatible `HELLO`.
+- [ ] Port 81 `/ws` opens and the first application message is a compatible `HELLO`.
 - [ ] Disconnect/reconnect restores status/config and does not leave stale pending actions.
 
 ### Composite USB
@@ -318,7 +321,7 @@ Use this checklist for changes to startup, pins, memory, network, USB, transfer,
 
 ### Host agent and transfers
 
-- [ ] Host-agent `HELLO` presence/version/hostname becomes visible; after stopping the agent and waiting 25 seconds, a fresh/reconnected `HELLO` reports it absent.
+- [ ] Host-agent `HELLO` presence/version/hostname becomes visible and `STATUS.host_os` matches the host; after stopping the agent and waiting 25 seconds, a fresh/reconnected `HELLO` reports it absent.
 - [ ] Keepalive traffic survives at least several intervals without reconnect churn.
 - [ ] Filesystem browsing handles home, root, pagination, hidden entries, cancellation, and permission errors.
 - [ ] Unattended negotiation establishes an encrypted session without exposing bootstrap or session secrets in structured logs.

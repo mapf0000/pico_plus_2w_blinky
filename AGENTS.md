@@ -15,7 +15,7 @@ The primary hardware has 16 MiB QSPI flash, 8 MiB PSRAM, and 520 KiB SRAM. Firmw
 The main data paths are:
 
 ```text
-Browser (Yew) <-- WebSocket /ws --> Firmware <-- USB CDC TLV --> Host agent
+Browser (Yew) <-- WebSocket :81/ws --> Firmware <-- USB CDC TLV --> Host agent
                                       |
                                       +-- USB HID keyboard
                                       +-- USB mass-storage host-agent image
@@ -164,7 +164,7 @@ cd apps/frontend
 trunk serve
 ```
 
-The development server proxies `/ws` to `ws://192.168.4.1/ws`; a powered device on the Pico access point is needed for live RPC behavior.
+The development server proxies `/ws` to `ws://192.168.4.1:81/ws`; a powered device on the Pico access point is needed for live RPC behavior.
 
 Release bundle:
 

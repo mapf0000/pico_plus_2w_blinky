@@ -7,7 +7,7 @@ macro_rules! app_router {
     () => {{
         use picoserve::routing::{Router, get};
         // Use absolute paths so macro expansion works from any call site.
-        use $crate::http::routes::{api, frontend, ws};
+        use $crate::http::routes::{api, frontend};
 
         Router::new()
             // UI / frontend assets
@@ -19,10 +19,19 @@ macro_rules! app_router {
             .route("/ui/idb.js", get(frontend::route_frontend_idb_js))
             // Health-only HTTP endpoint (keep simple HTTP for probes)
             .route("/health", get(api::route_health))
-            // WebSocket endpoint for all API functionality
-            .route("/ws", get(ws::ws_handler))
+    }};
+}
+
+/// Build the WebSocket-only router used by the singleton data-plane server.
+macro_rules! websocket_router {
+    () => {{
+        use picoserve::routing::{Router, get};
+        use $crate::http::routes::ws;
+
+        Router::new().route("/ws", get(ws::ws_handler))
     }};
 }
 
 // Make the macro visible as `crate::http::routes::app_router!()`
 pub(crate) use app_router;
+pub(crate) use websocket_router;

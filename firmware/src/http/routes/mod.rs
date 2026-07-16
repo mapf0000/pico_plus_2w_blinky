@@ -3,4 +3,4 @@ pub mod frontend;
 pub mod router;
 pub mod ws;
 
-pub(crate) use router::app_router;
+pub(crate) use router::{app_router, websocket_router};

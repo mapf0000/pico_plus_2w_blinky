@@ -987,11 +987,14 @@ pub(crate) fn app() -> Html {
             <ToastBar toast={(*toast).clone()} />
             <aside class="sidebar">
                 <div class="brand">
-                    <div class="brand-mark" aria-hidden="true">{"P"}</div>
-                    <div>
-                        <div class="brand-name">{"Pico Endpoint"}</div>
-                        <div class="brand-subtitle">{"Device console"}</div>
+                    <div class="brand-mark" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none">
+                            <rect x="3" y="4" width="18" height="16" rx="2" />
+                            <path d="M7 9L10 12L7 15" />
+                            <path d="M13 15H17" />
+                        </svg>
                     </div>
+                    <div class="brand-name">{"Device Console"}</div>
                 </div>
                 <nav class="primary-nav" aria-label="Main navigation">
                     <button class={classes!("nav-item", (current_section == AppSection::Overview).then_some("active"))} onclick={select_section(AppSection::Overview)}>

@@ -6,9 +6,13 @@ use embassy_usb::driver::{Driver, EndpointError};
 use heapless::{String, Vec};
 use portable_atomic::Ordering;
 
-use crate::http::routes::ws;
+use crate::http::transfer;
 use crate::http::util::escape_json_str;
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the bounded no_std command channel intentionally owns payloads and paths without heap indirection"
+)]
 pub enum CtrlCommand {
     RequestStatus,
     Execute {
@@ -336,7 +340,7 @@ where
                 snapshot.version.as_str(),
                 snapshot.hostname.as_str()
             );
-            let _ = ws::queue_transfer_text(crate::capabilities::hello_json());
+            let _ = transfer::queue_text(crate::capabilities::hello_json());
         }
         TAG_HOST_OS => {
             crate::capabilities::record_host_os(payload);

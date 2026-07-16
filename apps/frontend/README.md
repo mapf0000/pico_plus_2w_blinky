@@ -22,7 +22,7 @@ generated index, JavaScript, WebAssembly, CSS, and IndexedDB helper.
 
 ## WebSocket compatibility
 
-`/ws` starts with a versioned JSON `hello` event. It reports the firmware
+Port 81 `/ws` starts with a versioned JSON `hello` event. It reports the firmware
 version/build, WebSocket/file-transfer/filesystem protocol versions, detected
 host-agent version, supported keyboard layouts and features, and currently
 available privileged operations. The same snapshot is available through the

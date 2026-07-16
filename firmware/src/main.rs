@@ -21,7 +21,7 @@ use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 use static_cell::StaticCell;
 // HID report descriptors handled in `crate::usb` now
 
-use crate::http::spawn_http_server_pool;
+use crate::http::{spawn_http_server_pool, spawn_websocket_server};
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -125,10 +125,11 @@ fn spawn_dhcp(spawner: &Spawner, stack: &'static net::Stack<'static>) -> bool {
 
 /// Spawn tiny HTTP server for the USB trigger endpoint.
 fn spawn_http(spawner: &Spawner, stack: &'static net::Stack<'static>) -> bool {
-    // Spawn HTTP server (WebSocket served on /ws via picoserve)
+    let transfer_pump_ok = crate::http::transfer::spawn(spawner);
+    let websocket_ok = spawn_websocket_server(spawner, *stack);
     spawn_http_server_pool(spawner, *stack);
-    log::info!("http: server task spawned (port 80, ws=/ws)");
-    true
+    log::info!("http: asset workers on port 80; singleton WebSocket on port 81");
+    transfer_pump_ok && websocket_ok
 }
 
 // ===== Tasks =====
@@ -153,6 +154,10 @@ async fn net_task(mut runner: net::Runner<'static, cyw43::NetDriver<'static>>) -
 async fn main(spawner: Spawner) {
     // 0) Peripherals
     let p = embassy_rp::init(Default::default());
+
+    // Recover automatically if a cooperative task stalls the executor. The
+    // retained stage is reported over CDC on the next boot.
+    let _ = health::spawn(&spawner, p.WATCHDOG);
 
     // 1) Early USB for logs (CDC) + HID (kept running after)
     // Prepare USB supervisor: start USB on demand via WS command
@@ -262,6 +267,7 @@ mod capabilities;
 mod device_config;
 mod dhcp;
 mod display;
+mod health;
 mod host;
 mod http;
 mod log_buffer;

@@ -9,7 +9,7 @@ use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::Text;
 use heapless::String;
 
-use crate::http::routes::ws;
+use crate::http::transfer;
 use crate::usb::ctrl::{
     self, CTRL_READY, TransferRelayMode, TransferViewSnapshot, TransferViewState,
 };
@@ -227,7 +227,7 @@ fn render<D: DrawTarget<Color = Rgb565>>(
     let palette = config.palette;
     let snapshot: TransferViewSnapshot = ctrl::transfer_view_snapshot();
     let usb_ready = CTRL_READY.load(Ordering::Acquire);
-    let ws_connected = ws::has_active_client();
+    let ws_connected = transfer::has_active_client();
 
     let header_height = 18;
     let _ = Rectangle::new(

@@ -25,7 +25,7 @@ pub(crate) fn secure_session_card(props: &SecureSessionProps) -> Html {
                 <span class={classes!("connection-pill", props.state.established().then_some("is-good"))}>{props.state.label()}</span>
             </div>
             <p class="hint">{"The browser connects automatically and encrypts file transfers. Unattended mode trusts every client that can access this Pico Web UI."}</p>
-            <div class="transfer-path-row">
+            <div class="card-actions left">
                 <button class="btn-secondary" disabled={!props.connected || props.state.established()} onclick={on_request}>{if busy { "Retry now" } else { "Reconnect" }}</button>
             </div>
         </section>

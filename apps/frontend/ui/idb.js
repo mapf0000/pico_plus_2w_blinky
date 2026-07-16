@@ -34,18 +34,7 @@ function keyFor(transferId, chunkIndex) {
 
 function requestToPromise(request) {
   return new Promise((resolve, reject) => {
-    request.onsuccess = async () => {
-      const db = request.result;
-      try {
-        const transaction = db.transaction(CHUNK_STORE, "readwrite");
-        transaction.objectStore(CHUNK_STORE).clear();
-        await transactionDone(transaction);
-        resolve(db);
-      } catch (error) {
-        db.close();
-        reject(error);
-      }
-    };
+    request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
   });
 }
@@ -154,8 +143,28 @@ function openDb() {
       }
     };
 
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error("IndexedDB open failed"));
+    request.onsuccess = async () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+
+      try {
+        const transaction = db.transaction(CHUNK_STORE, "readwrite");
+        transaction.objectStore(CHUNK_STORE).clear();
+        await transactionDone(transaction);
+        resolve(db);
+      } catch (error) {
+        db.close();
+        dbPromise = null;
+        reject(error);
+      }
+    };
+    request.onerror = () => {
+      dbPromise = null;
+      reject(request.error || new Error("IndexedDB open failed"));
+    };
   });
 
   return dbPromise;

@@ -251,7 +251,27 @@ fn websocket_url() -> String {
         .ok()
         .filter(|host| !host.is_empty())
         .unwrap_or_else(|| "192.168.4.1".into());
-    format!("{scheme}://{host}/ws")
+    let hostname = location
+        .hostname()
+        .ok()
+        .filter(|hostname| !hostname.is_empty())
+        .unwrap_or_else(|| "192.168.4.1".into());
+    let page_port = location.port().ok().unwrap_or_default();
+    websocket_url_from_parts(scheme, &host, &hostname, &page_port)
+}
+
+fn websocket_url_from_parts(scheme: &str, host: &str, hostname: &str, page_port: &str) -> String {
+    // Trunk serves the frontend on a non-default development port and proxies
+    // `/ws`. The embedded frontend is served on port 80 and connects directly
+    // to the singleton WebSocket data plane on port 81.
+    if page_port.is_empty() || page_port == "80" {
+        format!(
+            "{scheme}://{hostname}:{}/ws",
+            transfer_protocol::WEBSOCKET_PORT
+        )
+    } else {
+        format!("{scheme}://{host}/ws")
+    }
 }
 
 pub fn init_ws(
@@ -786,6 +806,22 @@ mod tests {
             .compatibility_error()
             .expect("protocol mismatch should be rejected");
         assert!(error.contains("WebSocket protocol"));
+    }
+
+    #[test]
+    fn embedded_frontend_uses_singleton_websocket_port() {
+        assert_eq!(
+            websocket_url_from_parts("ws", "192.168.4.1", "192.168.4.1", ""),
+            "ws://192.168.4.1:81/ws"
+        );
+    }
+
+    #[test]
+    fn development_frontend_keeps_same_origin_proxy() {
+        assert_eq!(
+            websocket_url_from_parts("ws", "localhost:8080", "localhost", "8080"),
+            "ws://localhost:8080/ws"
+        );
     }
 
     #[test]

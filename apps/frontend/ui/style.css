@@ -155,22 +155,21 @@ textarea:disabled {
   color: #071311;
   background: linear-gradient(145deg, #85eee1, #36caba);
   box-shadow: 0 8px 24px rgba(38, 200, 182, .14);
-  font-size: 18px;
-  font-weight: 850;
+}
+
+.brand-mark svg {
+  width: 20px;
+  height: 20px;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .brand-name {
   font-size: 15px;
   font-weight: 720;
   letter-spacing: -.01em;
-}
-
-.brand-subtitle {
-  margin-top: 1px;
-  color: var(--muted);
-  font-size: 11px;
-  letter-spacing: .08em;
-  text-transform: uppercase;
 }
 
 .primary-nav {
@@ -417,6 +416,7 @@ textarea:disabled {
 .identity-card,
 .editor-card,
 .library-card,
+.secure-session-card,
 .file-browser,
 .transfer-start-card,
 .download-card,
@@ -847,8 +847,18 @@ textarea#scriptDsl {
 
 .transfer-path-row {
   display: grid;
-  grid-template-columns: minmax(320px, 1fr) auto auto;
+  grid-template-columns: minmax(320px, 1fr) repeat(3, auto);
   gap: 9px;
+}
+
+@media (max-width: 1200px) {
+  .transfer-path-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .transfer-path-row input {
+    grid-column: 1 / -1;
+  }
 }
 
 .file-browser {

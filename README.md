@@ -24,7 +24,7 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
 ### Memory configuration
 - `firmware/memory.x` reserves 16 MiB of flash, splitting the final 8 KiB into a persistent configuration area.
 - `firmware/src/device_config.rs` mirrors that layout via `FLASH_CAPACITY` (`16 * 1024 * 1024` bytes) and persists two 4 KiB slots.
-- The PSRAM worker pool feature (`psram`) is enabled by default so HTTP buffers allocate from the 8 MiB external RAM exposed by the Embassy git HAL.
+- The `psram` feature is enabled by default so HTTP/WebSocket TCP windows and the singleton transfer-batch slot allocate from the 8 MiB external RAM exposed by Embassy.
 
 ## Prerequisites
 - Rust targets

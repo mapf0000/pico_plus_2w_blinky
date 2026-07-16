@@ -1,46 +1,53 @@
 use embassy_net as net;
 use embassy_time as embassy_time_legacy;
+use portable_atomic::{AtomicU8, Ordering};
 
 const SERVER_PORT: u16 = 80;
 
-/// Tune this to match your StackResources<SOCK> budget.
-pub const WEB_TASK_POOL_SIZE: usize = 4;
+/// Three workers serve independent frontend asset requests. WebSocket traffic
+/// has its own singleton worker and fourth buffer slot.
+pub const WEB_TASK_POOL_SIZE: usize = 3;
+const SERVER_BUFFER_COUNT: usize = 4;
+pub(super) const WEBSOCKET_BUFFER_SLOT: usize = WEB_TASK_POOL_SIZE;
 
 type TimerDuration = embassy_time_legacy::Duration;
 
-// Centralized HTTP sizes and limits for maintainability
-#[cfg(not(feature = "psram"))]
-const RX_BUF_SIZE: usize = 4096;
-#[cfg(not(feature = "psram"))]
-const TX_BUF_SIZE: usize = 4096;
+const SRAM_RX_BUF_SIZE: usize = 4096;
+const SRAM_TX_BUF_SIZE: usize = 4096;
 #[cfg(feature = "psram")]
-const FALLBACK_RX_BUF_SIZE: usize = 4096;
-#[cfg(feature = "psram")]
-const FALLBACK_TX_BUF_SIZE: usize = 4096;
+const USE_PSRAM_HTTP_SOCKET_BUFFERS: bool = true;
 // Request parse buffer (headers + small body staging).
 const REQ_BUF_SIZE: usize = 4096;
 
-// For non-PSRAM builds, keep HTTP buffers out of the task stack to avoid overflows.
-#[cfg(not(feature = "psram"))]
-static mut RX_BUFS: [[u8; RX_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
-    [[0; RX_BUF_SIZE]; WEB_TASK_POOL_SIZE];
-#[cfg(not(feature = "psram"))]
-static mut TX_BUFS: [[u8; TX_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
-    [[0; TX_BUF_SIZE]; WEB_TASK_POOL_SIZE];
-#[cfg(not(feature = "psram"))]
-static mut HTTP_REQ_BUFS: [[u8; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
-    [[0; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE];
+// All server buffers are static so neither HTTP nor WebSocket futures retain
+// large arrays. Slot ownership is claimed once at startup and never released.
+static mut SRAM_RX_BUFS: [[u8; SRAM_RX_BUF_SIZE]; SERVER_BUFFER_COUNT] =
+    [[0; SRAM_RX_BUF_SIZE]; SERVER_BUFFER_COUNT];
+static mut SRAM_TX_BUFS: [[u8; SRAM_TX_BUF_SIZE]; SERVER_BUFFER_COUNT] =
+    [[0; SRAM_TX_BUF_SIZE]; SERVER_BUFFER_COUNT];
+static mut HTTP_REQ_BUFS: [[u8; REQ_BUF_SIZE]; SERVER_BUFFER_COUNT] =
+    [[0; REQ_BUF_SIZE]; SERVER_BUFFER_COUNT];
+static SRAM_BUFFER_CLAIMED: AtomicU8 = AtomicU8::new(0);
 
-// If PSRAM is unavailable at runtime for a worker, fall back to SRAM per-worker.
-#[cfg(feature = "psram")]
-static mut FALLBACK_RX_BUFS: [[u8; FALLBACK_RX_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
-    [[0; FALLBACK_RX_BUF_SIZE]; WEB_TASK_POOL_SIZE];
-#[cfg(feature = "psram")]
-static mut FALLBACK_TX_BUFS: [[u8; FALLBACK_TX_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
-    [[0; FALLBACK_TX_BUF_SIZE]; WEB_TASK_POOL_SIZE];
-#[cfg(feature = "psram")]
-static mut FALLBACK_HTTP_REQ_BUFS: [[u8; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE] =
-    [[0; REQ_BUF_SIZE]; WEB_TASK_POOL_SIZE];
+pub(super) fn take_sram_buffers(
+    slot: usize,
+) -> Option<(&'static mut [u8], &'static mut [u8], &'static mut [u8])> {
+    if slot >= SERVER_BUFFER_COUNT {
+        return None;
+    }
+    let slot_bit = 1u8 << slot;
+    if SRAM_BUFFER_CLAIMED.fetch_or(slot_bit, Ordering::AcqRel) & slot_bit != 0 {
+        return None;
+    }
+
+    unsafe {
+        Some((
+            &mut SRAM_RX_BUFS[slot],
+            &mut SRAM_TX_BUFS[slot],
+            &mut HTTP_REQ_BUFS[slot],
+        ))
+    }
+}
 
 /// Spawn the HTTP worker pool (call this from your init).
 pub fn spawn_http_server_pool(spawner: &embassy_executor::Spawner, stack: net::Stack<'static>) {
@@ -59,7 +66,7 @@ pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
     // Build the router via macro (avoids opaque inner type hassles).
     let app = crate::http::routes::app_router!();
 
-    // Keep connections alive so WS upgrade stays open.
+    // Keep browser asset connections alive across sequential requests.
     let cfg = picoserve::Config::new(picoserve::Timeouts {
         start_read_request: TimerDuration::from_secs(5),
         persistent_start_read_request: TimerDuration::from_secs(3),
@@ -68,26 +75,28 @@ pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
     })
     .keep_connection_alive();
 
-    // --- Buffer selection per worker ---
+    let (sram_rx, sram_tx, http_buf) =
+        take_sram_buffers(id).expect("each HTTP worker has one statically assigned buffer slot");
+
+    // --- TCP buffer selection per worker ---
     #[cfg(feature = "psram")]
-    let (rx_buf, tx_buf, http_buf): (&mut [u8], &mut [u8], &mut [u8]) =
-        match crate::psram_pool::http_buffers(id) {
-            Some((rx, tx)) => {
-                let http: &mut [u8] = unsafe { &mut FALLBACK_HTTP_REQ_BUFS[id] };
-                (rx, tx, http)
-            }
-            None => {
-                log::warn!("http[{id}]: PSRAM buffers unavailable; falling back to SRAM");
-                let rx: &mut [u8] = unsafe { &mut FALLBACK_RX_BUFS[id] };
-                let tx: &mut [u8] = unsafe { &mut FALLBACK_TX_BUFS[id] };
-                let http: &mut [u8] = unsafe { &mut FALLBACK_HTTP_REQ_BUFS[id] };
-                (rx, tx, http)
-            }
+    let (rx_buf, tx_buf): (&mut [u8], &mut [u8]) = {
+        let psram_buffers = if USE_PSRAM_HTTP_SOCKET_BUFFERS {
+            crate::psram_pool::http_buffers(id)
+        } else {
+            None
         };
+        match psram_buffers {
+            Some((rx, tx)) => (rx, tx),
+            None => {
+                log::info!("http[{id}]: using SRAM socket buffers");
+                (sram_rx, sram_tx)
+            }
+        }
+    };
 
     #[cfg(not(feature = "psram"))]
-    let (rx_buf, tx_buf, http_buf): (&mut [u8], &mut [u8], &mut [u8]) =
-        unsafe { (&mut RX_BUFS[id], &mut TX_BUFS[id], &mut HTTP_REQ_BUFS[id]) };
+    let (rx_buf, tx_buf): (&mut [u8], &mut [u8]) = (sram_rx, sram_tx);
 
     log::info!(
         "http[{id}]: buffers ready (rx={}, tx={}, req={})",
@@ -105,3 +114,4 @@ pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
 
 #[cfg(feature = "psram")]
 const _: () = assert!(WEB_TASK_POOL_SIZE == crate::psram_pool::HTTP_BUFFER_COUNT);
+const _: () = assert!(WEBSOCKET_BUFFER_SLOT + 1 == SERVER_BUFFER_COUNT);
