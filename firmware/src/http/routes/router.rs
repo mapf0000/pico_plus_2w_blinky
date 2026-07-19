@@ -22,7 +22,7 @@ macro_rules! app_router {
     }};
 }
 
-/// Build the WebSocket-only router used by the singleton data-plane server.
+/// Build the WebSocket-only router used by the bounded data-plane acceptors.
 macro_rules! websocket_router {
     () => {{
         use picoserve::routing::{Router, get};

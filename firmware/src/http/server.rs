@@ -5,10 +5,11 @@ use portable_atomic::{AtomicU8, Ordering};
 const SERVER_PORT: u16 = 80;
 
 /// Three workers serve independent frontend asset requests. WebSocket traffic
-/// has its own singleton worker and fourth buffer slot.
+/// has two acceptors and its own pair of buffer slots.
 pub const WEB_TASK_POOL_SIZE: usize = 3;
-const SERVER_BUFFER_COUNT: usize = 4;
-pub(super) const WEBSOCKET_BUFFER_SLOT: usize = WEB_TASK_POOL_SIZE;
+pub(super) const WEBSOCKET_BUFFER_SLOT_START: usize = WEB_TASK_POOL_SIZE;
+const SERVER_BUFFER_COUNT: usize =
+    WEB_TASK_POOL_SIZE + super::websocket_server::WEBSOCKET_TASK_POOL_SIZE;
 
 type TimerDuration = embassy_time_legacy::Duration;
 
@@ -66,14 +67,15 @@ pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
     // Build the router via macro (avoids opaque inner type hassles).
     let app = crate::http::routes::app_router!();
 
-    // Keep browser asset connections alive across sequential requests.
+    // Asset responses close their TCP connection. With a small fixed worker
+    // pool this prevents stale browser keep-alives from blocking a refresh.
     let cfg = picoserve::Config::new(picoserve::Timeouts {
         start_read_request: TimerDuration::from_secs(5),
         persistent_start_read_request: TimerDuration::from_secs(3),
         read_request: TimerDuration::from_secs(2),
         write: TimerDuration::from_secs(3),
     })
-    .keep_connection_alive();
+    .close_connection_after_response();
 
     let (sram_rx, sram_tx, http_buf) =
         take_sram_buffers(id).expect("each HTTP worker has one statically assigned buffer slot");
@@ -114,4 +116,7 @@ pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
 
 #[cfg(feature = "psram")]
 const _: () = assert!(WEB_TASK_POOL_SIZE == crate::psram_pool::HTTP_BUFFER_COUNT);
-const _: () = assert!(WEBSOCKET_BUFFER_SLOT + 1 == SERVER_BUFFER_COUNT);
+const _: () = assert!(
+    WEBSOCKET_BUFFER_SLOT_START + super::websocket_server::WEBSOCKET_TASK_POOL_SIZE
+        == SERVER_BUFFER_COUNT
+);

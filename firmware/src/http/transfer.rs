@@ -2,11 +2,11 @@ use core::sync::atomic::Ordering;
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel, watch::Watch};
 use embassy_time::{Duration, Timer};
 use heapless::{String, Vec};
 use picoserve::{io::embedded_io_async, response::ws};
-use portable_atomic::AtomicUsize;
+use portable_atomic::{AtomicU32, AtomicUsize};
 #[cfg(not(feature = "psram"))]
 use static_cell::StaticCell;
 use transfer_protocol::{
@@ -37,6 +37,7 @@ enum EventKind {
 }
 
 pub(super) struct TransferEvent {
+    generation: u32,
     kind: EventKind,
     payload: Vec<u8, TRANSFER_BINARY_MAX>,
 }
@@ -47,7 +48,11 @@ pub(super) struct TransferEvent {
 )]
 pub(super) enum OutboundFrame {
     Event(TransferEvent),
-    SecureChunkBatch { buffer: BatchBuffer, len: u16 },
+    SecureChunkBatch {
+        generation: u32,
+        buffer: BatchBuffer,
+        len: u16,
+    },
 }
 
 static INPUT_EVENTS: Channel<ThreadModeRawMutex, TransferEvent, INPUT_QUEUE_DEPTH> = Channel::new();
@@ -55,6 +60,9 @@ static OUTPUT_FRAMES: Channel<ThreadModeRawMutex, OutboundFrame, OUTPUT_QUEUE_DE
     Channel::new();
 static RETURNED_BATCH_BUFFER: Channel<ThreadModeRawMutex, BatchBuffer, 1> = Channel::new();
 static ACTIVE_WS_CLIENTS: AtomicUsize = AtomicUsize::new(0);
+static NEXT_SESSION_GENERATION: AtomicU32 = AtomicU32::new(0);
+static CURRENT_SESSION_GENERATION: AtomicU32 = AtomicU32::new(0);
+static SESSION_GENERATION: Watch<ThreadModeRawMutex, u32, 2> = Watch::new_with(0);
 
 #[cfg(not(feature = "psram"))]
 static SRAM_BATCH_BUFFER: StaticCell<[u8; BATCH_BINARY_MAX]> = StaticCell::new();
@@ -83,6 +91,7 @@ pub fn queue_text(event: String<TRANSFER_TEXT_MAX>) -> Result<(), TransferQueueE
         .extend_from_slice(event.as_bytes())
         .expect("text capacity is bounded by the transfer-event payload capacity");
     try_enqueue(TransferEvent {
+        generation: 0,
         kind: EventKind::Text,
         payload,
     })
@@ -94,6 +103,7 @@ pub async fn send_text(event: String<TRANSFER_TEXT_MAX>) -> Result<(), TransferQ
         .extend_from_slice(event.as_bytes())
         .expect("text capacity is bounded by the transfer-event payload capacity");
     enqueue(TransferEvent {
+        generation: 0,
         kind: EventKind::Text,
         payload,
     })
@@ -102,6 +112,7 @@ pub async fn send_text(event: String<TRANSFER_TEXT_MAX>) -> Result<(), TransferQ
 
 pub fn queue_binary(event: Vec<u8, TRANSFER_BINARY_MAX>) -> Result<(), TransferQueueError> {
     try_enqueue(TransferEvent {
+        generation: 0,
         kind: EventKind::Binary,
         payload: event,
     })
@@ -114,68 +125,113 @@ pub fn queue_binary(event: Vec<u8, TRANSFER_BINARY_MAX>) -> Result<(), TransferQ
 /// channel form one bounded backpressure path through to the WebSocket writer.
 pub async fn send_binary(event: Vec<u8, TRANSFER_BINARY_MAX>) -> Result<(), TransferQueueError> {
     enqueue(TransferEvent {
+        generation: 0,
         kind: EventKind::Binary,
         payload: event,
     })
     .await
 }
 
-async fn enqueue(event: TransferEvent) -> Result<(), TransferQueueError> {
-    if !has_active_client() {
-        return Err(TransferQueueError::NoClient);
-    }
+async fn enqueue(mut event: TransferEvent) -> Result<(), TransferQueueError> {
+    let generation = active_generation().ok_or(TransferQueueError::NoClient)?;
+    event.generation = generation;
 
     INPUT_EVENTS.send(event).await;
 
     // A disconnect drains the channel to wake blocked producers. Do not report
     // that wake-up as a successfully relayed chunk.
-    if !has_active_client() {
+    if !is_active_generation(generation) {
         return Err(TransferQueueError::NoClient);
     }
 
     Ok(())
 }
 
-fn try_enqueue(event: TransferEvent) -> Result<(), TransferQueueError> {
-    if !has_active_client() {
-        return Err(TransferQueueError::NoClient);
-    }
+fn try_enqueue(mut event: TransferEvent) -> Result<(), TransferQueueError> {
+    let generation = active_generation().ok_or(TransferQueueError::NoClient)?;
+    event.generation = generation;
 
     INPUT_EVENTS
         .try_send(event)
-        .map_err(|_| TransferQueueError::Full)
+        .map_err(|_| TransferQueueError::Full)?;
+    if !is_active_generation(generation) {
+        return Err(TransferQueueError::NoClient);
+    }
+    Ok(())
 }
 
-pub(super) struct SessionGuard;
+fn active_generation() -> Option<u32> {
+    let generation = CURRENT_SESSION_GENERATION.load(Ordering::Acquire);
+    (generation != 0 && has_active_client()).then_some(generation)
+}
+
+fn is_active_generation(generation: u32) -> bool {
+    generation != 0
+        && CURRENT_SESSION_GENERATION.load(Ordering::Acquire) == generation
+        && has_active_client()
+}
+
+pub(super) struct SessionGuard {
+    generation: u32,
+}
+
+impl SessionGuard {
+    pub(super) async fn replaced(&self) {
+        if CURRENT_SESSION_GENERATION.load(Ordering::Acquire) != self.generation {
+            return;
+        }
+
+        let mut receiver = SESSION_GENERATION
+            .receiver()
+            .expect("two WebSocket acceptors create at most two replacement waiters");
+        receiver
+            .get_and(|generation| *generation != self.generation)
+            .await;
+    }
+}
 
 impl Drop for SessionGuard {
     fn drop(&mut self) {
-        end_session();
+        end_session(self.generation);
     }
 }
 
 pub(super) fn begin_session() -> SessionGuard {
-    if ACTIVE_WS_CLIENTS.fetch_add(1, Ordering::AcqRel) == 0 {
-        drain_queues();
-    }
-    SessionGuard
+    let previous = NEXT_SESSION_GENERATION
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
+            Some(generation.wrapping_add(1).max(1))
+        })
+        .expect("session generation update cannot fail");
+    let generation = previous.wrapping_add(1).max(1);
+
+    // A browser handoff starts a fresh bounded data plane. Mark the old session
+    // inactive while stale queued frames are reclaimed, then publish the new
+    // generation to wake its replacement waiter.
+    ACTIVE_WS_CLIENTS.store(0, Ordering::Release);
+    drain_queues();
+    CURRENT_SESSION_GENERATION.store(generation, Ordering::Release);
+    ACTIVE_WS_CLIENTS.store(1, Ordering::Release);
+    SESSION_GENERATION.sender().send(generation);
+    log::info!("websocket: session generation {generation} active");
+
+    SessionGuard { generation }
 }
 
-fn end_session() {
-    let previous = ACTIVE_WS_CLIENTS.fetch_sub(1, Ordering::AcqRel);
-    debug_assert!(previous > 0, "WebSocket session count underflow");
-    if previous <= 1 {
+fn end_session(generation: u32) {
+    if CURRENT_SESSION_GENERATION
+        .compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
         ACTIVE_WS_CLIENTS.store(0, Ordering::Release);
         drain_queues();
+        log::info!("websocket: session generation {generation} ended");
     }
 }
 
 fn drain_queues() {
     while INPUT_EVENTS.try_receive().is_ok() {}
     while let Ok(frame) = OUTPUT_FRAMES.try_receive() {
-        if let OutboundFrame::SecureChunkBatch { buffer, .. } = frame {
-            return_batch_buffer(buffer);
-        }
+        reclaim_frame(frame);
     }
 }
 
@@ -215,8 +271,27 @@ impl Drop for BatchLease {
     }
 }
 
-pub(super) async fn receive_frame() -> OutboundFrame {
-    OUTPUT_FRAMES.receive().await
+pub(super) async fn receive_frame(session: &SessionGuard) -> OutboundFrame {
+    loop {
+        let frame = OUTPUT_FRAMES.receive().await;
+        if frame_generation(&frame) == session.generation {
+            return frame;
+        }
+        reclaim_frame(frame);
+    }
+}
+
+fn frame_generation(frame: &OutboundFrame) -> u32 {
+    match frame {
+        OutboundFrame::Event(event) => event.generation,
+        OutboundFrame::SecureChunkBatch { generation, .. } => *generation,
+    }
+}
+
+fn reclaim_frame(frame: OutboundFrame) {
+    if let OutboundFrame::SecureChunkBatch { buffer, .. } = frame {
+        return_batch_buffer(buffer);
+    }
 }
 
 pub(super) async fn send_frame<W: embedded_io_async::Write>(
@@ -232,7 +307,7 @@ pub(super) async fn send_frame<W: embedded_io_async::Write>(
             }
             EventKind::Binary => tx.send_binary(event.payload.as_slice()).await,
         },
-        OutboundFrame::SecureChunkBatch { buffer, len } => {
+        OutboundFrame::SecureChunkBatch { buffer, len, .. } => {
             let lease = BatchLease::new(buffer);
             tx.send_binary(lease.bytes(usize::from(len))).await
         }
@@ -250,7 +325,7 @@ async fn transfer_pump_task() -> ! {
             None => INPUT_EVENTS.receive().await,
         };
 
-        if !has_active_client() {
+        if !is_active_generation(event.generation) {
             continue;
         }
 
@@ -279,7 +354,9 @@ async fn transfer_pump_task() -> ! {
             continue;
         };
 
-        if secure_chunk_transfer_id(&next) != Some(transfer_id) {
+        if next.generation != event.generation
+            || secure_chunk_transfer_id(&next) != Some(transfer_id)
+        {
             forward_event(event).await;
             pending = Some(next);
             continue;
@@ -296,11 +373,12 @@ async fn transfer_pump_task() -> ! {
 }
 
 async fn forward_event(event: TransferEvent) {
-    if !has_active_client() {
+    let generation = event.generation;
+    if !is_active_generation(generation) {
         return;
     }
     OUTPUT_FRAMES.send(OutboundFrame::Event(event)).await;
-    if !has_active_client() {
+    if !is_active_generation(generation) {
         drain_queues();
     }
 }
@@ -311,6 +389,7 @@ async fn send_chunk_batch(
     second: TransferEvent,
     transfer_id: u64,
 ) -> (BatchBuffer, Option<TransferEvent>) {
+    let generation = first.generation;
     let (len, pending) = {
         buffer[0] = WS_BINARY_KIND_SECURE_CHUNK_BATCH;
         let mut encoder = SecureChunkBatchEncoder::new(&mut buffer[1..])
@@ -324,7 +403,9 @@ async fn send_chunk_batch(
             let Ok(candidate) = INPUT_EVENTS.try_receive() else {
                 break;
             };
-            if secure_chunk_transfer_id(&candidate) != Some(transfer_id) {
+            if candidate.generation != generation
+                || secure_chunk_transfer_id(&candidate) != Some(transfer_id)
+            {
                 pending = Some(candidate);
                 break;
             }
@@ -337,18 +418,19 @@ async fn send_chunk_batch(
         (1 + payload_len, pending)
     };
 
-    if !has_active_client() {
+    if !is_active_generation(generation) {
         return (buffer, pending);
     }
 
     OUTPUT_FRAMES
         .send(OutboundFrame::SecureChunkBatch {
+            generation,
             buffer,
             len: len as u16,
         })
         .await;
 
-    if !has_active_client() {
+    if !is_active_generation(generation) {
         drain_queues();
     }
 

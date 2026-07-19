@@ -34,6 +34,13 @@ pending requests; late responses for expired IDs are discarded. UI pending
 state is scoped to each action so an unrelated request cannot leave every
 control disabled.
 
+Firmware accepts a replacement WebSocket while the previous connection is
+still retiring, but only the newest browser is the active logical session. It
+closes the displaced page with application status `4001`; that page pauses its
+automatic reconnect until explicitly refreshed so two tabs cannot continually
+displace each other. A browser connection that remains in `CONNECTING` for
+three seconds is closed and retried with bounded exponential backoff.
+
 Set `PICO_FIRMWARE_BUILD` during a firmware build to override the build
 identifier advertised by HELLO. It is normalized to a bounded ASCII token.
 

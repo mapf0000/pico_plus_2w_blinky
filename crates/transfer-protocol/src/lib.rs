@@ -3,6 +3,9 @@
 pub const TRANSFER_PROTOCOL_VERSION: u16 = 2;
 pub const SESSION_PROTOCOL_VERSION: u16 = 2;
 pub const WEBSOCKET_PORT: u16 = 81;
+/// Application close code used when a newer browser connection takes ownership
+/// of the singleton transfer session.
+pub const WEBSOCKET_CLOSE_SESSION_REPLACED: u16 = 4001;
 
 pub const TAG_TRANSFER_SESSION_TO_HOST: u8 = 32;
 pub const TAG_TRANSFER_SESSION_TO_BROWSER: u8 = 33;

@@ -157,7 +157,7 @@ sequenceDiagram
     participant Storage as PSRAM + flash config
     participant CYW as CYW43
     participant Net as Embassy net
-    participant HTTP as DHCP + three HTTP workers + singleton WS
+    participant HTTP as DHCP + three HTTP workers + two WS acceptors
 
     Main->>Main: Initialize RP2350 peripherals
     Main->>USB: Spawn USB task and mark USB enabled
@@ -173,14 +173,14 @@ sequenceDiagram
         Main->>Net: Create static 192.168.4.1/24 stack and spawn runner
         Main->>CYW: Start WPA2 AP
         Main->>Net: Wait for network configuration
-        Main->>HTTP: Spawn DHCP, three HTTP asset workers, transfer pump, and singleton WS server
+        Main->>HTTP: Spawn DHCP, three HTTP asset workers, transfer pump, and two WS acceptors
     end
     Main->>Main: Park forever while tasks run
 ```
 
 USB is currently enabled automatically so logging and control interfaces appear during boot. WebSocket commands can detach and re-enable the composite session. USB class futures run together; a supervisor cancellation stops the full composite device, not a single interface.
 
-The HTTP worker pool has four Embassy tasks sharing the picoserve router. Routes are:
+Three HTTP Embassy tasks share the asset router. Two independent picoserve acceptors serve the WebSocket router so a stale TCP/WebSocket connection cannot monopolize port 81. Routes are:
 
 - `/`, `/ui`, and `/ui/*` for embedded frontend assets.
 - `/health` for a plain-text health probe.
@@ -224,10 +224,14 @@ Request lifecycle:
 
 Each WebSocket instance has a monotonically increasing frontend session ID. Callbacks, timeouts, and close events verify that ID before mutating current state, preventing a stale socket from completing a new session's requests.
 
+Firmware also assigns a monotonically increasing generation to each accepted WebSocket. The newest connection becomes the sole logical owner of commands and transfer output. Bounded transfer events carry that generation, preventing an item already held by the batching task from crossing a handoff. A new owner wakes the previous callback immediately, which closes with private status code `4001` instead of waiting for the socket timeout. A frontend closed with that code pauses automatic reconnect so an older tab cannot continually displace the newer one.
+
 Reconnect behavior:
 
 - First retry delay: 500 ms.
 - Exponential growth to a 5-second maximum.
+- A connection attempt that remains in `CONNECTING` for 3 seconds is closed and retried.
+- Close code `4001` pauses retries until the page is explicitly refreshed.
 - Only one retry timer may be scheduled.
 - A successful `open` resets delay to 500 ms.
 - Yew clears capability/pending UI state on disconnect and refreshes `HELLO`, status, and config after reconnect.
@@ -395,7 +399,7 @@ Layouts affect compile-time text-to-key mapping only. Firmware bytecode remains 
 | Yew UI models | Browser `app.rs` | Yew state handles; pure stores behind mutable refs |
 | Transfer chunks | Browser IndexedDB | Serialized/batched JavaScript persistence queue |
 | Transfer relay states | Firmware USB control task | Task-local fixed-capacity vector, maximum four |
-| WebSocket transfer data plane | Firmware | Singleton pump with a 16-event input channel, one-frame output channel, and one uniquely owned PSRAM batch slot; the singleton port-81 server owns WebSocket I/O |
+| WebSocket transfer data plane | Firmware | Two port-81 acceptors hand off one generation-owned active browser session. A singleton pump owns the 16-event input channel, one-frame output channel, and unique PSRAM batch slot. |
 | USB/HID commands | Firmware | Embassy channels, each depth 8 |
 | Host-agent health | Firmware | Critical-section mutex plus atomics with 25-second freshness |
 | Persistent USB identity | Firmware | Embassy mutex plus two alternating flash slots |
@@ -414,7 +418,7 @@ When adding a feature, keep ownership at one layer and pass bounded messages acr
 - Secure transfer records use ChaCha20-Poly1305 authentication; the browser also enforces ordering/size and checks the final streamed SHA-256 before issuing its encrypted receipt.
 - Filesystem errors are encoded as status pages rather than terminating the host agent.
 - Display initialization is best effort; buttons and LED continue if the ST7789 fails.
-- PSRAM detection is best effort. Three HTTP workers and the singleton WebSocket server normally use disjoint 8 KiB/32 KiB PSRAM TCP windows. Each retains a statically reserved 4 KiB SRAM fallback; batching disables itself if its PSRAM slot is unavailable.
+- PSRAM detection is best effort. Three HTTP workers and two WebSocket acceptors normally use disjoint 8 KiB/32 KiB PSRAM TCP windows. Each retains a statically reserved 4 KiB SRAM fallback; batching disables itself if its PSRAM slot is unavailable.
 - A six-second hardware watchdog recovers global executor stalls. HTTP/WebSocket stage markers and the retained last stage are reported over the logging CDC interface after reboot.
 
 ## Where to make changes

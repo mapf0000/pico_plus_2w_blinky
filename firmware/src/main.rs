@@ -128,7 +128,7 @@ fn spawn_http(spawner: &Spawner, stack: &'static net::Stack<'static>) -> bool {
     let transfer_pump_ok = crate::http::transfer::spawn(spawner);
     let websocket_ok = spawn_websocket_server(spawner, *stack);
     spawn_http_server_pool(spawner, *stack);
-    log::info!("http: asset workers on port 80; singleton WebSocket on port 81");
+    log::info!("http: asset workers on port 80; WebSocket handoff acceptors on port 81");
     transfer_pump_ok && websocket_ok
 }
 
@@ -189,7 +189,7 @@ async fn main(spawner: Spawner) {
 
     #[cfg(feature = "psram")]
     {
-        psram_pool::init(p.QMI_CS1, p.PIN_0).await;
+        psram_pool::init(p.QMI_CS1, p.PIN_47).await;
     }
 
     let flash_drv = embassy_rp::flash::Flash::<

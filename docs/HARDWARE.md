@@ -33,7 +33,7 @@ The table describes the current `main.rs` assignments, not a generic Pico header
 
 | GPIO/peripheral | Function | Electrical/software notes | Implementation |
 | --- | --- | --- | --- |
-| GP0 + `QMI_CS1` | External PSRAM chip select/interface | Uses `QmiCs1` with APS6404L configuration | `firmware/src/psram_pool.rs` |
+| Internal GPIO47 + `QMI_CS1` | External PSRAM chip select/interface | Pico Plus 2 W board wiring; uses `QmiCs1` with APS6404L configuration | `firmware/src/psram_pool.rs` |
 | GP12 | Display button A | Input with pull-up; button is active-low | `firmware/src/display/mod.rs` |
 | GP13 | Display button B | Input with pull-up; button is active-low | `firmware/src/display/mod.rs` |
 | GP14 | Display button X | Input with pull-up; button is active-low | `firmware/src/display/mod.rs` |
@@ -100,14 +100,14 @@ Total on-chip SRAM represented by the linker map is 520 KiB. Most normal data, s
 
 Large fixed allocations to review before changing memory use include:
 
-- Three HTTP asset workers and one singleton WebSocket worker.
+- Three HTTP asset workers and two WebSocket acceptors. Only the newest WebSocket is the active logical session; the singleton transfer pump remains the only batching owner.
 - HTTP RX/TX/request buffers and SRAM fallbacks.
 - USB descriptor, logger, class, and control buffers.
 - TLV decoder payload buffer of 2048 bytes.
 - Display SPI staging buffer and render state.
 - Network stack resources for 16 sockets.
 
-The singleton-transfer build measured 291,904 bytes of `.bss`, 2,592 bytes of `.data`, and 1,024 bytes of `.uninit` in the 512 KiB `RAM` region, leaving 228,768 bytes before runtime use. The failed pooled-batching build used 465,888 bytes of `.bss`: batching state had become part of all four HTTP task futures. Isolating WebSocket I/O to one task and placing the uniquely owned batch slot in PSRAM therefore recovered 173,984 bytes of `.bss`. Treat async future sizes and task-pool multiplicity as part of every SRAM review; successful linking alone does not guarantee enough runtime headroom.
+The refresh-handoff build measures 362,688 bytes of `.bss`, 2,644 bytes of `.data`, and 1,024 bytes of `.uninit` in the 512 KiB `RAM` region. Including linker alignment, the last static allocation ends at byte 366,368, leaving 157,920 bytes before runtime stack use. The failed pooled-batching build used 465,888 bytes of `.bss`: batching state had become part of all four HTTP task futures. Keeping batching in one dedicated transfer task and placing its uniquely owned batch slot in PSRAM avoids that multiplication. The two WebSocket acceptors share the single logical transfer path; they duplicate only their bounded connection/task state. Treat async future sizes and task-pool multiplicity as part of every SRAM review; successful linking alone does not guarantee enough runtime headroom.
 
 ### External PSRAM
 
@@ -116,9 +116,9 @@ The default `psram` feature probes the external memory through QMI CS1 using an 
 The PSRAM pool reserves address ranges for the network and transfer data planes:
 
 - Three disjoint 8 KiB HTTP receive and 32 KiB transmit buffers.
-- One dedicated 8 KiB WebSocket receive and 32 KiB transmit buffer.
+- Two disjoint 8 KiB WebSocket receive and 32 KiB transmit buffers.
 - One 16,402-byte encrypted-chunk batch buffer.
-- Four 4 KiB SRAM receive/transmit fallback slots, plus four 4 KiB request buffers.
+- Five 4 KiB SRAM receive/transmit fallback slots, plus five 4 KiB request buffers.
 
 In the default `psram` build, detection or capacity failure makes HTTP and WebSocket workers continue with their SRAM buffers while the transfer pump sends individual chunks. A build compiled without the `psram` feature reserves one SRAM batch slot instead. The rest of PSRAM is not a general allocator; code cannot assume `Vec`/heap allocation becomes available merely because the feature is enabled.
 
@@ -273,9 +273,9 @@ Normal ELF flashing writes the sections present in the ELF. The persistent-confi
 | Flash succeeds but no CDC appears | Wait through re-enumeration; inspect both CDC devices; use `--no-wait` to separate flash from serial diagnosis; verify the USB task starts in early logs/RTT. |
 | Host agent selects the logger port | Pass `--port`, or let active probing evaluate all USB CDC candidates; remove stale cached selection by reconnecting/restarting after the failed dispatch. |
 | UI is unreachable | Join `PicoEndpoint`, verify the client has `192.168.4.x`, open `/health`, then inspect CYW43/AP/DHCP logs. |
-| UI loads but WebSocket reconnects | Open port 81 `/ws` through the served page host, check `HELLO`, confirm the singleton WebSocket worker started, and inspect firmware logs. |
+| UI loads but WebSocket reconnects | Open port 81 `/ws` through the served page host, check `HELLO`, confirm both WebSocket acceptors started, and inspect firmware logs. A newer page receives session ownership and closes the previous page with code 4001. |
 | Display is blank | Confirm the Pico Display 2.8 is seated correctly; verify GP16–GP20; inspect ST7789 initialization logs. Buttons/LED should remain functional on display init failure. |
-| PSRAM is not detected | Verify this is the Pico Plus 2 W variant and GP0/QMI CS1 assumptions; firmware should fall back to SRAM and log the condition. |
+| PSRAM is not detected | Verify this is the Pico Plus 2 W variant and internal GPIO47/QMI CS1 wiring; firmware should fall back to SRAM and log the condition. |
 | MSC mounts but agent is missing | Rebuild with `scripts/fw-deploy-with-agent`; inspect `README.TXT`/`MISSING.TXT`; confirm the artifact target path. |
 | USB identity change does not appear | Detach/re-register USB or power-cycle so descriptors are rebuilt; config changes are rejected while USB is enabled. |
 | Persistent config appears corrupt | Firmware should choose the other valid CRC-checked slot or defaults. Avoid erasing flash until both slots and linker boundaries have been checked. |

@@ -209,6 +209,7 @@ thread_local! {
     static WS: RefCell<Option<WsState>> = const { RefCell::new(None) };
     static WS_CALLBACKS: RefCell<Option<WsCallbacks>> = const { RefCell::new(None) };
     static RECONNECT_SCHEDULED: Cell<bool> = const { Cell::new(false) };
+    static RECONNECT_PAUSED: Cell<bool> = const { Cell::new(false) };
     static RECONNECT_DELAY_MS: Cell<u32> = const { Cell::new(RECONNECT_DELAY_MIN_MS) };
     static NEXT_FILESYSTEM_REQUEST_ID: Cell<u64> = const { Cell::new(1) };
     static NEXT_WS_SESSION_ID: Cell<u64> = const { Cell::new(1) };
@@ -216,6 +217,7 @@ thread_local! {
 
 const RECONNECT_DELAY_MIN_MS: u32 = 500;
 const RECONNECT_DELAY_MAX_MS: u32 = 5_000;
+const CONNECT_TIMEOUT_MS: u32 = 3_000;
 
 #[derive(Clone)]
 struct WsCallbacks {
@@ -237,6 +239,7 @@ struct WsState {
     _onmessage: Closure<dyn FnMut(MessageEvent)>,
     _onerror: Closure<dyn FnMut(Event)>,
     _onclose: Closure<dyn FnMut(CloseEvent)>,
+    connect_timeout: Option<Timeout>,
 }
 
 fn websocket_url() -> String {
@@ -263,7 +266,7 @@ fn websocket_url() -> String {
 fn websocket_url_from_parts(scheme: &str, host: &str, hostname: &str, page_port: &str) -> String {
     // Trunk serves the frontend on a non-default development port and proxies
     // `/ws`. The embedded frontend is served on port 80 and connects directly
-    // to the singleton WebSocket data plane on port 81.
+    // to the WebSocket data plane on port 81.
     if page_port.is_empty() || page_port == "80" {
         format!(
             "{scheme}://{hostname}:{}/ws",
@@ -282,6 +285,7 @@ pub fn init_ws(
     on_secure_transfer_binary: impl Fn(u8, Vec<u8>) + 'static,
     on_filesystem_binary: impl Fn(Vec<u8>) + 'static,
 ) {
+    RECONNECT_PAUSED.with(|paused| paused.set(false));
     WS_CALLBACKS.with(|cell| {
         cell.replace(Some(WsCallbacks {
             on_log: Rc::new(on_log),
@@ -296,6 +300,10 @@ pub fn init_ws(
 }
 
 fn connect_ws() {
+    if RECONNECT_PAUSED.with(Cell::get) {
+        return;
+    }
+
     let already_connected = WS.with(|cell| {
         cell.borrow().as_ref().is_some_and(|state| {
             matches!(
@@ -335,6 +343,13 @@ fn connect_ws() {
                 return;
             }
             RECONNECT_DELAY_MS.with(|delay| delay.set(RECONNECT_DELAY_MIN_MS));
+            WS.with(|cell| {
+                if let Some(state) = cell.borrow_mut().as_mut()
+                    && state.session_id == session_id
+                {
+                    state.connect_timeout.take();
+                }
+            });
             (callbacks.on_log)("WS open".into());
             (callbacks.on_state)(true);
         }) as Box<dyn FnMut(_)>)
@@ -403,12 +418,21 @@ fn connect_ws() {
     };
     let onclose = {
         let callbacks = callbacks.clone();
-        Closure::wrap(Box::new(move |_e: CloseEvent| {
+        Closure::wrap(Box::new(move |e: CloseEvent| {
             if !is_current_session(session_id) {
                 return;
             }
             let canceled = cancel_pending_requests(session_id, CancelReason::ConnectionLost);
             let _ = canceled;
+            if !should_reconnect_after_close(e.code()) {
+                RECONNECT_PAUSED.with(|paused| paused.set(true));
+                (callbacks.on_log)(
+                    "This page was replaced by a newer device connection; refresh to reconnect"
+                        .into(),
+                );
+                (callbacks.on_state)(false);
+                return;
+            }
             (callbacks.on_log)("Device connection lost; retrying".into());
             (callbacks.on_state)(false);
             schedule_ws_reconnect();
@@ -420,6 +444,34 @@ fn connect_ws() {
     ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
     ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
 
+    let connect_timeout = {
+        let callbacks = callbacks.clone();
+        Timeout::new(CONNECT_TIMEOUT_MS, move || {
+            if !is_current_session(session_id) {
+                return;
+            }
+            let timed_out = WS.with(|cell| {
+                let slot = cell.borrow();
+                let Some(state) = slot.as_ref() else {
+                    return false;
+                };
+                if state.session_id != session_id || state.ws.ready_state() != WebSocket::CONNECTING
+                {
+                    return false;
+                }
+                let _ = state.ws.close();
+                true
+            });
+            if timed_out {
+                (callbacks.on_log)(format!(
+                    "WS connection timed out after {CONNECT_TIMEOUT_MS} ms; retrying"
+                ));
+                (callbacks.on_state)(false);
+                schedule_ws_reconnect();
+            }
+        })
+    };
+
     WS.with(|cell| {
         cell.replace(Some(WsState {
             ws,
@@ -430,6 +482,7 @@ fn connect_ws() {
             _onmessage: onmessage,
             _onerror: onerror,
             _onclose: onclose,
+            connect_timeout: Some(connect_timeout),
         }));
     });
 }
@@ -448,12 +501,19 @@ fn schedule_ws_reconnect() {
 
     Timeout::new(delay_ms, move || {
         RECONNECT_SCHEDULED.with(|scheduled| scheduled.set(false));
+        if RECONNECT_PAUSED.with(Cell::get) {
+            return;
+        }
         let should_reconnect = clear_disconnected_session();
         if should_reconnect {
             connect_ws();
         }
     })
     .forget();
+}
+
+fn should_reconnect_after_close(code: u16) -> bool {
+    code != transfer_protocol::WEBSOCKET_CLOSE_SESSION_REPLACED
 }
 
 fn clear_disconnected_session() -> bool {
@@ -809,11 +869,20 @@ mod tests {
     }
 
     #[test]
-    fn embedded_frontend_uses_singleton_websocket_port() {
+    fn embedded_frontend_uses_dedicated_websocket_port() {
         assert_eq!(
             websocket_url_from_parts("ws", "192.168.4.1", "192.168.4.1", ""),
             "ws://192.168.4.1:81/ws"
         );
+    }
+
+    #[test]
+    fn replaced_page_does_not_compete_for_the_websocket_session() {
+        assert!(!should_reconnect_after_close(
+            transfer_protocol::WEBSOCKET_CLOSE_SESSION_REPLACED
+        ));
+        assert!(should_reconnect_after_close(1000));
+        assert!(should_reconnect_after_close(1006));
     }
 
     #[test]

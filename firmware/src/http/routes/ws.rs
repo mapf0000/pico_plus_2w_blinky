@@ -1,4 +1,4 @@
-use embassy_futures::select::{Either as SelectEither, select};
+use embassy_futures::select::{Either as SelectEither, Either3 as SelectEither3, select, select3};
 use picoserve::futures::Either;
 use picoserve::io::embedded_io_async;
 use picoserve::response::ws; // for Read/Write trait bounds
@@ -38,16 +38,22 @@ impl ws::WebSocketCallback for HelloWs {
         let _ = CTRL_CHAN.try_send(CtrlCommand::RequestStatus);
 
         let mut buf = [0u8; WS_COMMAND_MAX];
+        let mut exit = ConnectionExit::Peer;
         loop {
-            match select(
+            match select3(
+                session.replaced(),
                 rx.next_message(&mut buf, core::future::pending::<()>()),
-                transfer::receive_frame(),
+                transfer::receive_frame(&session),
             )
             .await
             {
-                // Poll browser control traffic first so a saturated transfer
-                // queue cannot starve RPC, ping, or close frames.
-                SelectEither::First(result) => match result {
+                // Replacement is polled first, then browser control traffic,
+                // then bulk output. A saturated transfer cannot delay handoff.
+                SelectEither3::First(()) => {
+                    exit = ConnectionExit::Replaced;
+                    break;
+                }
+                SelectEither3::Second(result) => match result {
                     Ok(Either::First(Ok(ws::Message::Text(s)))) => {
                         let cmd = s.trim();
                         if cmd.is_empty() {
@@ -65,15 +71,28 @@ impl ws::WebSocketCallback for HelloWs {
                                     response.as_str()
                                 ),
                             );
-                            if tx.send_text(envelope.as_str()).await.is_err() {
-                                break;
+                            match send_text_unless_replaced(&session, &mut tx, envelope.as_str())
+                                .await
+                            {
+                                Ok(false) => {}
+                                Ok(true) => {
+                                    exit = ConnectionExit::Replaced;
+                                    break;
+                                }
+                                Err(_) => break,
                             }
                             continue;
                         }
 
                         let response = handle_command(cmd).await;
-                        if tx.send_text(response.as_str()).await.is_err() {
-                            break;
+                        match send_text_unless_replaced(&session, &mut tx, response.as_str()).await
+                        {
+                            Ok(false) => {}
+                            Ok(true) => {
+                                exit = ConnectionExit::Replaced;
+                                break;
+                            }
+                            Err(_) => break,
                         }
                     }
                     Ok(Either::First(Ok(ws::Message::Binary(binary)))) => {
@@ -90,8 +109,13 @@ impl ws::WebSocketCallback for HelloWs {
                         }
                     }
                     Ok(Either::First(Ok(ws::Message::Ping(p)))) => {
-                        if tx.send_pong(p).await.is_err() {
-                            break;
+                        match send_pong_unless_replaced(&session, &mut tx, p).await {
+                            Ok(false) => {}
+                            Ok(true) => {
+                                exit = ConnectionExit::Replaced;
+                                break;
+                            }
+                            Err(_) => break,
                         }
                     }
                     Ok(Either::First(Ok(ws::Message::Pong(_)))) => {}
@@ -100,16 +124,72 @@ impl ws::WebSocketCallback for HelloWs {
                     Ok(Either::Second(_)) => break,
                     Err(_) => break,
                 },
-                SelectEither::Second(frame) => {
-                    if transfer::send_frame(frame, &mut tx).await.is_err() {
-                        break;
+                SelectEither3::Third(frame) => {
+                    match send_frame_unless_replaced(&session, frame, &mut tx).await {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            exit = ConnectionExit::Replaced;
+                            break;
+                        }
+                        Err(_) => break,
                     }
                 }
             }
         }
 
         drop(session);
-        tx.close(None).await
+        match exit {
+            ConnectionExit::Peer => tx.close(None).await,
+            ConnectionExit::Replaced => {
+                log::info!("websocket: closing replaced browser session");
+                tx.close(Some((
+                    transfer_protocol::WEBSOCKET_CLOSE_SESSION_REPLACED,
+                    "session replaced",
+                )))
+                .await
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ConnectionExit {
+    Peer,
+    Replaced,
+}
+
+async fn send_text_unless_replaced<W: embedded_io_async::Write>(
+    session: &transfer::SessionGuard,
+    tx: &mut ws::SocketTx<W>,
+    text: &str,
+) -> Result<bool, W::Error> {
+    match select(tx.send_text(text), session.replaced()).await {
+        SelectEither::First(result) => result.map(|()| false),
+        SelectEither::Second(()) => Ok(true),
+    }
+}
+
+async fn send_pong_unless_replaced<W: embedded_io_async::Write>(
+    session: &transfer::SessionGuard,
+    tx: &mut ws::SocketTx<W>,
+    payload: &[u8],
+) -> Result<bool, W::Error> {
+    match select(tx.send_pong(payload), session.replaced()).await {
+        SelectEither::First(result) => result.map(|()| false),
+        SelectEither::Second(()) => Ok(true),
+    }
+}
+
+async fn send_frame_unless_replaced<W: embedded_io_async::Write>(
+    session: &transfer::SessionGuard,
+    frame: transfer::OutboundFrame,
+    tx: &mut ws::SocketTx<W>,
+) -> Result<bool, W::Error> {
+    // Poll send_frame first so a batch frame installs its RAII lease before a
+    // simultaneous replacement can cancel the write and return the buffer.
+    match select(transfer::send_frame(frame, tx), session.replaced()).await {
+        SelectEither::First(result) => result.map(|()| false),
+        SelectEither::Second(()) => Ok(true),
     }
 }
 

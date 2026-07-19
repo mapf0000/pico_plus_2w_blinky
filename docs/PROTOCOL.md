@@ -40,7 +40,7 @@ Types used in layout tables:
 
 | Surface | Current version | Where carried | Compatibility behavior |
 | --- | ---: | --- | --- |
-| WebSocket command/event protocol | 2 | `HELLO.protocols.websocket`; response/event `version` fields | The frontend reports a compatibility error when the WebSocket version differs. Version 2 supports encrypted chunk batching; the singleton firmware transfer pump emits batches when PSRAM is available. |
+| WebSocket command/event protocol | 2 | `HELLO.protocols.websocket`; response/event `version` fields | The frontend reports a compatibility error when the WebSocket version differs. Version 2 supports encrypted chunk batching; the single firmware transfer pump emits batches when PSRAM is available. |
 | `HELLO` schema | 1 | Top-level `HELLO.version` | The frontend requires `event_type = "hello"` and `version = 1`. |
 | File-transfer protocol | 2 | `FILE_OPEN.protocol_version`; WebSocket transfer event `version` | There is no plaintext downgrade: the host and frontend reject the v1 file path. |
 | Filesystem protocol | 1 | First `u16` in list requests and pages | Host agent and frontend reject unsupported versions; firmware refuses to forward mismatched pages. |
@@ -538,9 +538,9 @@ Implementation:
 - Browser-to-firmware binary kind 3 carries bounded secure file-session envelopes; other binary command kinds are ignored.
 - Standard WebSocket ping receives pong.
 
-Firmware tracks an active-client count, but transfer events use one shared queue rather than per-client broadcast queues. Multiple simultaneous clients therefore must not be assumed to receive identical event streams. The supported operational model is one active UI session during transfer.
+Firmware tracks one generation-owned active session. Transfer events use one shared queue rather than per-client broadcast queues, so the newest accepted connection replaces the previous owner instead of splitting events between clients.
 
-HTTP remains deliberately small on port 80: `/health` returns `ok`, while application operations use the singleton WebSocket server on port 81.
+HTTP remains deliberately small on port 80: `/health` returns `ok`, while application operations use port 81. Two bounded acceptors allow a refreshed page to connect before its previous socket has fully retired, but only the newest connection owns the active logical session. Firmware closes the displaced connection with application close code `4001`; the displaced frontend pauses automatic reconnect until it is explicitly refreshed.
 
 ### `HELLO` capability handshake
 

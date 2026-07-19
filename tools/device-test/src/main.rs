@@ -11,8 +11,9 @@ use serialport::{
 };
 use transfer_protocol::{
     FILE_OPEN_HEADER_LEN, FILE_TAG_LEN, MANIFEST_PLAINTEXT_BASE_LEN, MAX_PLAINTEXT_CHUNK,
-    TLV_MAX_PAYLOAD, WS_BINARY_KIND_SECURE_CHUNK, WS_BINARY_KIND_SECURE_CHUNK_BATCH,
-    decode_secure_chunk, decode_secure_chunk_batch, encode_secure_chunk, encode_secure_open,
+    TLV_MAX_PAYLOAD, WEBSOCKET_CLOSE_SESSION_REPLACED, WS_BINARY_KIND_SECURE_CHUNK,
+    WS_BINARY_KIND_SECURE_CHUNK_BATCH, decode_secure_chunk, decode_secure_chunk_batch,
+    encode_secure_chunk, encode_secure_open,
 };
 
 const BAUD_RATE: u32 = 115_200;
@@ -63,7 +64,7 @@ struct Args {
     #[arg(long)]
     list: bool,
 
-    /// Exercise the singleton WebSocket server and encrypted chunk batching.
+    /// Exercise WebSocket refresh handoff and encrypted chunk batching.
     #[arg(long)]
     websocket_batch_test: bool,
 
@@ -193,7 +194,7 @@ impl DeviceRunner {
         self.case("final control health probe", Self::test_probe);
         if self.websocket_address.is_some() {
             self.case(
-                "singleton WebSocket encrypted chunk batching",
+                "WebSocket refresh handoff and encrypted chunk batching",
                 Self::test_websocket_batching,
             );
             self.case("post-WebSocket control health probe", Self::test_probe);
@@ -456,7 +457,21 @@ impl DeviceRunner {
             .websocket_address
             .as_deref()
             .expect("test is called only when a WebSocket address is configured");
-        let mut websocket = WebSocketProbe::connect(address, self.websocket_wait)?;
+        let mut displaced = WebSocketProbe::connect(address, self.websocket_wait)?;
+        for handoff in 1..=3 {
+            let next = WebSocketProbe::connect(address, self.websocket_wait)
+                .with_context(|| format!("open replacement WebSocket {handoff}"))?;
+            displaced
+                .expect_close_code(
+                    Instant::now() + self.response_timeout.max(Duration::from_secs(5)),
+                    WEBSOCKET_CLOSE_SESSION_REPLACED,
+                )
+                .with_context(|| {
+                    format!("replacement WebSocket {handoff} did not displace old session")
+                })?;
+            displaced = next;
+        }
+        let mut websocket = displaced;
 
         self.reset_input();
         let transfer_id = self.transfer_id_seed ^ 0x81;
@@ -651,6 +666,27 @@ impl WebSocketProbe {
                 return Ok(None);
             }
             self.read_more()?;
+        }
+    }
+
+    fn expect_close_code(&mut self, deadline: Instant, expected_code: u16) -> Result<()> {
+        loop {
+            let frame = self
+                .next_frame(deadline)?
+                .ok_or_else(|| anyhow!("timed out waiting for WebSocket close frame"))?;
+            if frame.opcode != 8 {
+                continue;
+            }
+            ensure!(
+                frame.payload.len() >= 2,
+                "WebSocket close frame omitted its status code"
+            );
+            let code = u16::from_be_bytes([frame.payload[0], frame.payload[1]]);
+            ensure!(
+                code == expected_code,
+                "expected WebSocket close code {expected_code}, got {code}"
+            );
+            return Ok(());
         }
     }
 
@@ -1104,5 +1140,19 @@ mod tests {
                 .payload,
             vec![1, 2, 3]
         );
+    }
+
+    #[test]
+    fn websocket_decoder_preserves_application_close_code() {
+        let mut encoded = vec![0x88, 2];
+        encoded.extend_from_slice(&WEBSOCKET_CLOSE_SESSION_REPLACED.to_be_bytes());
+
+        let frame = decode_websocket_frame(&mut encoded).unwrap().unwrap();
+        assert_eq!(frame.opcode, 8);
+        assert_eq!(
+            u16::from_be_bytes(frame.payload.try_into().unwrap()),
+            WEBSOCKET_CLOSE_SESSION_REPLACED
+        );
+        assert!(encoded.is_empty());
     }
 }
