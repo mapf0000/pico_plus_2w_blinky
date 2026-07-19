@@ -11,9 +11,12 @@ use serialport::{
 };
 use transfer_protocol::{
     FILE_OPEN_HEADER_LEN, FILE_TAG_LEN, MANIFEST_PLAINTEXT_BASE_LEN, MAX_PLAINTEXT_CHUNK,
-    TLV_MAX_PAYLOAD, WEBSOCKET_CLOSE_SESSION_REPLACED, WS_BINARY_KIND_SECURE_CHUNK,
-    WS_BINARY_KIND_SECURE_CHUNK_BATCH, decode_secure_chunk, decode_secure_chunk_batch,
-    encode_secure_chunk, encode_secure_open,
+    TAG_USB_BENCHMARK_DATA, TAG_USB_BENCHMARK_FINISH, TAG_USB_BENCHMARK_RESULT,
+    TAG_USB_BENCHMARK_START, TLV_MAX_PAYLOAD, USB_BENCHMARK_DATA_HEADER_LEN,
+    USB_BENCHMARK_RESULT_LEN, USB_BENCHMARK_STATUS_COMPLETE, USB_BENCHMARK_STATUS_PROGRESS,
+    USB_BENCHMARK_STATUS_STARTED, USB_BENCHMARK_VERSION, WEBSOCKET_CLOSE_SESSION_REPLACED,
+    WS_BINARY_KIND_SECURE_CHUNK, WS_BINARY_KIND_SECURE_CHUNK_BATCH, decode_secure_chunk,
+    decode_secure_chunk_batch, encode_secure_chunk, encode_secure_open,
 };
 
 const BAUD_RATE: u32 = 115_200;
@@ -71,6 +74,14 @@ struct Args {
     /// Socket address used by --websocket-batch-test.
     #[arg(long, default_value = "192.168.4.1:81")]
     websocket_address: String,
+
+    /// Measure framed USB CDC ingress without Wi-Fi or host-file access.
+    #[arg(long)]
+    usb_throughput_benchmark: bool,
+
+    /// Synthetic payload size per USB benchmark variant.
+    #[arg(long, default_value_t = 4)]
+    benchmark_mib: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,6 +145,7 @@ struct DeviceRunner {
     transfer_id_seed: u64,
     websocket_address: Option<String>,
     websocket_wait: Duration,
+    benchmark_mib: Option<u32>,
     passed: usize,
     failures: Vec<(&'static str, String)>,
 }
@@ -144,6 +156,7 @@ impl DeviceRunner {
         response_timeout: Duration,
         websocket_address: Option<String>,
         websocket_wait: Duration,
+        benchmark_mib: Option<u32>,
     ) -> Self {
         let transfer_id_seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -157,6 +170,7 @@ impl DeviceRunner {
             transfer_id_seed,
             websocket_address,
             websocket_wait,
+            benchmark_mib,
             passed: 0,
             failures: Vec::new(),
         }
@@ -192,6 +206,13 @@ impl DeviceRunner {
             Self::test_oversized_header_resync,
         );
         self.case("final control health probe", Self::test_probe);
+        if self.benchmark_mib.is_some() {
+            self.case(
+                "USB framed-ingress throughput matrix",
+                Self::test_usb_throughput,
+            );
+            self.case("post-benchmark control health probe", Self::test_probe);
+        }
         if self.websocket_address.is_some() {
             self.case(
                 "WebSocket refresh handoff and encrypted chunk batching",
@@ -452,6 +473,149 @@ impl DeviceRunner {
         self.expect_exact(TAG_DEBUG_MSG, PROBE_OK)
     }
 
+    fn test_usb_throughput(&mut self) -> Result<()> {
+        let mib = self
+            .benchmark_mib
+            .expect("benchmark test runs only when configured");
+        ensure!(mib > 0 && mib <= 64, "benchmark size must be 1..=64 MiB");
+        println!("[INFO] USB benchmark uses {mib} MiB of deterministic synthetic data per variant");
+        for (ack_every, window) in [(1_u16, 8_u32), (4, 16), (8, 16), (16, 32)] {
+            let measurement = self.run_usb_benchmark(mib, ack_every, window)?;
+            println!(
+                "[BENCH] ack_every={ack_every:>2} window={window:>2} host={:.1} KiB/s device={:.1} KiB/s frames={} bytes={} checksum={:#010x}",
+                measurement.host_kib_per_second,
+                measurement.device_kib_per_second,
+                measurement.frames,
+                measurement.bytes,
+                measurement.checksum,
+            );
+        }
+        Ok(())
+    }
+
+    fn run_usb_benchmark(
+        &mut self,
+        mib: u32,
+        ack_every: u16,
+        window: u32,
+    ) -> Result<UsbBenchmarkMeasurement> {
+        self.reset_input();
+        let token = (self.transfer_id_seed as u32) ^ (u32::from(ack_every) << 16) ^ window;
+        let mut start = Vec::with_capacity(8);
+        start.extend_from_slice(&USB_BENCHMARK_VERSION.to_le_bytes());
+        start.extend_from_slice(&token.to_le_bytes());
+        start.extend_from_slice(&ack_every.to_le_bytes());
+        self.send_frame(TAG_USB_BENCHMARK_START, &start)?;
+        let started = self.expect_benchmark_result(token, Duration::from_secs(2))?;
+        ensure!(
+            started.status == USB_BENCHMARK_STATUS_STARTED,
+            "benchmark start was rejected with status {}",
+            started.status
+        );
+
+        let target_bytes = u64::from(mib) * 1024 * 1024;
+        let data_capacity = TLV_MAX_PAYLOAD - USB_BENCHMARK_DATA_HEADER_LEN;
+        let frame_count = target_bytes.div_ceil(data_capacity as u64) as u32;
+        let mut sent_frames = 0_u32;
+        let mut acknowledged_frames = 0_u32;
+        let mut sent_bytes = 0_u64;
+        let mut checksum = 0_u32;
+        let started_at = Instant::now();
+
+        while sent_frames < frame_count {
+            while sent_frames < frame_count
+                && sent_frames.saturating_sub(acknowledged_frames) < window
+            {
+                let remaining = target_bytes.saturating_sub(sent_bytes);
+                let data_len = remaining.min(data_capacity as u64) as usize;
+                let mut payload = vec![0_u8; USB_BENCHMARK_DATA_HEADER_LEN + data_len];
+                payload[0..4].copy_from_slice(&token.to_le_bytes());
+                payload[4..8].copy_from_slice(&sent_frames.to_le_bytes());
+                for (offset, byte) in payload[USB_BENCHMARK_DATA_HEADER_LEN..]
+                    .iter_mut()
+                    .enumerate()
+                {
+                    *byte = (sent_frames as u8).wrapping_add(offset as u8);
+                    checksum = checksum.wrapping_add(u32::from(*byte));
+                }
+                let frame = encode_frame(TAG_USB_BENCHMARK_DATA, &payload)?;
+                self.port
+                    .write_all(&frame)
+                    .context("write USB benchmark data")?;
+                sent_frames = sent_frames.saturating_add(1);
+                sent_bytes = sent_bytes.saturating_add(data_len as u64);
+            }
+
+            if sent_frames < frame_count {
+                let progress = self.expect_benchmark_result(token, Duration::from_secs(5))?;
+                ensure!(
+                    progress.status == USB_BENCHMARK_STATUS_PROGRESS,
+                    "benchmark data was rejected with status {}",
+                    progress.status
+                );
+                acknowledged_frames = progress.frames;
+            }
+        }
+
+        let mut finish = Vec::with_capacity(8);
+        finish.extend_from_slice(&token.to_le_bytes());
+        finish.extend_from_slice(&frame_count.to_le_bytes());
+        self.send_frame(TAG_USB_BENCHMARK_FINISH, &finish)?;
+        let completed = loop {
+            let result = self.expect_benchmark_result(token, Duration::from_secs(10))?;
+            if result.status == USB_BENCHMARK_STATUS_COMPLETE {
+                break result;
+            }
+            ensure!(
+                result.status == USB_BENCHMARK_STATUS_PROGRESS,
+                "benchmark finish failed with status {}",
+                result.status
+            );
+        };
+        let host_elapsed = started_at.elapsed();
+        ensure!(
+            completed.frames == frame_count,
+            "firmware frame count mismatch"
+        );
+        ensure!(
+            completed.bytes == target_bytes,
+            "firmware byte count mismatch"
+        );
+        ensure!(completed.checksum == checksum, "firmware checksum mismatch");
+        ensure!(
+            completed.elapsed_us > 0,
+            "firmware reported zero elapsed time"
+        );
+
+        Ok(UsbBenchmarkMeasurement {
+            frames: frame_count,
+            bytes: target_bytes,
+            checksum,
+            host_kib_per_second: target_bytes as f64 / 1024.0 / host_elapsed.as_secs_f64(),
+            device_kib_per_second: target_bytes as f64
+                / 1024.0
+                / (completed.elapsed_us as f64 / 1_000_000.0),
+        })
+    }
+
+    fn expect_benchmark_result(
+        &mut self,
+        token: u32,
+        timeout: Duration,
+    ) -> Result<UsbBenchmarkResult> {
+        let deadline = Instant::now() + timeout;
+        while let Some(frame) = self.read_frame_until(deadline)? {
+            if frame.tag != TAG_USB_BENCHMARK_RESULT {
+                continue;
+            }
+            let result = decode_usb_benchmark_result(&frame.payload)?;
+            if result.token == token {
+                return Ok(result);
+            }
+        }
+        bail!("timed out waiting for USB benchmark result")
+    }
+
     fn test_websocket_batching(&mut self) -> Result<()> {
         let address = self
             .websocket_address
@@ -573,6 +737,23 @@ impl DeviceRunner {
 struct WebSocketFrame {
     opcode: u8,
     payload: Vec<u8>,
+}
+
+struct UsbBenchmarkMeasurement {
+    frames: u32,
+    bytes: u64,
+    checksum: u32,
+    host_kib_per_second: f64,
+    device_kib_per_second: f64,
+}
+
+struct UsbBenchmarkResult {
+    status: u8,
+    token: u32,
+    frames: u32,
+    bytes: u64,
+    elapsed_us: u64,
+    checksum: u32,
 }
 
 struct WebSocketProbe {
@@ -779,6 +960,10 @@ fn main() -> Result<()> {
         args.response_timeout_ms > 0,
         "--response-timeout-ms must be greater than zero"
     );
+    ensure!(
+        !args.usb_throughput_benchmark || (1..=64).contains(&args.benchmark_mib),
+        "--benchmark-mib must be 1..=64"
+    );
 
     let ports = wait_for_matching_ports(args.vid, args.pid, Duration::from_secs(args.wait_secs))?;
     if !args.list {
@@ -808,6 +993,7 @@ fn main() -> Result<()> {
         Duration::from_millis(args.response_timeout_ms),
         websocket_address,
         Duration::from_secs(args.wait_secs),
+        args.usb_throughput_benchmark.then_some(args.benchmark_mib),
     )
     .run()
 }
@@ -1028,6 +1214,26 @@ fn decode_abort(payload: &[u8]) -> Result<Abort<'_>> {
         transfer_id,
         reason,
         detail,
+    })
+}
+
+fn decode_usb_benchmark_result(payload: &[u8]) -> Result<UsbBenchmarkResult> {
+    ensure!(
+        payload.len() == USB_BENCHMARK_RESULT_LEN,
+        "USB benchmark result length mismatch"
+    );
+    let version = u16::from_le_bytes(payload[0..2].try_into().expect("length checked"));
+    ensure!(
+        version == USB_BENCHMARK_VERSION,
+        "unsupported USB benchmark result version {version}"
+    );
+    Ok(UsbBenchmarkResult {
+        status: payload[2],
+        token: u32::from_le_bytes(payload[3..7].try_into().expect("length checked")),
+        frames: u32::from_le_bytes(payload[11..15].try_into().expect("length checked")),
+        bytes: u64::from_le_bytes(payload[15..23].try_into().expect("length checked")),
+        elapsed_us: u64::from_le_bytes(payload[23..31].try_into().expect("length checked")),
+        checksum: u32::from_le_bytes(payload[31..35].try_into().expect("length checked")),
     })
 }
 

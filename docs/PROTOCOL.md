@@ -106,8 +106,14 @@ Implementation:
 | 32 | `TRANSFER_SESSION_TO_HOST` | D -> H | Versioned session negotiation or Noise transport envelope | Active for file transfer only. |
 | 33 | `TRANSFER_SESSION_TO_BROWSER` | H -> D | Versioned session negotiation or Noise transport envelope | Active for file transfer only. |
 | 34 | `HOST_OS` | H -> D | UTF-8 target OS name, at most 24 bytes in firmware | Active; `macos` is normalized to `mac`. |
+| 240 | `USB_BENCHMARK_START` | Test host -> D | Benchmark version, random token, and ACK cadence | Diagnostic; starts a bounded synthetic CDC-ingress measurement. |
+| 241 | `USB_BENCHMARK_DATA` | Test host -> D | Token, sequence, and synthetic bytes | Diagnostic; maximum normal TLV payload applies. |
+| 242 | `USB_BENCHMARK_FINISH` | Test host -> D | Token and final frame count | Diagnostic; terminates the active measurement. |
+| 243 | `USB_BENCHMARK_RESULT` | D -> test host | Status, token, counters, device elapsed microseconds, and checksum | Diagnostic; emitted at the configured cadence and on completion/error. |
 
 Tags are globally allocated. Do not reuse a reserved or legacy value for a different payload. Search all three components and tests before changing this table.
+
+The version-1 USB benchmark uses only deterministic synthetic data and does not access Wi-Fi, HID, mass storage, host files, or browser state. The benchmark result is exactly 35 bytes: `version: u16`, `status: u8`, `token: u32`, `highest_sequence: u32`, `frame_count: u32`, `byte_count: u64`, `elapsed_us: u64`, and wrapping byte-sum `checksum: u32`. Status values are 0 started, 1 progress, 2 complete, and 3 error. It is an engineering diagnostic rather than part of file-transfer negotiation.
 
 ### Agent discovery, handshake, and health payloads
 

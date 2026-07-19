@@ -48,6 +48,10 @@ const TAG_FS_LIST_PAGE: u8 = 30;
 const TAG_FS_LIST_CANCEL: u8 = 31;
 const TAG_TRANSFER_SESSION_TO_HOST: u8 = 32;
 const TAG_TRANSFER_SESSION_TO_BROWSER: u8 = 33;
+const TAG_USB_BENCHMARK_START: u8 = transfer_protocol::TAG_USB_BENCHMARK_START;
+const TAG_USB_BENCHMARK_DATA: u8 = transfer_protocol::TAG_USB_BENCHMARK_DATA;
+const TAG_USB_BENCHMARK_FINISH: u8 = transfer_protocol::TAG_USB_BENCHMARK_FINISH;
+const TAG_USB_BENCHMARK_RESULT: u8 = transfer_protocol::TAG_USB_BENCHMARK_RESULT;
 
 const CACHE_DIR_NAME: &str = "host-agent";
 const CACHE_FILE_NAME: &str = "port";
@@ -374,6 +378,10 @@ fn is_known_tag(tag: u8) -> bool {
             | TAG_TRANSFER_SESSION_TO_HOST
             | TAG_TRANSFER_SESSION_TO_BROWSER
             | TAG_HOST_OS
+            | TAG_USB_BENCHMARK_START
+            | TAG_USB_BENCHMARK_DATA
+            | TAG_USB_BENCHMARK_FINISH
+            | TAG_USB_BENCHMARK_RESULT
     )
 }
 
