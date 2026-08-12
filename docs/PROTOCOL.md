@@ -110,10 +110,14 @@ Implementation:
 | 241 | `USB_BENCHMARK_DATA` | Test host -> D | Token, sequence, and synthetic bytes | Diagnostic; maximum normal TLV payload applies. |
 | 242 | `USB_BENCHMARK_FINISH` | Test host -> D | Token and final frame count | Diagnostic; terminates the active measurement. |
 | 243 | `USB_BENCHMARK_RESULT` | D -> test host | Status, token, counters, device elapsed microseconds, and checksum | Diagnostic; emitted at the configured cadence and on completion/error. |
+| 244 | `USB_RAW_BENCHMARK_START` | Test host -> D | Version, random token, and exact raw byte count | Diagnostic; switches the control OUT endpoint into bounded raw-counting mode after the started response. |
+| 245 | `USB_RAW_BENCHMARK_RESULT` | D -> test host | Status, token, byte/packet counters, and device elapsed microseconds | Diagnostic; emitted on start, completion, overflow, or timeout. |
 
 Tags are globally allocated. Do not reuse a reserved or legacy value for a different payload. Search all three components and tests before changing this table.
 
 The version-1 USB benchmark uses only deterministic synthetic data and does not access Wi-Fi, HID, mass storage, host files, or browser state. The benchmark result is exactly 35 bytes: `version: u16`, `status: u8`, `token: u32`, `highest_sequence: u32`, `frame_count: u32`, `byte_count: u64`, `elapsed_us: u64`, and wrapping byte-sum `checksum: u32`. Status values are 0 started, 1 progress, 2 complete, and 3 error. It is an engineering diagnostic rather than part of file-transfer negotiation.
+
+The version-1 raw USB benchmark isolates endpoint and host-write overhead from TLV parsing. Its 14-byte start payload is `version: u16`, `token: u32`, and `byte_count: u64`; the count must be 1 through 64 MiB. The test host must wait for the started result before sending exactly that many unframed bytes. Until the count is reached, those bytes are not TLV-decoded. The firmware returns to TLV mode after completion, overflow, or five seconds without an OUT packet. Its 35-byte result is `version: u16`, `status: u8`, `token: u32`, `byte_count: u64`, `elapsed_us: u64`, `packet_count: u32`, `full_packet_count: u32`, and `short_packet_count: u32`. This diagnostic does not checksum or retain the raw stream.
 
 ### Agent discovery, handshake, and health payloads
 

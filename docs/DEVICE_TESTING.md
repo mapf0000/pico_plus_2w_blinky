@@ -2,6 +2,8 @@
 
 `scripts/device-test` runs the hardware checks that are safe without joining the Pico Wi-Fi network. The suite is opt-in and is not part of normal `cargo test` because it requires exclusive access to one physical board.
 
+Measured throughput results, conclusions, and the remaining experiment backlog are recorded in [`THROUGHPUT_EXPERIMENTS.md`](THROUGHPUT_EXPERIMENTS.md).
+
 ## Safety boundary
 
 The default command does not flash or reset the board. Neither the default command nor `--flash`:
@@ -15,7 +17,7 @@ The default command does not flash or reset the board. Neither the default comma
 
 The CDC security checks send fixed synthetic protocol bytes only. The valid `FILE_OPEN` envelope contains a dummy ciphertext-shaped value, not host data. It is expected to receive `FILE_ABORT` reason 5 because no browser WebSocket relay exists. An unexpected ACK is treated as evidence of an active browser and fails the test; the harness sends a bounded cleanup abort.
 
-The optional USB throughput benchmark also uses deterministic synthetic bytes only. Firmware counts frames and bytes, maintains a wrapping checksum, and returns device-side elapsed time; it does not retain the stream or forward it to Wi-Fi. Each variant is bounded by `--benchmark-mib` (1–64 MiB).
+The optional USB throughput benchmarks also use deterministic synthetic bytes only. The framed benchmark counts frames and bytes, maintains a wrapping checksum, and returns device-side elapsed time. The raw benchmark counts bytes and USB packets without retaining, checksumming, TLV-decoding, or forwarding the stream. Each variant is bounded by `--benchmark-mib` (1–64 MiB), and raw mode exits with an error after five seconds without an OUT packet.
 
 After raw fault injection releases the control port, the real host-agent binary runs with `--device-self-test`. This mode uses production port selection, asynchronous serial I/O, and TLV framing, but it never enters the general dispatcher or reconnect daemon. It has no handlers for shell execution, credentials, filesystem browsing, secure-session negotiation, or file transfer. It sends a fixed `device-self-test` status identity instead of reading or transmitting the machine hostname, and it bypasses the persistent port cache.
 
@@ -45,6 +47,7 @@ scripts/device-test --port /dev/cu.usbmodem12302
 scripts/device-test --skip-msc
 scripts/device-test --skip-host-agent
 scripts/device-test --usb-throughput-benchmark --benchmark-mib 4 --skip-host-agent --skip-msc
+scripts/device-test --usb-raw-throughput-benchmark --benchmark-mib 4 --skip-host-agent --skip-msc
 scripts/device-test --flash --elf target/thumbv8m.main-none-eabihf/release/pico_rust
 ```
 
@@ -78,6 +81,8 @@ The raw Rust runner performs these checks first:
 13. A final probe confirms that all negative cases left the control path responsive.
 
 With `--usb-throughput-benchmark`, the raw runner additionally compares the production TLV/CDC ingress path at ACK cadences 1, 4, 8, and 16 using windows 8, 16, 16, and 32. Every variant validates firmware frame/byte counters and checksum before reporting host- and device-timed KiB/s. A post-benchmark probe confirms continued control-path responsiveness.
+
+With `--usb-raw-throughput-benchmark`, the runner compares raw CDC OUT ingestion using host write sizes of 64, 512, 2,048, and 16,384 bytes. The firmware bypasses TLV decoding and checksum work, reports full/short USB packet counts, and automatically returns to normal TLV mode after the declared byte count. A post-benchmark probe confirms recovery of the normal control path.
 
 The wrapper then starts the real host-agent executable in its restricted one-shot mode and verifies:
 

@@ -12,11 +12,13 @@ use serialport::{
 use transfer_protocol::{
     FILE_OPEN_HEADER_LEN, FILE_TAG_LEN, MANIFEST_PLAINTEXT_BASE_LEN, MAX_PLAINTEXT_CHUNK,
     TAG_USB_BENCHMARK_DATA, TAG_USB_BENCHMARK_FINISH, TAG_USB_BENCHMARK_RESULT,
-    TAG_USB_BENCHMARK_START, TLV_MAX_PAYLOAD, USB_BENCHMARK_DATA_HEADER_LEN,
-    USB_BENCHMARK_RESULT_LEN, USB_BENCHMARK_STATUS_COMPLETE, USB_BENCHMARK_STATUS_PROGRESS,
-    USB_BENCHMARK_STATUS_STARTED, USB_BENCHMARK_VERSION, WEBSOCKET_CLOSE_SESSION_REPLACED,
-    WS_BINARY_KIND_SECURE_CHUNK, WS_BINARY_KIND_SECURE_CHUNK_BATCH, decode_secure_chunk,
-    decode_secure_chunk_batch, encode_secure_chunk, encode_secure_open,
+    TAG_USB_BENCHMARK_START, TAG_USB_RAW_BENCHMARK_RESULT, TAG_USB_RAW_BENCHMARK_START,
+    TLV_MAX_PAYLOAD, USB_BENCHMARK_DATA_HEADER_LEN, USB_BENCHMARK_RESULT_LEN,
+    USB_BENCHMARK_STATUS_COMPLETE, USB_BENCHMARK_STATUS_PROGRESS, USB_BENCHMARK_STATUS_STARTED,
+    USB_BENCHMARK_VERSION, USB_RAW_BENCHMARK_RESULT_LEN, USB_RAW_BENCHMARK_VERSION,
+    WEBSOCKET_CLOSE_SESSION_REPLACED, WS_BINARY_KIND_SECURE_CHUNK,
+    WS_BINARY_KIND_SECURE_CHUNK_BATCH, decode_secure_chunk, decode_secure_chunk_batch,
+    encode_secure_chunk, encode_secure_open,
 };
 
 const BAUD_RATE: u32 = 115_200;
@@ -78,6 +80,10 @@ struct Args {
     /// Measure framed USB CDC ingress without Wi-Fi or host-file access.
     #[arg(long)]
     usb_throughput_benchmark: bool,
+
+    /// Measure raw USB CDC ingress across host write sizes without TLV decoding.
+    #[arg(long)]
+    usb_raw_throughput_benchmark: bool,
 
     /// Synthetic payload size per USB benchmark variant.
     #[arg(long, default_value_t = 4)]
@@ -146,6 +152,7 @@ struct DeviceRunner {
     websocket_address: Option<String>,
     websocket_wait: Duration,
     benchmark_mib: Option<u32>,
+    raw_benchmark_mib: Option<u32>,
     passed: usize,
     failures: Vec<(&'static str, String)>,
 }
@@ -157,6 +164,7 @@ impl DeviceRunner {
         websocket_address: Option<String>,
         websocket_wait: Duration,
         benchmark_mib: Option<u32>,
+        raw_benchmark_mib: Option<u32>,
     ) -> Self {
         let transfer_id_seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -171,6 +179,7 @@ impl DeviceRunner {
             websocket_address,
             websocket_wait,
             benchmark_mib,
+            raw_benchmark_mib,
             passed: 0,
             failures: Vec::new(),
         }
@@ -212,6 +221,13 @@ impl DeviceRunner {
                 Self::test_usb_throughput,
             );
             self.case("post-benchmark control health probe", Self::test_probe);
+        }
+        if self.raw_benchmark_mib.is_some() {
+            self.case(
+                "USB raw-ingress host-write matrix",
+                Self::test_usb_raw_throughput,
+            );
+            self.case("post-raw-benchmark control health probe", Self::test_probe);
         }
         if self.websocket_address.is_some() {
             self.case(
@@ -616,6 +632,112 @@ impl DeviceRunner {
         bail!("timed out waiting for USB benchmark result")
     }
 
+    fn test_usb_raw_throughput(&mut self) -> Result<()> {
+        let mib = self
+            .raw_benchmark_mib
+            .expect("raw benchmark test runs only when configured");
+        ensure!(mib > 0 && mib <= 64, "benchmark size must be 1..=64 MiB");
+        println!(
+            "[INFO] Raw USB benchmark uses {mib} MiB per host write-size variant and bypasses TLV decoding"
+        );
+        for write_size in [64_usize, 512, 2048, 16 * 1024] {
+            let measurement = self.run_usb_raw_benchmark(mib, write_size)?;
+            println!(
+                "[BENCH-RAW] write={write_size:>5} host={:.1} KiB/s device={:.1} KiB/s packets={} full={} short={}",
+                measurement.host_kib_per_second,
+                measurement.device_kib_per_second,
+                measurement.packets,
+                measurement.full_packets,
+                measurement.short_packets,
+            );
+        }
+        Ok(())
+    }
+
+    fn run_usb_raw_benchmark(
+        &mut self,
+        mib: u32,
+        write_size: usize,
+    ) -> Result<RawUsbBenchmarkMeasurement> {
+        self.reset_input();
+        let target_bytes = u64::from(mib) * 1024 * 1024;
+        let token = (self.transfer_id_seed as u32)
+            ^ 0x5241_5700
+            ^ u32::try_from(write_size).context("raw benchmark write size conversion")?;
+        let mut start = Vec::with_capacity(14);
+        start.extend_from_slice(&USB_RAW_BENCHMARK_VERSION.to_le_bytes());
+        start.extend_from_slice(&token.to_le_bytes());
+        start.extend_from_slice(&target_bytes.to_le_bytes());
+        self.send_frame(TAG_USB_RAW_BENCHMARK_START, &start)?;
+        let started = self.expect_raw_benchmark_result(token, Duration::from_secs(2))?;
+        ensure!(
+            started.status == USB_BENCHMARK_STATUS_STARTED,
+            "raw benchmark start was rejected with status {}",
+            started.status
+        );
+
+        let buffer = vec![0xa5_u8; write_size];
+        let started_at = Instant::now();
+        let mut sent = 0_u64;
+        while sent < target_bytes {
+            let count = usize::try_from((target_bytes - sent).min(write_size as u64))
+                .context("raw benchmark write length conversion")?;
+            self.port
+                .write_all(&buffer[..count])
+                .with_context(|| format!("write {write_size}-byte raw USB benchmark block"))?;
+            sent = sent.saturating_add(count as u64);
+        }
+        self.port.flush().context("flush raw USB benchmark data")?;
+
+        let completed = self.expect_raw_benchmark_result(token, Duration::from_secs(10))?;
+        let host_elapsed = started_at.elapsed();
+        ensure!(
+            completed.status == USB_BENCHMARK_STATUS_COMPLETE,
+            "raw benchmark failed with status {}",
+            completed.status
+        );
+        ensure!(
+            completed.bytes == target_bytes,
+            "raw benchmark firmware byte count mismatch"
+        );
+        ensure!(
+            completed.packets == completed.full_packets + completed.short_packets,
+            "raw benchmark packet accounting mismatch"
+        );
+        ensure!(
+            completed.elapsed_us > 0,
+            "firmware reported zero raw benchmark elapsed time"
+        );
+
+        Ok(RawUsbBenchmarkMeasurement {
+            packets: completed.packets,
+            full_packets: completed.full_packets,
+            short_packets: completed.short_packets,
+            host_kib_per_second: target_bytes as f64 / 1024.0 / host_elapsed.as_secs_f64(),
+            device_kib_per_second: target_bytes as f64
+                / 1024.0
+                / (completed.elapsed_us as f64 / 1_000_000.0),
+        })
+    }
+
+    fn expect_raw_benchmark_result(
+        &mut self,
+        token: u32,
+        timeout: Duration,
+    ) -> Result<RawUsbBenchmarkResult> {
+        let deadline = Instant::now() + timeout;
+        while let Some(frame) = self.read_frame_until(deadline)? {
+            if frame.tag != TAG_USB_RAW_BENCHMARK_RESULT {
+                continue;
+            }
+            let result = decode_raw_usb_benchmark_result(&frame.payload)?;
+            if result.token == token {
+                return Ok(result);
+            }
+        }
+        bail!("timed out waiting for raw USB benchmark result")
+    }
+
     fn test_websocket_batching(&mut self) -> Result<()> {
         let address = self
             .websocket_address
@@ -754,6 +876,24 @@ struct UsbBenchmarkResult {
     bytes: u64,
     elapsed_us: u64,
     checksum: u32,
+}
+
+struct RawUsbBenchmarkMeasurement {
+    packets: u32,
+    full_packets: u32,
+    short_packets: u32,
+    host_kib_per_second: f64,
+    device_kib_per_second: f64,
+}
+
+struct RawUsbBenchmarkResult {
+    status: u8,
+    token: u32,
+    bytes: u64,
+    elapsed_us: u64,
+    packets: u32,
+    full_packets: u32,
+    short_packets: u32,
 }
 
 struct WebSocketProbe {
@@ -961,7 +1101,8 @@ fn main() -> Result<()> {
         "--response-timeout-ms must be greater than zero"
     );
     ensure!(
-        !args.usb_throughput_benchmark || (1..=64).contains(&args.benchmark_mib),
+        !(args.usb_throughput_benchmark || args.usb_raw_throughput_benchmark)
+            || (1..=64).contains(&args.benchmark_mib),
         "--benchmark-mib must be 1..=64"
     );
 
@@ -994,6 +1135,8 @@ fn main() -> Result<()> {
         websocket_address,
         Duration::from_secs(args.wait_secs),
         args.usb_throughput_benchmark.then_some(args.benchmark_mib),
+        args.usb_raw_throughput_benchmark
+            .then_some(args.benchmark_mib),
     )
     .run()
 }
@@ -1237,6 +1380,27 @@ fn decode_usb_benchmark_result(payload: &[u8]) -> Result<UsbBenchmarkResult> {
     })
 }
 
+fn decode_raw_usb_benchmark_result(payload: &[u8]) -> Result<RawUsbBenchmarkResult> {
+    ensure!(
+        payload.len() == USB_RAW_BENCHMARK_RESULT_LEN,
+        "raw USB benchmark result length mismatch"
+    );
+    let version = u16::from_le_bytes(payload[0..2].try_into().expect("length checked"));
+    ensure!(
+        version == USB_RAW_BENCHMARK_VERSION,
+        "unsupported raw USB benchmark result version {version}"
+    );
+    Ok(RawUsbBenchmarkResult {
+        status: payload[2],
+        token: u32::from_le_bytes(payload[3..7].try_into().expect("length checked")),
+        bytes: u64::from_le_bytes(payload[7..15].try_into().expect("length checked")),
+        elapsed_us: u64::from_le_bytes(payload[15..23].try_into().expect("length checked")),
+        packets: u32::from_le_bytes(payload[23..27].try_into().expect("length checked")),
+        full_packets: u32::from_le_bytes(payload[27..31].try_into().expect("length checked")),
+        short_packets: u32::from_le_bytes(payload[31..35].try_into().expect("length checked")),
+    })
+}
+
 fn encode_abort(transfer_id: u64, reason: u8, detail: &[u8]) -> Result<Vec<u8>> {
     let detail_len = u16::try_from(detail.len()).context("FILE_ABORT detail is too long")?;
     let mut payload = Vec::with_capacity(11 + detail.len());
@@ -1319,6 +1483,29 @@ mod tests {
         assert_eq!(parse_u16("0x1209").unwrap(), 0x1209);
         assert_eq!(parse_u16("4617").unwrap(), 0x1209);
         assert!(parse_u16("0x10000").is_err());
+    }
+
+    #[test]
+    fn raw_usb_benchmark_result_decoder_is_exact() {
+        let mut payload = [0_u8; USB_RAW_BENCHMARK_RESULT_LEN];
+        payload[0..2].copy_from_slice(&USB_RAW_BENCHMARK_VERSION.to_le_bytes());
+        payload[2] = USB_BENCHMARK_STATUS_COMPLETE;
+        payload[3..7].copy_from_slice(&7_u32.to_le_bytes());
+        payload[7..15].copy_from_slice(&4096_u64.to_le_bytes());
+        payload[15..23].copy_from_slice(&8000_u64.to_le_bytes());
+        payload[23..27].copy_from_slice(&64_u32.to_le_bytes());
+        payload[27..31].copy_from_slice(&64_u32.to_le_bytes());
+
+        let result = decode_raw_usb_benchmark_result(&payload).unwrap();
+        assert_eq!(result.status, USB_BENCHMARK_STATUS_COMPLETE);
+        assert_eq!(result.token, 7);
+        assert_eq!(result.bytes, 4096);
+        assert_eq!(result.elapsed_us, 8000);
+        assert_eq!(result.packets, 64);
+        assert_eq!(result.full_packets, 64);
+        assert_eq!(result.short_packets, 0);
+
+        assert!(decode_raw_usb_benchmark_result(&payload[..payload.len() - 1]).is_err());
     }
 
     #[test]

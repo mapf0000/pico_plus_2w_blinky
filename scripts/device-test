@@ -13,6 +13,7 @@
 #   --websocket-batch-test     Exercise Wi-Fi WebSocket batching after USB tests.
 #   --websocket-address ADDR   WebSocket test address (default 192.168.4.1:81).
 #   --usb-throughput-benchmark Measure framed CDC ingress with synthetic data.
+#   --usb-raw-throughput-benchmark Measure raw CDC ingress across host write sizes.
 #   --benchmark-mib N          Payload MiB per benchmark variant (default 4).
 #   --host-keepalives N        Host-agent keepalive round-trips (default 2).
 #   --host-interval-ms N       Host-agent keepalive interval (default 10000).
@@ -85,7 +86,7 @@ while [[ $# -gt 0 ]]; do
       RUNNER_ARGS+=("$1" "$2")
       shift 2
       ;;
-    --websocket-batch-test|--usb-throughput-benchmark)
+    --websocket-batch-test|--usb-throughput-benchmark|--usb-raw-throughput-benchmark)
       RUNNER_ARGS+=("$1")
       shift
       ;;

@@ -1,7 +1,7 @@
 use core::fmt::Write as _;
 
 use embassy_futures::select::{Either, select};
-use embassy_time::Instant;
+use embassy_time::{Duration, Instant, WithTimeout};
 use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embassy_usb::driver::{Driver, EndpointError};
 use heapless::{String, Vec};
@@ -76,6 +76,8 @@ const TAG_USB_BENCHMARK_START: u8 = transfer_protocol::TAG_USB_BENCHMARK_START;
 const TAG_USB_BENCHMARK_DATA: u8 = transfer_protocol::TAG_USB_BENCHMARK_DATA;
 const TAG_USB_BENCHMARK_FINISH: u8 = transfer_protocol::TAG_USB_BENCHMARK_FINISH;
 const TAG_USB_BENCHMARK_RESULT: u8 = transfer_protocol::TAG_USB_BENCHMARK_RESULT;
+const TAG_USB_RAW_BENCHMARK_START: u8 = transfer_protocol::TAG_USB_RAW_BENCHMARK_START;
+const TAG_USB_RAW_BENCHMARK_RESULT: u8 = transfer_protocol::TAG_USB_RAW_BENCHMARK_RESULT;
 
 const FS_PROTOCOL_VERSION: u16 = crate::capabilities::FILESYSTEM_PROTOCOL_VERSION;
 const FILE_RESULT_OK: u8 = 0;
@@ -198,6 +200,105 @@ impl UsbBenchmarkState {
     }
 }
 
+struct RawUsbBenchmarkState {
+    active: bool,
+    token: u32,
+    expected_bytes: u64,
+    bytes: u64,
+    packets: u32,
+    full_packets: u32,
+    short_packets: u32,
+    started_at_us: Option<u64>,
+}
+
+impl RawUsbBenchmarkState {
+    const fn new() -> Self {
+        Self {
+            active: false,
+            token: 0,
+            expected_bytes: 0,
+            bytes: 0,
+            packets: 0,
+            full_packets: 0,
+            short_packets: 0,
+            started_at_us: None,
+        }
+    }
+
+    fn start(&mut self, payload: &[u8]) -> u8 {
+        if payload.len() != transfer_protocol::USB_RAW_BENCHMARK_START_LEN {
+            self.active = false;
+            return transfer_protocol::USB_BENCHMARK_STATUS_ERROR;
+        }
+        let version = u16::from_le_bytes([payload[0], payload[1]]);
+        let expected_bytes = u64::from_le_bytes(payload[6..14].try_into().unwrap_or_default());
+        if version != transfer_protocol::USB_RAW_BENCHMARK_VERSION
+            || expected_bytes == 0
+            || expected_bytes > transfer_protocol::USB_RAW_BENCHMARK_MAX_BYTES
+        {
+            self.active = false;
+            return transfer_protocol::USB_BENCHMARK_STATUS_ERROR;
+        }
+
+        self.active = true;
+        self.token = u32::from_le_bytes(payload[2..6].try_into().unwrap_or_default());
+        self.expected_bytes = expected_bytes;
+        self.bytes = 0;
+        self.packets = 0;
+        self.full_packets = 0;
+        self.short_packets = 0;
+        self.started_at_us = None;
+        transfer_protocol::USB_BENCHMARK_STATUS_STARTED
+    }
+
+    fn ingest_packet(&mut self, packet: &[u8], max_packet: usize) -> Option<u8> {
+        if !self.active || packet.is_empty() {
+            return None;
+        }
+        if self.started_at_us.is_none() {
+            self.started_at_us = Some(Instant::now().as_micros());
+        }
+
+        let Some(next_bytes) = self.bytes.checked_add(packet.len() as u64) else {
+            self.active = false;
+            return Some(transfer_protocol::USB_BENCHMARK_STATUS_ERROR);
+        };
+        self.packets = self.packets.saturating_add(1);
+        if packet.len() == max_packet {
+            self.full_packets = self.full_packets.saturating_add(1);
+        } else {
+            self.short_packets = self.short_packets.saturating_add(1);
+        }
+        self.bytes = next_bytes;
+
+        if self.bytes > self.expected_bytes {
+            self.active = false;
+            return Some(transfer_protocol::USB_BENCHMARK_STATUS_ERROR);
+        }
+        if self.bytes == self.expected_bytes {
+            self.active = false;
+            return Some(transfer_protocol::USB_BENCHMARK_STATUS_COMPLETE);
+        }
+        None
+    }
+
+    fn encode_result(&self, status: u8) -> [u8; transfer_protocol::USB_RAW_BENCHMARK_RESULT_LEN] {
+        let mut out = [0; transfer_protocol::USB_RAW_BENCHMARK_RESULT_LEN];
+        out[0..2].copy_from_slice(&transfer_protocol::USB_RAW_BENCHMARK_VERSION.to_le_bytes());
+        out[2] = status;
+        out[3..7].copy_from_slice(&self.token.to_le_bytes());
+        out[7..15].copy_from_slice(&self.bytes.to_le_bytes());
+        let elapsed_us = self.started_at_us.map_or(0, |started| {
+            Instant::now().as_micros().saturating_sub(started)
+        });
+        out[15..23].copy_from_slice(&elapsed_us.to_le_bytes());
+        out[23..27].copy_from_slice(&self.packets.to_le_bytes());
+        out[27..31].copy_from_slice(&self.full_packets.to_le_bytes());
+        out[31..35].copy_from_slice(&self.short_packets.to_le_bytes());
+        out
+    }
+}
+
 struct TlvStreamDecoder {
     header: [u8; TLV_HEADER_LEN],
     header_len: usize,
@@ -284,8 +385,55 @@ where
     let mut decoder = TlvStreamDecoder::new();
     let mut relay = RelayState::new();
     let mut benchmark = UsbBenchmarkState::new();
+    let mut raw_benchmark = RawUsbBenchmarkState::new();
 
     loop {
+        if raw_benchmark.active {
+            match class
+                .read_packet(&mut packet)
+                .with_timeout(Duration::from_secs(5))
+                .await
+            {
+                Ok(Ok(count)) if count > 0 => {
+                    if let Some(status) = raw_benchmark.ingest_packet(&packet[..count], max_packet)
+                    {
+                        let result = raw_benchmark.encode_result(status);
+                        if let Err(err) = send_tlv(
+                            &mut class,
+                            max_packet,
+                            TAG_USB_RAW_BENCHMARK_RESULT,
+                            &result,
+                        )
+                        .await
+                        {
+                            log::warn!("usb: raw benchmark result send error: {:?}", err);
+                        }
+                    }
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => {
+                    raw_benchmark.active = false;
+                    log::warn!("usb: raw benchmark read error: {:?}", err);
+                }
+                Err(_) => {
+                    raw_benchmark.active = false;
+                    let result =
+                        raw_benchmark.encode_result(transfer_protocol::USB_BENCHMARK_STATUS_ERROR);
+                    if let Err(err) = send_tlv(
+                        &mut class,
+                        max_packet,
+                        TAG_USB_RAW_BENCHMARK_RESULT,
+                        &result,
+                    )
+                    .await
+                    {
+                        log::warn!("usb: raw benchmark timeout result send error: {:?}", err);
+                    }
+                }
+            }
+            continue;
+        }
+
         match select(CTRL_CHAN.receive(), class.read_packet(&mut packet)).await {
             Either::First(cmd) => {
                 if let Err(err) = handle_command(&mut class, max_packet, cmd).await {
@@ -303,6 +451,7 @@ where
                         &mut decoder,
                         &mut relay,
                         &mut benchmark,
+                        &mut raw_benchmark,
                         &packet[..count],
                     )
                     .await
@@ -414,6 +563,7 @@ async fn handle_incoming_bytes<'d, D>(
     decoder: &mut TlvStreamDecoder,
     relay: &mut RelayState,
     benchmark: &mut UsbBenchmarkState,
+    raw_benchmark: &mut RawUsbBenchmarkState,
     bytes: &[u8],
 ) -> Result<(), EndpointError>
 where
@@ -422,7 +572,16 @@ where
     for byte in bytes {
         if let Some((tag, payload_len)) = decoder.push_byte(*byte) {
             let payload = decoder.payload(payload_len);
-            handle_host_frame(class, max_packet, relay, benchmark, tag, payload).await?;
+            handle_host_frame(
+                class,
+                max_packet,
+                relay,
+                benchmark,
+                raw_benchmark,
+                tag,
+                payload,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -433,6 +592,7 @@ async fn handle_host_frame<'d, D>(
     max_packet: usize,
     relay: &mut RelayState,
     benchmark: &mut UsbBenchmarkState,
+    raw_benchmark: &mut RawUsbBenchmarkState,
     tag: u8,
     payload: &[u8],
 ) -> Result<(), EndpointError>
@@ -455,6 +615,11 @@ where
             let status = benchmark.finish(payload);
             let result = benchmark.encode_result(status);
             send_tlv(class, max_packet, TAG_USB_BENCHMARK_RESULT, &result).await?;
+        }
+        TAG_USB_RAW_BENCHMARK_START => {
+            let status = raw_benchmark.start(payload);
+            let result = raw_benchmark.encode_result(status);
+            send_tlv(class, max_packet, TAG_USB_RAW_BENCHMARK_RESULT, &result).await?;
         }
         TAG_AGENT_STATUS => {
             crate::capabilities::record_host_agent_status(payload);

@@ -52,6 +52,8 @@ const TAG_USB_BENCHMARK_START: u8 = transfer_protocol::TAG_USB_BENCHMARK_START;
 const TAG_USB_BENCHMARK_DATA: u8 = transfer_protocol::TAG_USB_BENCHMARK_DATA;
 const TAG_USB_BENCHMARK_FINISH: u8 = transfer_protocol::TAG_USB_BENCHMARK_FINISH;
 const TAG_USB_BENCHMARK_RESULT: u8 = transfer_protocol::TAG_USB_BENCHMARK_RESULT;
+const TAG_USB_RAW_BENCHMARK_START: u8 = transfer_protocol::TAG_USB_RAW_BENCHMARK_START;
+const TAG_USB_RAW_BENCHMARK_RESULT: u8 = transfer_protocol::TAG_USB_RAW_BENCHMARK_RESULT;
 
 const CACHE_DIR_NAME: &str = "host-agent";
 const CACHE_FILE_NAME: &str = "port";
@@ -382,6 +384,8 @@ fn is_known_tag(tag: u8) -> bool {
             | TAG_USB_BENCHMARK_DATA
             | TAG_USB_BENCHMARK_FINISH
             | TAG_USB_BENCHMARK_RESULT
+            | TAG_USB_RAW_BENCHMARK_START
+            | TAG_USB_RAW_BENCHMARK_RESULT
     )
 }
 
