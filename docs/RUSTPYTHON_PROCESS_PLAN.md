@@ -1,8 +1,8 @@
-# RustPython browser process: one-session implementation plan
+# RustPython browser process: greenfield one-session implementation plan
 
 ## Status and objective
 
-This document defines one bounded implementation session for adding a single long-lived RustPython process to the Web frontend.
+This document defines one bounded implementation session for replacing the existing user-facing DSL scripting system with a single long-lived RustPython process in the Web frontend.
 
 The process uses the actual RustPython VM in a dedicated Web Worker. It may contain ordinary Python functions, state, exceptions, and cooperative loops. It remains alive when the Pico WebSocket disconnects, provided the browser tab remains open. Device-dependent operations fail with catchable Python exceptions while their capability is unavailable.
 
@@ -13,6 +13,8 @@ This is a browser process, not a device-resident process:
 - A WebSocket disconnect does not terminate it.
 - The process is not retried automatically after a crash or timeout.
 - Only one process may exist at a time.
+
+RustPython is the only scripting interface in the completed tree. KBD1 remains an internal firmware action format, but users no longer edit DSL, load DSL built-ins, or call the legacy script RPC.
 
 The phrase “continue when the browser disconnects” is interpreted here as “continue when the frontend loses its WebSocket connection to the Pico while the tab and Worker remain alive.” A browser Worker cannot survive the browser tab itself closing.
 
@@ -45,6 +47,22 @@ def main():
 
 The process is cooperative: every external effect is yielded to the browser supervisor. A loop such as `while True: pass` never yields, so the main thread terminates the Worker when the per-step deadline expires.
 
+## Greenfield cutover policy
+
+The session may temporarily leave the DSL path in place while the RustPython spike and size gates are being proven. Once the RustPython acceptance tests pass, the same session removes the old user-facing path rather than shipping two scripting systems.
+
+The final implementation must:
+
+- Remove the DSL/Python mode switch; the scripting page is Python-only.
+- Remove `SCRIPT_RUN_HEX` and replace it with the tracked binary effect protocol.
+- Remove built-in DSL scripts and the on-device payload library/page.
+- Remove DSL-specific frontend state, components, compilation, and documentation.
+- Extract reusable layout, key parsing, text lowering, KBD1 encoding, and validation into a language-neutral crate.
+- Remove the DSL parser, preprocessor, linker, WASM adapter, examples, and payload generator after their reusable pieces have moved.
+- Keep the low-level KBD1 executor because it remains the bounded action format used by RustPython effects.
+
+If the RustPython spike fails its API, memory, or flash gate, stop before deleting the DSL implementation and report the failure. There is no requirement to retain a permanent compatibility fallback after RustPython succeeds.
+
 ## Explicit non-goals
 
 The session does not implement:
@@ -56,7 +74,7 @@ The session does not implement:
 - Host command execution, filesystem operations, or credentials from Python.
 - Automatic process restart or restoration of Python state.
 - A general firmware state-machine VM.
-- Migration of existing built-in DSL scripts.
+- Migration or source compatibility for existing DSL scripts.
 - Production browser-matrix, fuzzing, CSP, or flash-compression work beyond the build/size gates below.
 
 ## Runtime model
@@ -241,9 +259,17 @@ Required validation:
 
 The Worker runs synchronously only while starting or resuming the generator. The main thread starts a deadline before every `Start`, `Resume`, or `Raise`. On expiry it calls `Worker.terminate()` and marks the process faulted.
 
-## Shared keyboard builder and KBD1 validation
+## Language-neutral keyboard core and KBD1 validation
 
-Add a language-neutral bounded builder to `crates/dsl/dsl-core`:
+Create `crates/keyboard-core` by extracting the reusable pieces from `crates/dsl/dsl-core`:
+
+- Keyboard layout identifiers and character mappings.
+- Key and modifier/chord parsing.
+- Flat tap/delay operations and normalization.
+- A bounded program builder.
+- KBD1 encoding, decoding, constants, and strict validation.
+
+The crate remains `no_std` by default, with allocation enabled only where encoding needs it. Its primary API is:
 
 ```rust
 let mut program = KeyboardProgramBuilder::new();
@@ -256,6 +282,17 @@ The builder must reuse the existing layout, key/chord parsing, text lowering, de
 
 The Worker uses the builder to convert yielded keyboard effects to KBD1. The main frontend treats returned bytes as untrusted and validates them again before transport.
 
+After all consumers use `keyboard-core`, remove:
+
+- `apps/frontend/src/dsl.rs`
+- `crates/dsl/dsl-core`
+- `crates/dsl/dsl-wasm`
+- `crates/dsl/examples`
+- `crates/builtin-scripts`
+- `crates/build-support/src/payloads.rs` and its generated payload integration
+
+Retain the firmware executor, moving or renaming it only if that can be done mechanically without risking the session. It executes KBD1 and is not itself a DSL implementation.
+
 Before accepting tracked Python effects, harden firmware execution:
 
 - Validate the complete KBD1 before the first HID report.
@@ -265,18 +302,24 @@ Before accepting tracked Python effects, harden firmware execution:
 - Make every tap/modifier/delay suspension cancellable.
 - Always attempt an all-zero keyboard report on cancellation and before the first action after USB reconnect.
 
-For this session, cap each Python HID effect at 768 KBD1 bytes so the existing `SCRIPT_RUN_HEX` command remains below its 2,048-byte text-frame limit. The separate 4,096-byte binary script transport remains follow-up work.
+Each Python HID effect may use the full 4,096-byte KBD1 limit because the new binary effect protocol replaces the text/hex transport.
 
 ## Correlated HID effects
 
-The existing `SCRIPT_RUN_HEX` acknowledgement means only “queued,” which is insufficient for process backpressure. Add a tracked variant without changing legacy behavior:
+Remove `SCRIPT_RUN_HEX`. Add one versioned browser-to-firmware binary message kind for tracked process control:
 
 ```text
-SCRIPT_EFFECT_RUN <process-id-hex> <effect-id-hex> <kbd1-hex>
-SCRIPT_EFFECT_CANCEL <process-id-hex>
+kind:          u8
+version:       u8 = 1
+operation:     u8 = RUN_EFFECT | CANCEL_PROCESS
+request_id:    u64 little-endian
+process_id:    u64 little-endian
+effect_id:     u64 little-endian
+bytecode_len:  u16 little-endian
+bytecode:      0..4096 bytes for RUN_EFFECT
 ```
 
-The queue response remains correlated through the existing RPC envelope. Firmware later emits:
+The initial queue/rejection response remains correlated through the existing request envelope. Firmware later emits:
 
 ```json
 {
@@ -288,7 +331,9 @@ The queue response remains correlated through the existing RPC envelope. Firmwar
 }
 ```
 
-Statuses are `completed`, `cancelled`, `usb_unavailable`, `invalid`, or `failed`. IDs are fixed-width hexadecimal strings to avoid JavaScript integer precision issues.
+Statuses are `completed`, `cancelled`, `usb_unavailable`, `invalid`, or `failed`. JSON event IDs are fixed-width hexadecimal strings to avoid JavaScript integer precision issues, even though the binary request uses integers.
+
+Increase or relocate the WebSocket frame scratch space to accept the 4,125-byte maximum envelope. The existing 8 KiB PSRAM receive allocation is sufficient; measure the static SRAM delta from any stack-buffer change.
 
 Update `HidCommand` with an origin, process/effect IDs, and frontend connection generation. The HID owner sends completion only for the matching generation.
 
@@ -300,7 +345,7 @@ When the WebSocket generation closes:
 - Do not stop the browser Worker.
 - The frontend resumes the generator with `DeviceDisconnected`.
 
-Legacy one-shot DSL and built-in payload commands retain their current queue semantics.
+There is no legacy script command or payload queue in the completed tree. All browser-originated keyboard scripting goes through the tracked binary effect path.
 
 ## Frontend supervisor
 
@@ -347,8 +392,7 @@ Use nonblocking insertion. Dropping a button event under queue pressure is allow
 
 Update the scripting card with:
 
-- DSL/Python language selector.
-- Separate source buffers so switching languages loses nothing.
+- A single Python editor; remove the language selector and DSL source state.
 - Python starter example using a cooperative generator.
 - Start process and Stop process controls.
 - State: loading, running, waiting, executing, disconnected, faulted, stopped.
@@ -356,7 +400,9 @@ Update the scripting card with:
 - Clear note: “The process survives device connection loss while this tab remains open. Closing or reloading the tab stops it.”
 - Clear note that every external action must be yielded.
 
-Existing built-ins remain DSL and loading one selects the DSL editor.
+Remove the built-in DSL library. If examples are useful, keep a small static list of Python examples in the frontend without adding a second compiler or payload format.
+
+Remove the on-device payload page from the display registry. It may be replaced with a small Python-process status page only if the status view fits the session after the runtime is working; otherwise remove the old page without replacement.
 
 ## Trunk, embedding, and routes
 
@@ -371,7 +417,7 @@ Extend the existing isolated release build in `crates/build-support` to:
 - Report main WASM, Python WASM, Python JavaScript, and aggregate frontend sizes separately.
 - Add `PICO_PYTHON_WASM_WARN_BYTES` and `PICO_PYTHON_WASM_MAX_BYTES`.
 
-Extend firmware frontend routes with correct JavaScript and `application/wasm` content types. Python assets must be loaded only when Start is pressed; the initial DSL/UI path must not fetch them.
+Extend firmware frontend routes with correct JavaScript and `application/wasm` content types. Python assets must be loaded only when Start is pressed; initial application and scripting-page rendering must not fetch them.
 
 The existing three-second HTTP write timeout must be measured for the Python WASM response and increased only if the embedded access-point test demonstrates it is necessary.
 
@@ -389,7 +435,7 @@ The existing three-second HTTP write timeout must be measured for the Python WAS
 | Worker initialization | 30 seconds |
 | Worker WASM memory maximum | 64 MiB target, 128 MiB absolute stop |
 | One text effect | 1,024 Unicode scalars |
-| One KBD1 effect | 768 bytes |
+| One KBD1 effect | 4,096 bytes |
 | One device delay | 5 seconds |
 | Bounded traceback/diagnostic | 8 KiB |
 
@@ -417,12 +463,12 @@ Execute in this order so the largest uncertainties fail early:
    - Add versioned messages, effects, exception types, source/error limits, and per-step timeout recovery.
    - Prove `while True: pass` is terminated and a subsequent process can start.
 
-3. **Shared KBD1 safety**
-   - Add the bounded builder and strict complete-program validator.
+3. **Language-neutral keyboard core and KBD1 safety**
+   - Extract the bounded builder, layout lowering, encoder, and strict complete-program validator into `keyboard-core`.
    - Make firmware execution validate before HID output.
 
 4. **Tracked HID execution**
-   - Add correlated run/result/cancel handling.
+   - Add the correlated binary run/result/cancel protocol and remove the text/hex script command.
    - Add cancellable HID phases and neutral-report cleanup.
 
 5. **Frontend supervisor and event routing**
@@ -431,8 +477,10 @@ Execute in this order so the largest uncertainties fail early:
 6. **Worker asset embedding**
    - Extend Trunk/build-support discovery, generated statics, firmware routes, size gates, and lazy loading.
 
-7. **Minimal UI and documentation**
-   - Add language/source state, Start/Stop, status/diagnostics, starter script, and lifecycle notes.
+7. **Greenfield cutover, minimal UI, and documentation**
+   - Add Python source state, Start/Stop, status/diagnostics, starter script, and lifecycle notes.
+   - Remove the DSL editor/compiler, built-in scripts, payload display page, payload generator, legacy RPC, and obsolete workspace members.
+   - Remove DSL documentation and update architecture/protocol documentation to describe the Python-only path.
 
 8. **Validation and handoff**
    - Run the targeted matrix below.
@@ -456,12 +504,12 @@ Execute in this order so the largest uncertainties fail early:
 - Bad CRC, flags, opcode, varint, end position, trailing bytes, delay, or operation count produces zero HID reports.
 - Tracked completion carries the exact process/effect IDs.
 - Cancel at modifier-down, key-down, delay, and USB-write boundaries ends with a neutral report.
-- WebSocket generation loss cancels tracked work but does not affect legacy commands.
+- WebSocket generation loss cancels tracked work and leaves no queued effect from that generation.
 - USB unavailable returns a terminal tracked result and does not queue replay.
 
 ### Frontend tests
 
-- Python assets are not fetched during normal DSL startup.
+- Python assets are not fetched during initial application or scripting-page rendering.
 - Start is single-flight and Stop clears all pending state.
 - Disconnect does not terminate the Worker.
 - HID effects while disconnected throw `DeviceDisconnected`.
@@ -475,10 +523,11 @@ Execute in this order so the largest uncertainties fail early:
 
 ```sh
 cargo fmt --all -- --check
-cargo test -p dsl-core --features "std layout_win_en_gb layout_win_pt_br layout_win_de_de layout_mac_en_gb layout_mac_pt_br layout_mac_de_de"
+cargo test -p keyboard-core --features "std layout_win_en_gb layout_win_pt_br layout_win_de_de layout_mac_en_gb layout_mac_pt_br layout_mac_de_de"
 cargo test -p firmware-exec
 cargo test -p build-support
 cargo clippy -p build-support --all-targets -- -D warnings
+cargo test -p python-worker --target wasm32-unknown-unknown --no-run
 cargo test -p frontend --target wasm32-unknown-unknown --no-run
 cd apps/frontend && trunk build --release
 cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
@@ -497,10 +546,12 @@ The one-session implementation is complete only when:
 5. Reconnection permits new effects without restarting Python.
 6. A non-yielding Python loop is hard-terminated without freezing the Yew UI.
 7. Tracked HID effects have completion and cancellation semantics and always release keys.
-8. Existing DSL scripts and built-in payloads continue to work.
+8. The DSL editor/compiler, built-in payloads, payload display page, text/hex script RPC, and obsolete DSL workspace members are absent from the final tree.
 9. Worker assets and final firmware pass the flash/SRAM gates.
 10. The targeted build and test commands pass, or unavailable browser/hardware checks are explicitly recorded.
 
-## Rollback
+## Cutover and failure handling
 
-Keep the DSL path independent. Removing the Python UI entry and worker asset declarations must restore the previous bundle without changing KBD1 or legacy DSL behavior. Strict KBD1 validation and HID cancellation improvements should remain even if the RustPython spike is abandoned.
+Do not delete the working DSL implementation before the initial RustPython generator and artifact-size gates pass. Once those gates pass, complete the greenfield cutover in the same change; do not leave a hidden compatibility route or second scripting UI.
+
+If the RustPython spike fails, leave the existing functionality intact and hand off the measurements and blocker. If a later integration step fails after cutover work begins, fix forward within the session or restore only the session's incomplete cutover edits without discarding unrelated work. Strict KBD1 validation and HID cancellation improvements remain valuable regardless of the scripting frontend.
