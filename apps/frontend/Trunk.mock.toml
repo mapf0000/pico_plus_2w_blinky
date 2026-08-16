@@ -1,0 +1,10 @@
+[[proxy]]
+rewrite = "/ws"
+backend = "ws://127.0.0.1:9001/ws"
+ws = true
+
+# Development-only backend provided by `scripts/mock-pico`.
+
+[watch]
+watch = ["src", "index.html", "ui"]
+ignore = ["dist"]

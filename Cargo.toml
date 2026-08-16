@@ -12,6 +12,7 @@ members = [
   "crates/transfer-protocol",
   "firmware",
   "tools/device-test",
+  "tools/mock-pico",
 ]
 default-members = ["firmware"]
 resolver = "2"

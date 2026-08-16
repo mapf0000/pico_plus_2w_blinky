@@ -11,6 +11,11 @@ Build options:
   - Files in `ui/` are copied to `dist/ui/`. The IndexedDB helper is imported
     from the stable `/ui/idb.js` URL used by both the development server and
     firmware.
+  - Without hardware, run `scripts/mock-pico` from the repository root and use
+    `trunk serve --config Trunk.mock.toml --open`. The mock runs the host agent
+    through a pseudo-terminal and relays filesystem and secure-transfer traffic.
+    Use `scripts/mock-pico --no-host-agent` for the connected-device/absent-agent
+    UI state.
 
 - Using cargo + wasm-bindgen directly:
   - `rustup target add wasm32-unknown-unknown`

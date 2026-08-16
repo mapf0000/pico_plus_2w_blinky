@@ -133,7 +133,7 @@ flowchart LR
 `crates/build-support` performs four important jobs:
 
 1. Copies `firmware/memory.x` into `OUT_DIR` and adds it to the linker search path.
-2. Fingerprints frontend and DSL sources, runs `trunk build --release` when stale, and copies assets to stable generated names.
+2. Fingerprints frontend and DSL sources, runs `trunk build --release` into an isolated directory under `OUT_DIR` when stale, and copies assets to stable generated names. It never embeds the shared `apps/frontend/dist/` development output.
 3. Compiles built-in scripts into `payloads_gen.rs` for the on-device display.
 4. Constructs `host-agent.img`, an 8 MiB read-only FAT16 image embedded in its own flash region.
 

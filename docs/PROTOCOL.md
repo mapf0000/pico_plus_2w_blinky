@@ -632,7 +632,7 @@ Firmware response text:
 }
 ```
 
-`payload` is the JSON value returned by the command. The browser requires response `version = 1`, accepts a string payload for compatibility, and otherwise serializes the JSON value back to text before command-specific parsing. A response-version mismatch completes the matching request with a protocol error.
+`payload` is the JSON value returned by the command. The browser requires response `version = 2`, matching `HELLO.protocols.websocket`; it accepts a string payload for compatibility and otherwise serializes the JSON value back to text before command-specific parsing. A response-version mismatch completes the matching request with a protocol error.
 
 Firmware also accepts unwrapped legacy command text and returns the raw JSON response without an envelope. The current frontend always uses correlated RPC.
 

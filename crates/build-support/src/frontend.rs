@@ -1,7 +1,7 @@
 //! Build, fingerprint, and embed the Yew/Trunk frontend.
 
 use super::*;
-const DIST_DIR: &str = "dist";
+const RELEASE_DIST_DIR: &str = "frontend-dist";
 const GEN_RS: &str = "frontend_static.rs";
 const FP_FILE: &str = "frontend.fingerprint";
 
@@ -45,11 +45,16 @@ pub fn prepare(cfg: &Config) -> Result<()> {
     let fp_path = cfg.out_dir.join(FP_FILE);
     let prev_fp = fs::read_to_string(&fp_path).ok();
 
-    let dist = cfg.frontend_dir.join(DIST_DIR);
+    // Keep the firmware release bundle isolated from apps/frontend/dist.
+    // `trunk serve` also writes to that shared development directory and can
+    // replace an optimized bundle without changing any source fingerprints.
+    let dist = release_dist(&cfg.out_dir);
     let need_trunk = !dist.exists() || prev_fp.as_deref() != Some(&cur_fp);
 
     if need_trunk && !try_trunk_build(cfg)? {
-        bail!("frontend: dist is missing/stale and Trunk is not available or failed");
+        bail!(
+            "frontend: isolated release bundle is missing/stale and Trunk is not available or failed"
+        );
     }
 
     // Always embed; will fail if dist missing
@@ -63,11 +68,11 @@ pub fn prepare(cfg: &Config) -> Result<()> {
 }
 
 /// Attempt to build the frontend via `trunk build --release`.
-/// Returns `Ok(true)` when Trunk succeeded, `Ok(false)` when Trunk was not
-/// found or failed (the caller may decide to continue if a valid `dist/` exists).
+/// Returns `Ok(true)` when Trunk succeeded and `Ok(false)` when Trunk was not
+/// found or failed.
 fn try_trunk_build(cfg: &Config) -> Result<bool> {
     if which("trunk").is_err() {
-        cargo::warn("frontend: Trunk not found; will use existing dist if present");
+        cargo::warn("frontend: Trunk not found");
         return Ok(false);
     }
 
@@ -84,15 +89,17 @@ fn try_trunk_build(cfg: &Config) -> Result<bool> {
     if bindgen_output.exists() {
         fs::remove_dir_all(&bindgen_output).context("clean stale wasm-bindgen output")?;
     }
-    let dist = cfg.frontend_dir.join(DIST_DIR);
+    let dist = release_dist(&cfg.out_dir);
     if dist.exists() {
-        fs::remove_dir_all(&dist).context("clean stale frontend dist")?;
+        fs::remove_dir_all(&dist).context("clean stale firmware frontend dist")?;
     }
 
     // Spawn Trunk with a “clean” env to avoid leaking embedded flags into wasm.
     let mut cmd = std::process::Command::new("trunk");
     cmd.arg("build")
         .arg("--release")
+        .arg("--dist")
+        .arg(&dist)
         .current_dir(&cfg.frontend_dir)
         .env("CARGO_TARGET_DIR", &trunk_target)
         // Avoid leaking MCU/outer Cargo state into the frontend build:
@@ -120,12 +127,16 @@ fn try_trunk_build(cfg: &Config) -> Result<bool> {
     }
 }
 
-/// Copy `dist/` artifacts to `OUT_DIR` with stable names and generate
-/// a small Rust module with `include_*` statements for serving over HTTP.
+/// Copy the isolated release artifacts to stable names in `OUT_DIR` and
+/// generate a small Rust module with `include_*` statements for serving over
+/// HTTP.
 fn embed_dist(cfg: &Config) -> Result<()> {
-    let dist = cfg.frontend_dir.join(DIST_DIR);
+    let dist = release_dist(&cfg.out_dir);
     if !dist.exists() {
-        bail!("frontend/{DIST_DIR} missing at {}", dist.display());
+        bail!(
+            "firmware frontend release bundle missing at {}",
+            dist.display()
+        );
     }
 
     let js = pick_one_with_ext(&dist, "js")?;
@@ -194,6 +205,10 @@ fn embed_dist(cfg: &Config) -> Result<()> {
         "pub static IDB_JS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/frontend_idb.js\"));"
     )?;
     Ok(())
+}
+
+fn release_dist(out_dir: &Path) -> PathBuf {
+    out_dir.join(RELEASE_DIST_DIR)
 }
 
 /// Find exactly one file in `dir` with the given extension.
@@ -276,4 +291,17 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, skip_dirs: &[&str]) -> Resu
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn firmware_release_dist_is_scoped_to_cargo_out_dir() {
+        let out_dir = Path::new("cargo-out");
+
+        assert_eq!(release_dist(out_dir), out_dir.join("frontend-dist"));
+        assert_ne!(release_dist(out_dir), Path::new("apps/frontend/dist"));
+    }
 }

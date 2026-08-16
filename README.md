@@ -67,6 +67,10 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
   - Or: `cd firmware && cargo build --release`
 - Frontend only (dev server):
   - `cd apps/frontend && trunk serve` (proxies API calls per `Trunk.toml`)
+  - Without hardware, run `scripts/mock-pico`, then use
+    `cd apps/frontend && trunk serve --config Trunk.mock.toml --open` in another terminal.
+    The mock bridges the UI to a real host-agent process over a PTY;
+    `scripts/mock-pico --no-host-agent` simulates firmware with no agent present.
 - Frontend only (release build):
   - `cd apps/frontend && trunk build --release` (outputs to `apps/frontend/dist/`)
 
@@ -141,6 +145,7 @@ Avoid bare `cargo test` at the workspace root: the default member is the embedde
   3) If needed, invoke `trunk build --release` with a separate `CARGO_TARGET_DIR` inside `OUT_DIR`.
      - The Trunk subprocess environment is scrubbed so embedded `RUSTFLAGS` do not leak into the wasm build.
      - The build forces `CARGO_BUILD_TARGET=wasm32-unknown-unknown`.
+     - Release assets are written to an isolated directory inside `OUT_DIR`; firmware builds never reuse the development output in `apps/frontend/dist/`.
   4) Copy and normalize built assets into `OUT_DIR` and generate `frontend_static.rs` containing `include_*` declarations.
   5) Optional size checks controlled by environment variables (see below).
 
@@ -159,14 +164,14 @@ Avoid bare `cargo test` at the workspace root: the default member is the embedde
   - This happens if embedded crates compile for the host target. Run `cargo run -p pico_rust --release --target thumbv8m.main-none-eabihf` or build from `firmware/` where the target is set.
 - Wasm build errors mentioning `--nmagic` or `-Tlink.x`
   - Those flags are for the MCU linker only. The Trunk subprocess environment is scrubbed to avoid leaking them; ensure you are building via `cargo run` (which runs `firmware/build.rs`) or run `trunk build` inside `apps/frontend/`.
-- Trunk not installed / `apps/frontend/dist` missing
-  - Install Trunk (`cargo install trunk`) or pre‑build the frontend (`trunk build --release`). The firmware build will fail if `dist/` is missing and Trunk is unavailable.
+- Trunk not installed / firmware frontend bundle missing
+  - Install Trunk (`cargo install trunk`). A firmware build can reuse its own current release bundle from `OUT_DIR`, but it will not use `apps/frontend/dist/` because that directory may contain unoptimized `trunk serve` output.
 - Picotool cannot find the device
   - Enter BOOTSEL mode (hold BOOTSEL while plugging in), or ensure the board is connected via USB. The runner uses `picotool load -u` to auto‑discover.
 
 ## Git Hygiene
 - `target/` is ignored globally.
-- `apps/frontend/dist/` is ignored (release UI output from Trunk).
+- `apps/frontend/dist/` is ignored local Trunk output for development or standalone release builds. Firmware builds use their isolated release output under Cargo's `OUT_DIR`.
 
 ## License
 Licensed under either of

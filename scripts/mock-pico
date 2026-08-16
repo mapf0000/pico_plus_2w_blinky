@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+mock_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+mock_workspace_dir=$(dirname -- "$mock_script_dir")
+cd "$mock_workspace_dir"
+
+cargo build -p host-agent --features test-port-fd
+exec cargo run -p mock-pico -- "$@"

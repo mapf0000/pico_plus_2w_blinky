@@ -3,9 +3,10 @@
 //! Responsibilities (kept small and focused):
 //! - Install the linker script (`memory.x`) into `OUT_DIR` and add it to the
 //!   link search path for the firmware target.
-//! - Ensure the Web UI (Yew) is built with Trunk to `apps/frontend/dist/` when
-//!   sources change, then copy a few stable-named assets into `OUT_DIR` and
-//!   generate `frontend_static.rs` with `include_*` statements.
+//! - Ensure the Web UI (Yew) is built with Trunk to an isolated release
+//!   directory under `OUT_DIR` when sources change, then copy a few
+//!   stable-named assets and generate `frontend_static.rs` with `include_*`
+//!   statements. Development output in `apps/frontend/dist/` is never embedded.
 //! - Compile built-in keyboard payloads from DSL into bytecode for the display
 //!   and emit `payloads_gen.rs` into `OUT_DIR`.
 //! - Avoid leaking embedded-only flags into the wasm build by scrubbing
