@@ -1,0 +1,24 @@
+[package]
+name = "python-worker"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+keyboard-core = { path = "../../crates/keyboard-core", features = [
+    "alloc",
+    "layout_win_en_gb",
+    "layout_win_pt_br",
+    "layout_win_de_de",
+    "layout_mac_en_gb",
+    "layout_mac_pt_br",
+    "layout_mac_de_de",
+] }
+rustpython-common = { version = "=0.5.0", features = ["wasm_js"] }
+rustpython-vm = { version = "=0.5.0", default-features = false, features = ["compiler", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = "0.2.126"

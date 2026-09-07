@@ -9,10 +9,10 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
 
 ## Documentation
 
-- [System architecture](docs/ARCHITECTURE.md): components, startup, lifecycle, data flow, backpressure, and DSL execution.
+- [System architecture](docs/ARCHITECTURE.md): components, startup, lifecycle, data flow, backpressure, and RustPython execution.
 - [Protocol reference](docs/PROTOCOL.md): USB TLV, WebSocket RPC/HELLO, transfer/filesystem layouts, versions, errors, and compatibility.
 - [Hardware and recovery](docs/HARDWARE.md): supported board, pin and memory maps, USB/Wi-Fi configuration, flashing, BOOTSEL, and smoke tests.
-- [Keyboard DSL](crates/dsl/README.md): language syntax, layouts, limits, and bytecode workflow.
+- [RustPython process plan](docs/RUSTPYTHON_PROCESS_PLAN.md): process semantics, limits, effects, and cutover decisions.
 
 ## Overview
 - Primary hardware target: Pimoroni Pico Plus 2 W (RP2350B) with 16 MiB QSPI flash, 8 MiB PSRAM, and 520 KiB SRAM.
@@ -32,6 +32,8 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
   - `rustup target add wasm32-unknown-unknown`
 - Trunk for building the Web UI
   - `cargo install trunk`
+- wasm-bindgen CLI for the separately built RustPython Worker
+  - `cargo install wasm-bindgen-cli --version 0.2.126`
 - Picotool for flashing
   - macOS: `brew install picotool` (or build from source: https://github.com/raspberrypi/picotool)
 
@@ -44,7 +46,9 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
 - Frontend crate: `apps/frontend/`
   - Trunk config: `apps/frontend/Trunk.toml`
   - Forces `wasm32-unknown-unknown` via `apps/frontend/.cargo/config.toml`
-- DSL crates: `crates/dsl/`
+- RustPython Worker: `apps/python-worker/`
+- Language-neutral keyboard lowering: `crates/keyboard-core/`
+- Strict firmware KBD1 executor: `crates/firmware-exec/`
 - Build helper crate: `crates/build-support/`
   - `crates/build-support/src/lib.rs` orchestrates linker script setup and the Trunk pipeline
 - Custom runner: `scripts/pico-run`
@@ -117,8 +121,9 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
 - Format the workspace: `cargo fmt --all -- --check`
 - Host-agent unit and platform tests: `cargo test -p host-agent`
   - On macOS this includes the pseudo-terminal end-to-end suite; those tests are skipped on other platforms.
-- DSL tests with every keyboard layout enabled:
-  - `cargo test -p dsl-core --features "std layout_win_en_gb layout_win_pt_br layout_win_de_de layout_mac_en_gb layout_mac_pt_br layout_mac_de_de"`
+- Keyboard lowering tests with every layout enabled:
+  - `cargo test -p keyboard-core --features "std layout_win_en_gb layout_win_pt_br layout_win_de_de layout_mac_en_gb layout_mac_pt_br layout_mac_de_de"`
+- RustPython generator/process tests: `cargo test -p python-worker`
 - Compile frontend wasm tests: `cargo test -p frontend --target wasm32-unknown-unknown --no-run`
   - The integration suite is configured to run in a browser and needs `wasm-bindgen-test-runner` plus a compatible browser/WebDriver setup for execution.
 - Check the embedded target: `cargo check -p pico_rust --release --target thumbv8m.main-none-eabihf`
@@ -141,19 +146,24 @@ Avoid bare `cargo test` at the workspace root: the default member is the embedde
 ## Build Script Behavior
 - `firmware/build.rs` calls into the `build-support` crate to:
   1) Copy `firmware/memory.x` to `OUT_DIR` and add it to the linker search path.
-  2) Fingerprint the `apps/frontend/` sources (excluding `dist`, `target`, `.git`, `node_modules`) plus `crates/dsl/`.
+  2) Fingerprint `apps/frontend/` and `apps/python-worker/` sources.
   3) If needed, invoke `trunk build --release` with a separate `CARGO_TARGET_DIR` inside `OUT_DIR`.
      - The Trunk subprocess environment is scrubbed so embedded `RUSTFLAGS` do not leak into the wasm build.
      - The build forces `CARGO_BUILD_TARGET=wasm32-unknown-unknown`.
      - Release assets are written to an isolated directory inside `OUT_DIR`; firmware builds never reuse the development output in `apps/frontend/dist/`.
-  4) Copy and normalize built assets into `OUT_DIR` and generate `frontend_static.rs` containing `include_*` declarations.
-  5) Optional size checks controlled by environment variables (see below).
+  4) Build the real RustPython Worker, run wasm-bindgen, gzip the Worker WASM deterministically, and copy the Worker driver/glue into `OUT_DIR`.
+  5) Normalize all assets and generate `frontend_static.rs` containing `include_*` declarations.
+  6) Apply frontend and compressed-Worker size gates.
 
 ### Environment knobs (optional)
 - `PICO_WASM_WARN_BYTES` (default: `1200000`)
   - Emits a Cargo warning if `app.wasm` exceeds this many bytes.
 - `PICO_WASM_MAX_BYTES` (unset by default)
   - Fails the build if `app.wasm` exceeds this many bytes.
+- `PICO_PYTHON_WASM_WARN_BYTES` (default: `3500000`)
+  - Warns when the stored gzip-compressed RustPython Worker exceeds this size.
+- `PICO_PYTHON_WASM_MAX_BYTES` (default: `4500000`)
+  - Fails the firmware build when the stored compressed Worker exceeds this size.
 
 ## Firmware Features
 - Default features include `firmware` which pulls in Embassy RP, defmt, panic‑probe, CYW43 Wi‑Fi, DHCP, and the HTTP server.

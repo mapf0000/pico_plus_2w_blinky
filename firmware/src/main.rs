@@ -16,7 +16,6 @@ use embassy_rp::dma;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::pio::Pio;
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 // USB classes are handled in `crate::usb` now
 use static_cell::StaticCell;
 // HID report descriptors handled in `crate::usb` now
@@ -35,11 +34,6 @@ bind_interrupts!(pub struct Irqs {
     // DMA channel used by the CYW43 PIO-SPI transport.
     DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<DMA_CH0>;
 });
-
-// ===== Globals =====
-
-// Global signal reserved (legacy) — replaced by usb_supervisor direct calls
-pub static USB_START: Signal<ThreadModeRawMutex, bool> = Signal::new();
 
 // ===== Module-local constants (small & auditable) =====
 

@@ -17,6 +17,12 @@ rustflags = [
 # Use wasm-bindgen test runner for wasm32 test invocations
 [target.wasm32-unknown-unknown]
 runner = "wasm-bindgen-test-runner"
+rustflags = [
+    "--cfg",
+    "getrandom_backend=\"wasm_js\"",
+    "-C",
+    "link-arg=--max-memory=134217728",
+]
 
 [env]
 # defmt log level for firmware

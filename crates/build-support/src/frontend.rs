@@ -1,6 +1,8 @@
 //! Build, fingerprint, and embed the Yew/Trunk frontend.
 
 use super::*;
+use flate2::{Compression, GzBuilder};
+use std::io::Write as _;
 const RELEASE_DIST_DIR: &str = "frontend-dist";
 const GEN_RS: &str = "frontend_static.rs";
 const FP_FILE: &str = "frontend.fingerprint";
@@ -9,21 +11,7 @@ const FP_FILE: &str = "frontend.fingerprint";
 pub fn register_reruns(cfg: &Config) {
     // One broad watch is enough; Cargo will re-run build.rs when anything changes.
     cargo::rerun_if_changed(&cfg.frontend_dir);
-
-    if cfg.dsl_dir.exists() {
-        let dsl_paths = [
-            cfg.dsl_dir.join("dsl-core/Cargo.toml"),
-            cfg.dsl_dir.join("dsl-core/src"),
-            cfg.dsl_dir.join("dsl-wasm/Cargo.toml"),
-            cfg.dsl_dir.join("dsl-wasm/src"),
-            cfg.dsl_dir.join("firmware-exec/Cargo.toml"),
-            cfg.dsl_dir.join("firmware-exec/src"),
-            cfg.dsl_dir.join("examples"),
-        ];
-        for path in dsl_paths {
-            cargo::rerun_if_changed(path);
-        }
-    }
+    cargo::rerun_if_changed(&cfg.python_worker_dir);
 }
 
 /// Ensure the UI is up-to-date, embed assets, and generate `frontend_static.rs`.
@@ -40,8 +28,8 @@ pub fn prepare(cfg: &Config) -> Result<()> {
         &cfg.frontend_dir,
         &["dist", "target", ".git", "node_modules"],
     )?;
-    let dsl_fp = fingerprint_optional(&cfg.dsl_dir, &["target", ".git", "pkg"])?;
-    let cur_fp = format!("front={frontend_fp};dsl={dsl_fp}");
+    let python_fp = fingerprint_tree(&cfg.python_worker_dir, &["target", ".git", "pkg"])?;
+    let cur_fp = format!("front={frontend_fp};python={python_fp}");
     let fp_path = cfg.out_dir.join(FP_FILE);
     let prev_fp = fs::read_to_string(&fp_path).ok();
 
@@ -49,12 +37,18 @@ pub fn prepare(cfg: &Config) -> Result<()> {
     // `trunk serve` also writes to that shared development directory and can
     // replace an optimized bundle without changing any source fingerprints.
     let dist = release_dist(&cfg.out_dir);
+    let worker_ready = cfg.out_dir.join("frontend_python_runtime.wasm.gz").exists()
+        && cfg.out_dir.join("frontend_python_runtime.js").exists()
+        && cfg.out_dir.join("frontend_python_worker.js").exists();
     let need_trunk = !dist.exists() || prev_fp.as_deref() != Some(&cur_fp);
 
     if need_trunk && !try_trunk_build(cfg)? {
         bail!(
             "frontend: isolated release bundle is missing/stale and Trunk is not available or failed"
         );
+    }
+    if (!worker_ready || prev_fp.as_deref() != Some(&cur_fp)) && !try_python_worker_build(cfg)? {
+        bail!("frontend: RustPython Worker bundle is missing/stale and could not be built");
     }
 
     // Always embed; will fail if dist missing
@@ -65,6 +59,94 @@ pub fn prepare(cfg: &Config) -> Result<()> {
         cargo::warn(format!("frontend: failed to write fingerprint: {e}"));
     }
     Ok(())
+}
+
+fn try_python_worker_build(cfg: &Config) -> Result<bool> {
+    if which("cargo").is_err() || which("wasm-bindgen").is_err() {
+        cargo::warn("frontend: cargo or wasm-bindgen is unavailable for Python Worker build");
+        return Ok(false);
+    }
+    let target_dir = cfg.out_dir.join("python-worker-target");
+    let bindgen_dir = cfg.out_dir.join("python-worker-bindgen");
+    fs::create_dir_all(&target_dir).context("create Python Worker target directory")?;
+    if bindgen_dir.exists() {
+        fs::remove_dir_all(&bindgen_dir).context("clean Python Worker bindgen directory")?;
+    }
+
+    let status = std::process::Command::new("cargo")
+        .arg("build")
+        .arg("--manifest-path")
+        .arg(cfg.python_worker_dir.join("Cargo.toml"))
+        .arg("--release")
+        .arg("--target")
+        .arg("wasm32-unknown-unknown")
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env_remove("TARGET")
+        .env_remove("CARGO_BUILD_TARGET")
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTDOCFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTDOCFLAGS")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .status()
+        .context("build RustPython Worker")?;
+    if !status.success() {
+        cargo::warn(format!(
+            "frontend: Python Worker cargo build failed: {status}"
+        ));
+        return Ok(false);
+    }
+
+    let wasm = target_dir.join("wasm32-unknown-unknown/release/python_worker.wasm");
+    let status = std::process::Command::new("wasm-bindgen")
+        .arg("--target")
+        .arg("web")
+        .arg("--out-name")
+        .arg("python_runtime")
+        .arg("--out-dir")
+        .arg(&bindgen_dir)
+        .arg(&wasm)
+        .status()
+        .context("run wasm-bindgen for RustPython Worker")?;
+    if !status.success() {
+        cargo::warn(format!(
+            "frontend: Python Worker wasm-bindgen failed: {status}"
+        ));
+        return Ok(false);
+    }
+
+    fs::copy(
+        bindgen_dir.join("python_runtime.js"),
+        cfg.out_dir.join("frontend_python_runtime.js"),
+    )
+    .context("copy Python runtime JavaScript")?;
+    fs::copy(
+        cfg.python_worker_dir.join("worker.js"),
+        cfg.out_dir.join("frontend_python_worker.js"),
+    )
+    .context("copy Python Worker driver")?;
+
+    let raw_wasm = fs::read(bindgen_dir.join("python_runtime_bg.wasm"))
+        .context("read bound Python runtime WASM")?;
+    let output = std::fs::File::create(cfg.out_dir.join("frontend_python_runtime.wasm.gz"))
+        .context("create compressed Python runtime WASM")?;
+    let mut encoder = GzBuilder::new().mtime(0).write(output, Compression::best());
+    encoder.write_all(&raw_wasm)?;
+    encoder.finish()?;
+    let compressed_len = fs::metadata(cfg.out_dir.join("frontend_python_runtime.wasm.gz"))?.len();
+    if compressed_len > cfg.python_warn_bytes {
+        cargo::warn(format!(
+            "compressed Python Worker WASM size {compressed_len} bytes exceeds {}",
+            cfg.python_warn_bytes
+        ));
+    }
+    if compressed_len > cfg.python_max_bytes {
+        bail!(
+            "compressed Python Worker WASM size {compressed_len} exceeds PICO_PYTHON_WASM_MAX_BYTES={} bytes",
+            cfg.python_max_bytes
+        );
+    }
+    Ok(true)
 }
 
 /// Attempt to build the frontend via `trunk build --release`.
@@ -204,6 +286,18 @@ fn embed_dist(cfg: &Config) -> Result<()> {
         f,
         "pub static IDB_JS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/frontend_idb.js\"));"
     )?;
+    writeln!(
+        f,
+        "pub static PYTHON_WORKER_JS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/frontend_python_worker.js\"));"
+    )?;
+    writeln!(
+        f,
+        "pub static PYTHON_RUNTIME_JS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/frontend_python_runtime.js\"));"
+    )?;
+    writeln!(
+        f,
+        "pub static PYTHON_RUNTIME_WASM_GZIP: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/frontend_python_runtime.wasm.gz\"));"
+    )?;
     Ok(())
 }
 
@@ -267,13 +361,6 @@ fn fingerprint_tree(root: &Path, skip_dirs: &[&str]) -> Result<String> {
         hasher.update(&fs::read(&path)?);
     }
     Ok(hasher.finalize().to_hex().to_string())
-}
-
-fn fingerprint_optional(root: &Path, skip_dirs: &[&str]) -> Result<String> {
-    if !root.exists() {
-        return Ok(String::from("missing"));
-    }
-    fingerprint_tree(root, skip_dirs)
 }
 
 /// Recursively collect files under `dir`, skipping any directory in `skip_dirs`.

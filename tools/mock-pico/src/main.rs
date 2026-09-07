@@ -40,7 +40,7 @@ mod unix {
     const WS_BINARY_KIND_FILESYSTEM: u8 = 2;
     const TLV_HEADER_LEN: usize = 5;
     const AGENT_STATUS_MAGIC: &[u8] = b"PICOAGENT\0";
-    const WEBSOCKET_PROTOCOL_VERSION: u16 = 2;
+    const WEBSOCKET_PROTOCOL_VERSION: u16 = 3;
 
     #[derive(Parser, Debug)]
     #[command(
@@ -145,8 +145,8 @@ mod unix {
                     "hostname": state.agent.hostname,
                 },
                 "keyboard": {
-                    "layouts": ["mac_de-DE"],
-                    "features": ["hid_keyboard", "script_bytecode", "macos_assistant"],
+                    "layouts": ["win_en-US", "win_en-GB", "win_pt-BR", "win_de-DE", "mac_en-GB", "mac_pt-BR", "mac_de-DE"],
+                    "features": ["hid_keyboard", "script_effect_v1"],
                 },
                 "features": [
                     "usb_identity",
@@ -468,16 +468,6 @@ mod unix {
             state.usb_ready = false;
             return Ok(json!({"ok": true}));
         }
-        if let Some(bytecode) = command.strip_prefix("SCRIPT_RUN_HEX ") {
-            ensure!(
-                !bytecode.is_empty()
-                    && bytecode.len() <= 8192
-                    && bytecode.len().is_multiple_of(2)
-                    && bytecode.bytes().all(|byte| byte.is_ascii_hexdigit()),
-                "bad bytecode"
-            );
-            return Ok(json!({"ok": true, "queued": true}));
-        }
         if let Some(query) = command.strip_prefix("FS_LIST ") {
             ensure!(shared.agent_present(), "host agent unavailable");
             let request = encode_filesystem_request(query)?;
@@ -517,6 +507,32 @@ mod unix {
         let Some((&kind, payload)) = message.split_first() else {
             bail!("empty WebSocket binary message");
         };
+        if kind == script_protocol::WS_BINARY_KIND_SCRIPT_EFFECT {
+            let decoded = script_protocol::decode(&message)
+                .map_err(|error| anyhow::anyhow!("invalid script effect: {error:?}"))?;
+            if let script_protocol::Message::Run { id, .. } = decoded {
+                let usb_ready = shared.state.lock().expect("device state lock").usb_ready;
+                let status = if usb_ready {
+                    "completed"
+                } else {
+                    "usb_unavailable"
+                };
+                shared
+                    .send_websocket(Outbound::Text(
+                        json!({
+                            "event_type": "script/effect_result",
+                            "version": 1,
+                            "request_id": format!("{:016x}", id.request_id),
+                            "process_id": format!("{:016x}", id.process_id),
+                            "effect_id": format!("{:016x}", id.effect_id),
+                            "status": status,
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+            }
+            return Ok(());
+        }
         ensure!(
             kind == transfer_protocol::WS_BINARY_KIND_SESSION,
             "unsupported browser binary kind {kind}"

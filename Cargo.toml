@@ -2,12 +2,12 @@
 members = [
   "apps/frontend",
   "apps/host-agent",
+  "apps/python-worker",
   "crates/build-support",
   "crates/bytecode-constants",
-  "crates/builtin-scripts",
-  "crates/dsl/dsl-core",
-  "crates/dsl/dsl-wasm",
-  "crates/dsl/firmware-exec",
+  "crates/script-protocol",
+  "crates/keyboard-core",
+  "crates/firmware-exec",
   "crates/transfer-crypto",
   "crates/transfer-protocol",
   "firmware",
@@ -23,5 +23,9 @@ codegen-units = 1
 
 [profile.release.package.host-agent]
 strip = true
+opt-level = "z"
+codegen-units = 1
+
+[profile.release.package.python-worker]
 opt-level = "z"
 codegen-units = 1

@@ -4,6 +4,10 @@
 
 This document defines one bounded implementation session for replacing the existing user-facing DSL scripting system with a single long-lived RustPython process in the Web frontend.
 
+Implementation status (2026-08-17): the greenfield cutover is implemented. The former DSL editor, parser/linker/WASM adapter, built-in scripts, payload generator/page, and `SCRIPT_RUN_HEX` path have been removed. RustPython 0.5.0 is built as a dedicated Worker; its 12,011,052-byte post-bindgen WASM is stored as deterministic gzip (3,739,823 bytes in the validated release build) and served with `Content-Encoding: gzip`. The linked firmware uses 5,320,832 of the 8,380,416-byte `FLASH` region, leaving 3,059,584 bytes (2.92 MiB). Its statically allocated striped SRAM ends at byte 360,928 of 524,288, leaving 163,360 bytes before runtime stacks; the two direct 4 KiB banks remain separate.
+
+Native RustPython process tests, wasm target compilation, all-layout keyboard tests, strict protocol/executor tests, frontend release bundling, Clippy, and the linked RP2350 release build pass. The 3.5 MB compressed-Worker warning is expected and remains below the 4.5 MB hard gate. Browser/WebDriver execution and physical HID/disconnect testing require their external environments and were not run as part of this implementation pass.
+
 The process uses the actual RustPython VM in a dedicated Web Worker. It may contain ordinary Python functions, state, exceptions, and cooperative loops. It remains alive when the Pico WebSocket disconnects, provided the browser tab remains open. Device-dependent operations fail with catchable Python exceptions while their capability is unavailable.
 
 This is a browser process, not a device-resident process:
@@ -144,7 +148,7 @@ Semantics:
 - All device effects throw `DeviceDisconnected` when the Pico WebSocket is unavailable.
 - HID effects and `require_usb()` throw `UsbUnavailable` when USB HID is unavailable.
 - `require_host_agent()` and future host-dependent effects throw `HostAgentUnavailable` when the agent is absent or stale.
-- A disconnect during an in-flight HID effect throws `DeviceDisconnected` with an “outcome cancelled or unknown; not retried” message.
+- A disconnect during an in-flight HID effect throws `DeviceDisconnected` with an “outcome unknown; not retried” message. The device effect may finish because the disconnected browser cannot reliably deliver cancellation.
 - Firmware rejection throws `EffectRejected`.
 - User Stop or language/process replacement throws `EffectCancelled` if the generator can be resumed safely; the Worker is then terminated.
 - An uncaught exception stops the process and displays a bounded traceback.
@@ -331,7 +335,7 @@ The initial queue/rejection response remains correlated through the existing req
 }
 ```
 
-Statuses are `completed`, `cancelled`, `usb_unavailable`, `invalid`, or `failed`. JSON event IDs are fixed-width hexadecimal strings to avoid JavaScript integer precision issues, even though the binary request uses integers.
+Statuses are `completed`, `rejected`, `cancelled`, or `usb_unavailable`. JSON event IDs are fixed-width hexadecimal strings to avoid JavaScript integer precision issues, even though the binary request uses integers.
 
 Increase or relocate the WebSocket frame scratch space to accept the 4,125-byte maximum envelope. The existing 8 KiB PSRAM receive allocation is sufficient; measure the static SRAM delta from any stack-buffer change.
 
@@ -367,7 +371,7 @@ Rules:
 - Reconnect refreshes `HELLO` before device effects become available again.
 - Editing or replacing the source does not mutate a running process; the user must Stop and Start.
 - Stop terminates local timers, cancels a connected firmware effect, terminates the Worker, clears events, and invalidates all IDs.
-- Component teardown terminates the Worker and best-effort cancels an active tracked effect.
+- Tab teardown terminates the Worker with its owning browser context. Explicit Stop best-effort cancels an active tracked effect; unload is not treated as a reliable control-message opportunity.
 
 Update the WebSocket event router in `apps/frontend/src/api.rs` for button and effect-result events. Unknown process IDs are ignored.
 
@@ -437,6 +441,8 @@ The existing three-second HTTP write timeout must be measured for the Python WAS
 | One text effect | 1,024 Unicode scalars |
 | One KBD1 effect | 4,096 bytes |
 | One device delay | 5 seconds |
+| Total delay in one queued KBD1 keyboard effect | 5 minutes |
+| One browser timer | 2,147,483,647 ms (about 24.9 days) |
 | Bounded traceback/diagnostic | 8 KiB |
 
 Build gates:
@@ -504,7 +510,7 @@ Execute in this order so the largest uncertainties fail early:
 - Bad CRC, flags, opcode, varint, end position, trailing bytes, delay, or operation count produces zero HID reports.
 - Tracked completion carries the exact process/effect IDs.
 - Cancel at modifier-down, key-down, delay, and USB-write boundaries ends with a neutral report.
-- WebSocket generation loss cancels tracked work and leaves no queued effect from that generation.
+- WebSocket generation loss injects `DeviceDisconnected`, never retries the unknown effect, and ignores a later stale result from that generation.
 - USB unavailable returns a terminal tracked result and does not queue replay.
 
 ### Frontend tests

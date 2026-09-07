@@ -21,7 +21,7 @@ Browser (Yew) <-- WebSocket :81/ws --> Firmware <-- USB CDC TLV --> Host agent
                                       +-- USB mass-storage host-agent image
 ```
 
-For keyboard scripts, DSL source is compiled to bounded bytecode, transported to the device, and executed as USB HID reports.
+For keyboard automation, a real RustPython generator runs in a dedicated browser Worker. Yielded keyboard effects are lowered to bounded KBD1, transported with correlated IDs, strictly validated, and executed as USB HID reports.
 
 Detailed references:
 
@@ -63,7 +63,7 @@ The package is named `pico_rust`. Default features are `firmware` and `psram`; t
 - `src/ui/`: page and component rendering.
 - `src/transfer/`: transfer protocol parsing, model/store, IndexedDB staging, verification, and download.
 - `src/filesystem.rs`: host filesystem page decoding and browser state.
-- `src/dsl.rs` and `src/scripts.rs`: DSL compilation and built-in script access.
+- `src/python.rs`: dedicated RustPython Worker supervision, effects, timeouts, and reconnect behavior.
 - `ui/style.css` and `ui/idb.js`: static UI assets copied by Trunk.
 - `Trunk.toml`: development proxy and watched paths.
 
@@ -83,14 +83,11 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 
 ### Shared crates: `crates/`
 
-- `dsl/dsl-core`: portable parser, preprocessor, linker, layouts, lowering, and bytecode. It is `no_std` by default; `std` is opt-in for host conveniences.
-- `dsl/dsl-wasm`: standalone wasm-bindgen adapter around `dsl-core`.
-- `dsl/firmware-exec`: `no_std` streaming HID bytecode executor.
-- `builtin-scripts`: built-in keyboard scripts shared by frontend/build support.
+- `keyboard-core`: portable, language-neutral layouts, key parsing, lowering, and KBD1 encoding. It is `no_std` by default.
+- `firmware-exec`: strict, two-pass `no_std` KBD1 validator/executor.
+- `script-protocol`: versioned correlated browser-to-firmware effect envelopes.
 - `bytecode-constants`: cross-target bytecode limits.
-- `build-support`: firmware build-time frontend compilation, asset embedding, payload generation, linker setup, and MSC image generation.
-
-Read `crates/dsl/README.md` before changing DSL syntax, layouts, limits, or bytecode behavior.
+- `build-support`: firmware build-time frontend/Worker compilation, compressed asset embedding, linker setup, and MSC image generation.
 
 ### Scripts and configuration
 
@@ -107,7 +104,7 @@ Do not commit or manually modify these outputs unless a task explicitly changes 
 - `target/`
 - `apps/frontend/dist/`
 - `apps/host-agent/artifacts/`
-- generated `frontend_static.rs`, `payloads_gen.rs`, and `host-agent.img` under Cargo `OUT_DIR`
+- generated `frontend_static.rs`, compressed Python Worker assets, and `host-agent.img` under Cargo `OUT_DIR`
 
 The top-level `frontend/dist/` directory is a separate tracked snapshot; do not confuse it with Trunk's ignored `apps/frontend/dist/` output or refresh it incidentally.
 
@@ -153,7 +150,7 @@ Build and package the local host agent before flashing:
 scripts/fw-deploy-with-agent
 ```
 
-Firmware compilation runs `firmware/build.rs`. It may invoke Trunk, compile built-in DSL scripts, construct the 8 MiB FAT16 host-agent image, and embed all results. A firmware build therefore needs the frontend/tooling inputs even when the Rust change is firmware-only.
+Firmware compilation runs `firmware/build.rs`. It may invoke Trunk, build/wasm-bindgen/gzip the RustPython Worker, construct the 8 MiB FAT16 host-agent image, and embed all results. A firmware build therefore needs the frontend, wasm-bindgen CLI, and tooling inputs even when the Rust change is firmware-only.
 
 ### Frontend
 
@@ -209,15 +206,16 @@ cargo clippy -p host-agent --all-targets -- -D warnings
 
 On macOS, the test command includes the PTY-based e2e tests. Add unit tests beside protocol/config logic and extend e2e coverage when behavior crosses the daemon/serial boundary.
 
-### DSL, layout, or bytecode changes
+### RustPython, layout, or bytecode changes
 
 Run the full layout matrix:
 
 ```sh
-cargo test -p dsl-core --features "std layout_win_en_gb layout_win_pt_br layout_win_de_de layout_mac_en_gb layout_mac_pt_br layout_mac_de_de"
+cargo test -p keyboard-core --features "std layout_win_en_gb layout_win_pt_br layout_win_de_de layout_mac_en_gb layout_mac_pt_br layout_mac_de_de"
+cargo test -p python-worker
 ```
 
-Also compile affected adapters/executors for their real targets. If bytecode format or limits change, update and test `dsl-core`, `dsl-wasm`, `firmware-exec`, `bytecode-constants`, built-in payload generation, and frontend decoding as applicable.
+Also compile affected Worker/executor code for its real target. If bytecode format or limits change, update and test `keyboard-core`, `firmware-exec`, `bytecode-constants`, `script-protocol`, frontend encoding, and firmware decoding.
 
 ### Frontend changes
 
@@ -289,14 +287,13 @@ Do not silently reuse an existing tag or reinterpret a payload without versionin
 - Keep platform-specific dialogs and PTY/file-descriptor code behind `cfg` gates. Ensure portable code still compiles on Linux and Windows when changing common modules.
 - Test framing resynchronization and fragmented serial reads when transport logic changes.
 
-## DSL and generated payload guidance
+## RustPython and keyboard-effect guidance
 
-- Keep `dsl-core` `no_std` by default and avoid breaking its opt-in layout feature model.
-- The DSL is deliberately bounded and deterministic. Any syntax expansion must retain source-mapped diagnostics, recursion/expansion caps, line limits, operation limits, delay limits, and bytecode size limits.
-- Every script requires a leading `layout(...)`; called scripts inherit the entry layout. Raw `tap`/`modtap` operations bypass text layout mapping.
-- Add parser/preprocessor/linker/lowering tests at the narrowest layer and end-to-end compile/decode tests for externally visible behavior.
-- Update `crates/dsl/README.md`, examples, built-in scripts, and adapters whenever user-visible DSL behavior changes.
-- Generated built-in payloads come from `builtin-scripts` through `crates/build-support`; edit those sources, not `OUT_DIR/payloads_gen.rs`.
+- Keep `keyboard-core` `no_std` by default and preserve its opt-in layout features.
+- RustPython runs only in the dedicated Worker with stdlib/import/host/JS bridges disabled. Every external action must be a yielded, bounded effect.
+- Preserve the 32 KiB source, 1,024-line, 500 ms step, 1,024-character text, 4,096-byte KBD1, and one-outstanding-effect limits unless all endpoints and docs change together.
+- Hard cancellation is `Worker.terminate()`; do not rely on RustPython signal interruption on wasm.
+- Add process `send`/`throw`, keyboard lowering, strict firmware validation, correlation, disconnect, and stale-result tests at the narrowest layer.
 
 ## Build-system and dependency guidance
 
@@ -309,7 +306,7 @@ Do not silently reuse an existing tag or reinterpret a payload without versionin
 
 ## Documentation and handoff
 
-Update documentation in the same change when commands, paths, hardware assumptions, protocols, environment variables, UI workflows, or DSL behavior change. The root `README.md` is the operator overview; this file is the contributor/agent guide; `apps/frontend/README.md` and `crates/dsl/README.md` cover their subsystems.
+Update documentation in the same change when commands, paths, hardware assumptions, protocols, environment variables, UI workflows, Python effects, or keyboard behavior change. The root `README.md` is the operator overview; this file is the contributor/agent guide; `docs/RUSTPYTHON_PROCESS_PLAN.md` captures the scripting design.
 
 Before handoff:
 

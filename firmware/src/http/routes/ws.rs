@@ -1,4 +1,4 @@
-use embassy_futures::select::{Either as SelectEither, Either3 as SelectEither3, select, select3};
+use embassy_futures::select::{Either as SelectEither, Either4 as SelectEither4, select, select4};
 use picoserve::futures::Either;
 use picoserve::io::embedded_io_async;
 use picoserve::response::ws; // for Read/Write trait bounds
@@ -7,12 +7,15 @@ use crate::host::{self, HostOs};
 use crate::http::transfer::{self, TRANSFER_TEXT_MAX};
 use crate::http::util::{escape_json_str, percent_decode_str};
 use crate::usb::ctrl::{CTRL_CHAN, CtrlCommand, MAX_SECURE_TRANSFER_FRAME, MAX_TRANSFER_PATH_LEN};
-use crate::usb::hid::{HID_CHAN, HidCommand, MAX_BYTECODE, USB_READY};
+use crate::usb::hid::{
+    HID_CANCEL, HID_CHAN, HID_RESULT_CHAN, HidCancel, HidCommand, HidResult, HidResultStatus,
+    MAX_BYTECODE, USB_READY,
+};
 use crate::usb::usb_supervisor;
 use heapless::{String, Vec};
 
 pub const WS_BINARY_KIND_SESSION: u8 = transfer_protocol::WS_BINARY_KIND_SESSION;
-const WS_COMMAND_MAX: usize = 2048;
+const WS_COMMAND_MAX: usize = script_protocol::MAX_MESSAGE_LEN;
 
 pub(crate) async fn ws_handler(
     upgrade: ws::WebSocketUpgrade,
@@ -40,20 +43,21 @@ impl ws::WebSocketCallback for HelloWs {
         let mut buf = [0u8; WS_COMMAND_MAX];
         let mut exit = ConnectionExit::Peer;
         loop {
-            match select3(
+            match select4(
                 session.replaced(),
                 rx.next_message(&mut buf, core::future::pending::<()>()),
                 transfer::receive_frame(&session),
+                HID_RESULT_CHAN.receive(),
             )
             .await
             {
                 // Replacement is polled first, then browser control traffic,
                 // then bulk output. A saturated transfer cannot delay handoff.
-                SelectEither3::First(()) => {
+                SelectEither4::First(()) => {
                     exit = ConnectionExit::Replaced;
                     break;
                 }
-                SelectEither3::Second(result) => match result {
+                SelectEither4::Second(result) => match result {
                     Ok(Either::First(Ok(ws::Message::Text(s)))) => {
                         let cmd = s.trim();
                         if cmd.is_empty() {
@@ -99,13 +103,30 @@ impl ws::WebSocketCallback for HelloWs {
                         let Some((&kind, body)) = binary.split_first() else {
                             continue;
                         };
-                        if kind != WS_BINARY_KIND_SESSION || body.len() > MAX_SECURE_TRANSFER_FRAME
-                        {
+                        if kind == WS_BINARY_KIND_SESSION {
+                            if body.len() > MAX_SECURE_TRANSFER_FRAME {
+                                continue;
+                            }
+                            let mut payload: Vec<u8, MAX_SECURE_TRANSFER_FRAME> = Vec::new();
+                            if payload.extend_from_slice(body).is_ok() {
+                                let _ = CTRL_CHAN.try_send(CtrlCommand::SecureTransfer { payload });
+                            }
                             continue;
                         }
-                        let mut payload: Vec<u8, MAX_SECURE_TRANSFER_FRAME> = Vec::new();
-                        if payload.extend_from_slice(body).is_ok() {
-                            let _ = CTRL_CHAN.try_send(CtrlCommand::SecureTransfer { payload });
+                        if kind == script_protocol::WS_BINARY_KIND_SCRIPT_EFFECT {
+                            let result = handle_script_binary(binary);
+                            if let Some(result) = result {
+                                match send_hid_result_unless_replaced(&session, &mut tx, result)
+                                    .await
+                                {
+                                    Ok(false) => {}
+                                    Ok(true) => {
+                                        exit = ConnectionExit::Replaced;
+                                        break;
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
                         }
                     }
                     Ok(Either::First(Ok(ws::Message::Ping(p)))) => {
@@ -124,8 +145,18 @@ impl ws::WebSocketCallback for HelloWs {
                     Ok(Either::Second(_)) => break,
                     Err(_) => break,
                 },
-                SelectEither3::Third(frame) => {
+                SelectEither4::Third(frame) => {
                     match send_frame_unless_replaced(&session, frame, &mut tx).await {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            exit = ConnectionExit::Replaced;
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                SelectEither4::Fourth(result) => {
+                    match send_hid_result_unless_replaced(&session, &mut tx, result).await {
                         Ok(false) => {}
                         Ok(true) => {
                             exit = ConnectionExit::Replaced;
@@ -191,6 +222,79 @@ async fn send_frame_unless_replaced<W: embedded_io_async::Write>(
         SelectEither::First(result) => result.map(|()| false),
         SelectEither::Second(()) => Ok(true),
     }
+}
+
+fn handle_script_binary(frame: &[u8]) -> Option<HidResult> {
+    match script_protocol::decode(frame).ok()? {
+        script_protocol::Message::Run { id, bytecode } => {
+            if !USB_READY.load(core::sync::atomic::Ordering::SeqCst) {
+                return Some(HidResult {
+                    request_id: id.request_id,
+                    process_id: id.process_id,
+                    effect_id: id.effect_id,
+                    status: HidResultStatus::UsbUnavailable,
+                });
+            }
+            let mut program: Vec<u8, { MAX_BYTECODE }> = Vec::new();
+            if program.extend_from_slice(bytecode).is_err()
+                || firmware_exec::validate_bytecode(program.as_slice()).is_err()
+            {
+                return Some(HidResult {
+                    request_id: id.request_id,
+                    process_id: id.process_id,
+                    effect_id: id.effect_id,
+                    status: HidResultStatus::Rejected,
+                });
+            }
+            match HID_CHAN.try_send(HidCommand::RunEffect {
+                request_id: id.request_id,
+                process_id: id.process_id,
+                effect_id: id.effect_id,
+                program,
+            }) {
+                Ok(()) => None,
+                Err(_) => Some(HidResult {
+                    request_id: id.request_id,
+                    process_id: id.process_id,
+                    effect_id: id.effect_id,
+                    status: HidResultStatus::Rejected,
+                }),
+            }
+        }
+        script_protocol::Message::Cancel { id } => {
+            HID_CANCEL.signal(HidCancel {
+                process_id: id.process_id,
+                effect_id: id.effect_id,
+            });
+            None
+        }
+    }
+}
+
+async fn send_hid_result_unless_replaced<W: embedded_io_async::Write>(
+    session: &transfer::SessionGuard,
+    tx: &mut ws::SocketTx<W>,
+    result: HidResult,
+) -> Result<bool, W::Error> {
+    let status = match result.status {
+        HidResultStatus::Completed => "completed",
+        HidResultStatus::Rejected => "rejected",
+        HidResultStatus::Cancelled => "cancelled",
+        HidResultStatus::UsbUnavailable => "usb_unavailable",
+    };
+    let mut event: String<TRANSFER_TEXT_MAX> = String::new();
+    let _ = core::fmt::write(
+        &mut event,
+        format_args!(
+            concat!(
+                "{{\"event_type\":\"script/effect_result\",\"version\":1,",
+                "\"request_id\":\"{:016x}\",\"process_id\":\"{:016x}\",",
+                "\"effect_id\":\"{:016x}\",\"status\":\"{}\"}}"
+            ),
+            result.request_id, result.process_id, result.effect_id, status,
+        ),
+    );
+    send_text_unless_replaced(session, tx, event.as_str()).await
 }
 
 // ---- WS command handling ----
@@ -291,24 +395,21 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
             }
         }
     } else if cmd.eq_ignore_ascii_case("USB_REGISTER") || cmd.starts_with("USB_REGISTER ") {
-        // optional: USB_REGISTER assistant=1&os=mac
-        let mut run_assistant = false;
+        // optional: USB_REGISTER os=mac
         if let Some(q) = cmd.strip_prefix("USB_REGISTER ") {
             for pair in q.split('&') {
-                if let Some((k, v)) = pair.split_once('=') {
-                    if k == "os" {
-                        match v {
-                            "mac" => host::set_host_os(HostOs::Mac),
-                            "windows" => host::set_host_os(HostOs::Windows),
-                            _ => host::set_host_os(HostOs::Unknown),
-                        }
-                    } else if k == "assistant" {
-                        run_assistant = v != "0";
+                if let Some((k, v)) = pair.split_once('=')
+                    && k == "os"
+                {
+                    match v {
+                        "mac" => host::set_host_os(HostOs::Mac),
+                        "windows" => host::set_host_os(HostOs::Windows),
+                        _ => host::set_host_os(HostOs::Unknown),
                     }
                 }
             }
         }
-        match usb_supervisor::start(run_assistant).await {
+        match usb_supervisor::start().await {
             Ok(()) => {
                 let _ = response.push_str("{\"ok\":true}");
                 response
@@ -327,23 +428,6 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
             }
             Err(_) => {
                 let _ = response.push_str("{\"error\":\"usb stop failed\"}");
-                response
-            }
-        }
-    } else if let Some(hex) = cmd.strip_prefix("SCRIPT_RUN_HEX ") {
-        match decode_hex(hex.trim()) {
-            Ok(program) => match HID_CHAN.try_send(HidCommand::RunBytecode { program }) {
-                Ok(()) => {
-                    let _ = response.push_str("{\"ok\":true,\"queued\":true}");
-                    response
-                }
-                Err(_) => {
-                    let _ = response.push_str("{\"error\":\"busy\"}");
-                    response
-                }
-            },
-            Err(_) => {
-                let _ = response.push_str("{\"error\":\"bad bytecode\"}");
                 response
             }
         }
@@ -464,35 +548,5 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
         // Unknown command
         let _ = response.push_str("{\"error\":\"unknown command\"}");
         response
-    }
-}
-
-fn decode_hex(input: &str) -> Result<Vec<u8, { MAX_BYTECODE }>, ()> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() || !trimmed.len().is_multiple_of(2) {
-        return Err(());
-    }
-    let max_bytes = trimmed.len() / 2;
-    if max_bytes > MAX_BYTECODE {
-        return Err(());
-    }
-    let mut out = Vec::<u8, { MAX_BYTECODE }>::new();
-    let bytes = trimmed.as_bytes();
-    let mut idx = 0;
-    while idx < bytes.len() {
-        let hi = decode_nibble(bytes[idx])?;
-        let lo = decode_nibble(bytes[idx + 1])?;
-        out.push((hi << 4) | lo).map_err(|_| ())?;
-        idx += 2;
-    }
-    Ok(out)
-}
-
-fn decode_nibble(ch: u8) -> Result<u8, ()> {
-    match ch {
-        b'0'..=b'9' => Ok(ch - b'0'),
-        b'a'..=b'f' => Ok(10 + ch - b'a'),
-        b'A'..=b'F' => Ok(10 + ch - b'A'),
-        _ => Err(()),
     }
 }

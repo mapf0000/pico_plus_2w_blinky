@@ -8,7 +8,7 @@ use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 pub static USB_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // Signals for triggering start/stop of the single USB session.
-pub(crate) static START_REQ: Signal<ThreadModeRawMutex, bool> = Signal::new();
+pub(crate) static START_REQ: Signal<ThreadModeRawMutex, ()> = Signal::new();
 static USB_CANCEL: Signal<ThreadModeRawMutex, u64> = Signal::new();
 static USB_STOPPED: Signal<ThreadModeRawMutex, ()> = Signal::new();
 static STARTED: AtomicBool = AtomicBool::new(false);
@@ -23,14 +23,14 @@ pub fn init(spawner: Spawner) {
     // Auto-enable so CDC logs come up without an external trigger. The task still
     // waits for a request between sessions so it yields after USB is stopped.
     USB_ENABLED.store(true, Ordering::SeqCst);
-    START_REQ.signal(false);
+    START_REQ.signal(());
 }
 
-pub async fn start(run_mac_assistant: bool) -> Result<(), ()> {
+pub async fn start() -> Result<(), ()> {
     if USB_ENABLED.swap(true, Ordering::SeqCst) {
         return Ok(()); // already enabled or in-flight
     }
-    START_REQ.signal(run_mac_assistant);
+    START_REQ.signal(());
     Ok(())
 }
 

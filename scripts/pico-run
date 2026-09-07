@@ -294,9 +294,8 @@ done
 
 if [[ -z "$PORT" ]]; then
   echo "[pico-run] No serial device found within timeout."
-  echo "             Hint: The firmware enables USB only after an HTTP trigger."
-  echo "             Open http://192.168.4.1/ and click Start USB,"
-  echo "             or curl -X POST 'http://192.168.4.1/usb/register?assistant=1&os=mac'"
+  echo "             The firmware enables USB automatically; check the data cable,"
+  echo "             target power, and whether another process owns the serial port."
   exit 1
 fi
 

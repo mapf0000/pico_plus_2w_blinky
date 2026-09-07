@@ -69,3 +69,40 @@ pub(crate) async fn route_frontend_idb_js() -> impl picoserve::response::IntoRes
     })
     .with_header("Cache-Control", "no-store")
 }
+
+pub(crate) async fn route_python_worker_js() -> impl picoserve::response::IntoResponse {
+    log::debug!(
+        "http: serve python-worker.js ({} bytes)",
+        frontend_static::PYTHON_WORKER_JS.len()
+    );
+    Response::ok(BytesWithType {
+        ty: "application/javascript",
+        data: frontend_static::PYTHON_WORKER_JS,
+    })
+    .with_header("Cache-Control", "no-store")
+}
+
+pub(crate) async fn route_python_runtime_js() -> impl picoserve::response::IntoResponse {
+    log::debug!(
+        "http: serve python-runtime.js ({} bytes)",
+        frontend_static::PYTHON_RUNTIME_JS.len()
+    );
+    Response::ok(BytesWithType {
+        ty: "application/javascript",
+        data: frontend_static::PYTHON_RUNTIME_JS,
+    })
+    .with_header("Cache-Control", "no-store")
+}
+
+pub(crate) async fn route_python_runtime_wasm() -> impl picoserve::response::IntoResponse {
+    log::debug!(
+        "http: serve python-runtime.wasm.gz ({} stored bytes)",
+        frontend_static::PYTHON_RUNTIME_WASM_GZIP.len()
+    );
+    Response::ok(BytesWithType {
+        ty: "application/wasm",
+        data: frontend_static::PYTHON_RUNTIME_WASM_GZIP,
+    })
+    .with_header("Content-Encoding", "gzip")
+    .with_header("Cache-Control", "no-store")
+}

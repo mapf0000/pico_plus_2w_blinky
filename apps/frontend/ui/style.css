@@ -748,7 +748,7 @@ textarea:disabled {
   font-size: 11px;
 }
 
-textarea#scriptDsl {
+textarea#scriptPython {
   flex: 1 1 auto;
   min-height: 440px;
   padding: 19px 21px;

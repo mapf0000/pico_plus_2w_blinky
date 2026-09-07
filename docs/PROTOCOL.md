@@ -7,7 +7,7 @@ Related documents:
 - [Architecture](ARCHITECTURE.md)
 - [Hardware](HARDWARE.md)
 - [Contributor guidance](../AGENTS.md)
-- [Keyboard DSL and bytecode](../crates/dsl/README.md)
+- [RustPython process design](RUSTPYTHON_PROCESS_PLAN.md)
 
 ## Scope and conventions
 
@@ -44,7 +44,7 @@ Types used in layout tables:
 | `HELLO` schema | 1 | Top-level `HELLO.version` | The frontend requires `event_type = "hello"` and `version = 1`. |
 | File-transfer protocol | 2 | `FILE_OPEN.protocol_version`; WebSocket transfer event `version` | There is no plaintext downgrade: the host and frontend reject the v1 file path. |
 | Filesystem protocol | 1 | First `u16` in list requests and pages | Host agent and frontend reject unsupported versions; firmware refuses to forward mismatched pages. |
-| Keyboard bytecode | `KBD1` | Four-byte bytecode magic | Firmware executor rejects other magic values. See the DSL documentation. |
+| Keyboard bytecode | `KBD1` | Four-byte bytecode magic | Firmware executor rejects other magic values. This is an internal effect format, not a user language. |
 | USB TLV envelope | Unversioned | None | Compatibility is maintained by stable tag numbers and versioned payloads for complex subprotocols. |
 
 Version numbers are independent. A file-transfer or filesystem format change does not automatically require a WebSocket version bump if it is fully capability-gated and backward compatible, but a change to command framing, response correlation, binary-kind routing, or required `HELLO` fields does.
@@ -540,12 +540,12 @@ Implementation:
 
 - Endpoint: `ws://<device-host>:81/ws`; normally `ws://192.168.4.1:81/ws`.
 - The embedded frontend derives `ws:`/`wss:` and hostname from the page URL and selects port 81, falling back to `192.168.4.1:81`. A frontend served on a non-default development port keeps same-origin `/ws` so Trunk can proxy it.
-- Maximum inbound firmware command buffer: 2048 bytes.
+- Maximum inbound firmware WebSocket frame buffer: 4125 bytes (`script-protocol::MAX_MESSAGE_LEN`).
 - Maximum queued text event: 768 bytes.
 - Maximum queued binary event: 2049 bytes.
 - Maximum transmitted/accepted encrypted chunk batch: 16,402 bytes including its binary-kind byte.
 - Shared firmware event queue depth: 16.
-- Browser-to-firmware binary kind 3 carries bounded secure file-session envelopes; other binary command kinds are ignored.
+- Browser-to-firmware binary kind 3 carries bounded secure file-session envelopes. Kind 8 carries correlated Python keyboard effects.
 - Standard WebSocket ping receives pong.
 
 Firmware tracks one generation-owned active session. Transfer events use one shared queue rather than per-client broadcast queues, so the newest accepted connection replaces the previous owner instead of splitting events between clients.
@@ -567,7 +567,7 @@ Schema:
     "build": "0.1.0-release"
   },
   "protocols": {
-    "websocket": 2,
+    "websocket": 3,
     "transfer": 2,
     "filesystem": 1
   },
@@ -577,8 +577,8 @@ Schema:
     "hostname": "example-host"
   },
   "keyboard": {
-    "layouts": ["mac_de-DE"],
-    "features": ["hid_keyboard", "script_bytecode", "macos_assistant"]
+    "layouts": ["win_en-US", "win_en-GB", "win_pt-BR", "win_de-DE", "mac_en-GB", "mac_pt-BR", "mac_de-DE"],
+    "features": ["hid_keyboard", "script_effect_v1"]
   },
   "features": [
     "usb_identity",
@@ -632,7 +632,7 @@ Firmware response text:
 }
 ```
 
-`payload` is the JSON value returned by the command. The browser requires response `version = 2`, matching `HELLO.protocols.websocket`; it accepts a string payload for compatibility and otherwise serializes the JSON value back to text before command-specific parsing. A response-version mismatch completes the matching request with a protocol error.
+`payload` is the JSON value returned by the command. The browser requires response `version = 3`, matching `HELLO.protocols.websocket`; it accepts a string payload for compatibility and otherwise serializes the JSON value back to text before command-specific parsing. A response-version mismatch completes the matching request with a protocol error.
 
 Firmware also accepts unwrapped legacy command text and returns the raw JSON response without an envelope. The current frontend always uses correlated RPC.
 
@@ -648,9 +648,8 @@ Parameters after a command use `key=value&key=value`; string values are percent-
 | `STATUS` | None | `{"usb_enabled":bool,"usb_ready":bool,"host_os":string}` | Read timeout |
 | `CONFIG_GET` | None | USB manufacturer/product object | Read timeout |
 | `CONFIG_SET` | `manufacturer`, `product` | `{"ok":true}` | Printable ASCII; max 32/48 bytes; rejected while USB enabled |
-| `USB_REGISTER` | Optional `assistant=1`, `os=mac|windows` | `{"ok":true}` | Starts/enables composite USB if needed |
+| `USB_REGISTER` | Optional `os=mac|windows` | `{"ok":true}` | Starts/enables composite USB if needed |
 | `USB_UNREGISTER` | None | `{"ok":true}` | Detaches USB after 150 ms |
-| `SCRIPT_RUN_HEX` | Hex-encoded `KBD1` bytes | `{"ok":true,"queued":true}` | Maximum decoded bytecode 4096; returns `busy` if HID queue is full |
 | `TRANSFER_START` | `path` | Error | Disabled plaintext legacy command; use encrypted binary control kind 1 |
 | `TRANSFER_DEFAULT_SET` | `path` | Error | Disabled plaintext legacy command; use encrypted binary control kind 2 |
 | `TRANSFER_START_DEFAULT` | None | Error | Disabled because a browser-authenticated session is required |
@@ -687,6 +686,45 @@ The first byte selects the binary kind:
 | 5 | Encrypted file chunk | Exact v2 `FILE_CHUNK` payload |
 | 6 | Encrypted file close | Exact v2 `FILE_CLOSE` payload |
 | 7 | Encrypted file chunk batch | `chunk_count: u8`, then `chunk_count` repetitions of `payload_len: u16` and an exact v2 `FILE_CHUNK` payload |
+| 8 | Python keyboard effect command | Versioned correlated envelope below |
+
+#### Python keyboard effect envelope (binary kind 8)
+
+All integers are little-endian. The entire frame is exact; trailing bytes are rejected.
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 1 | Binary kind `8` |
+| 1 | 1 | Envelope version `1` |
+| 2 | 1 | Operation: `1` run, `2` cancel |
+| 3 | 8 | Request ID |
+| 11 | 8 | Process ID |
+| 19 | 8 | Effect ID |
+| 27 | 2 | KBD1 length |
+| 29 | 0..4096 | Exact KBD1 bytes; cancel requires length zero |
+
+KBD1 validation is complete and two-pass before the first HID report: reserved flags must be zero, CRC32 and canonical varints must be valid, key usages must be in the supported keyboard range, each delay is at most 5 seconds, and total declared delay is at most 5 minutes. `END` must be present at the exact end of the CRC-covered body; trailing bytes are rejected.
+
+Run is acknowledged only by an asynchronous terminal result after validation/execution:
+
+```json
+{
+  "event_type": "script/effect_result",
+  "version": 1,
+  "request_id": "0000000000000001",
+  "process_id": "0000000000000001",
+  "effect_id": "0000000000000001",
+  "status": "completed"
+}
+```
+
+IDs are fixed-width hexadecimal strings so JavaScript never loses integer precision. Status is `completed`, `rejected`, `cancelled`, or `usb_unavailable`. A WebSocket disconnect cancels the browser's wait and injects a catchable Python exception; the frontend never retries an effect with an unknown outcome.
+
+Button releases are published to a waiting Python process as:
+
+```json
+{"event_type":"script/event","version":1,"event":{"kind":"button","button":"A","edge":"released"}}
+```
 
 Kinds 4–7 are host-to-browser only. Firmware prepends kinds 4–6 without decrypting or re-encoding the TLV payload. A singleton transfer pump coalesces two to eight queued kind-5 chunks from the same transfer into kind 7 after at most 500 microseconds. Its uniquely owned 16,402-byte buffer lives in PSRAM and moves to the WebSocket sender until the send completes. If PSRAM is unavailable, firmware emits individual kind-5 chunks. The 16-event input queue, one-frame output queue, and one batch slot remain bounded; USB does not acknowledge a chunk until it has entered this backpressure path.
 
@@ -713,5 +751,5 @@ Kinds 4–7 are host-to-browser only. Firmware prepends kinds 4–6 without decr
 | Capability `HELLO` | `firmware/src/capabilities.rs`, `http/routes/ws.rs` | `apps/frontend/src/api.rs`, `app.rs` | Supplies status through tag 8 |
 | File transfer | `firmware/src/usb/ctrl/relay*.rs`, `http/routes/ws.rs` | `apps/frontend/src/transfer/`, `ui/idb.js` | `apps/host-agent/src/file_transfer.rs`, `dispatch.rs` |
 | Filesystem browser | `firmware/src/usb/ctrl.rs`, `usb/ctrl/relay/events.rs` | `apps/frontend/src/filesystem.rs`, `api.rs`, `app.rs` | `apps/host-agent/src/filesystem.rs`, `dispatch.rs` |
-| Keyboard bytecode transport | `firmware/src/http/routes/ws.rs`, `usb/hid.rs` | `apps/frontend/src/dsl.rs`, `codec.rs` | Not applicable |
-| Protocol tests | Inline module tests | `apps/frontend/src/**` tests and `tests/compile_run.rs` | Inline tests and `tests/e2e_mac.rs` |
+| RustPython keyboard effects | `firmware/src/http/routes/ws.rs`, `usb/hid.rs`; `crates/script-protocol`, `firmware-exec`, `keyboard-core` | `apps/python-worker`, `apps/frontend/src/python.rs`, `api.rs` | Not applicable |
+| Protocol tests | Inline module tests | Inline tests in `apps/frontend/src/**`, `apps/python-worker`, and shared protocol crates | Inline tests and `tests/e2e_mac.rs` |

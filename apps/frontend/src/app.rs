@@ -21,7 +21,16 @@ pub(crate) struct BrowseRequest {
     pub(crate) show_hidden: bool,
 }
 
-const STARTER_SCRIPT: &str = "layout(\"mac_de-DE\")\nmodtap(\"LGUI+SPACE\")\ndelay(400)\ntext(\"Terminal\", 10)\ntap(\"ENTER\")";
+const STARTER_SCRIPT: &str = r#"layout("mac_de-DE")
+
+def main():
+    while True:
+        try:
+            yield tap("F15")
+            yield sleep(1000)
+        except (DeviceDisconnected, UsbUnavailable):
+            yield sleep(1000)
+"#;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum AppSection {
@@ -45,7 +54,6 @@ enum PendingAction {
     SaveIdentity,
     UsbStart,
     UsbStop,
-    RunScript,
     TransferStart,
     TransferDefault,
 }
@@ -56,7 +64,6 @@ struct PendingActions {
     save_identity: bool,
     usb_start: bool,
     usb_stop: bool,
-    run_script: bool,
     transfer_start: bool,
     transfer_default: bool,
 }
@@ -68,7 +75,6 @@ impl PendingActions {
             PendingAction::SaveIdentity => self.save_identity = pending,
             PendingAction::UsbStart => self.usb_start = pending,
             PendingAction::UsbStop => self.usb_stop = pending,
-            PendingAction::RunScript => self.run_script = pending,
             PendingAction::TransferStart => self.transfer_start = pending,
             PendingAction::TransferDefault => self.transfer_default = pending,
         }
@@ -98,7 +104,6 @@ impl ConnectionState {
 pub(crate) fn app() -> Html {
     let status: UseStateHandle<Option<StatusState>> = use_state(|| None);
     let config: UseStateHandle<Option<ConfigState>> = use_state(|| None);
-    let scripts: UseStateHandle<Option<Vec<api::ScriptMeta>>> = use_state(|| None);
     let transfer_store = use_mut_ref(transfer::TransferStore::new);
     let transfers = use_state(Vec::<transfer::TransferView>::new);
     let transfer_path = use_state(String::new);
@@ -106,7 +111,11 @@ pub(crate) fn app() -> Html {
     let secure_session_view = use_state(|| transfer::SecureSessionView::Idle);
     let filesystem_store = use_mut_ref(filesystem::BrowserStore::new);
     let filesystem_view = use_state(filesystem::BrowserView::default);
-    let dsl_text = use_state(|| STARTER_SCRIPT.to_string());
+    let python_text = use_state(|| STARTER_SCRIPT.to_string());
+    let python_status = use_state(|| python::ProcessSnapshot {
+        state: python::ProcessState::Stopped,
+        message: "Stopped".into(),
+    });
     let selected_os = use_state(|| String::from("mac"));
     let active_section = use_state(|| AppSection::Overview);
     let pending_actions = use_state(PendingActions::default);
@@ -118,6 +127,17 @@ pub(crate) fn app() -> Html {
     let was_connected = use_mut_ref(|| false);
     let toast = use_state(|| None::<(String, bool)>); // (message, ok?)
     // All WebSocket API calls are handled in api.rs via a single connection
+
+    {
+        let capability_state = ((*status).clone(), (*hello).clone());
+        use_effect_with(capability_state, move |(status, hello)| {
+            python::capabilities_changed(
+                status.as_ref().is_some_and(|value| value.usb_ready),
+                hello.as_ref().is_some_and(|value| value.host_agent.present),
+            );
+            || ()
+        });
+    }
 
     let set_pending = {
         let pending_actions = pending_actions.clone();
@@ -201,21 +221,6 @@ pub(crate) fn app() -> Html {
             });
         })
     };
-
-    // Built-in scripts are compiled into the frontend and do not depend on the device.
-    {
-        let scripts_state = scripts.clone();
-        let push_log = push_log.clone();
-        use_effect_with((), move |_| {
-            wasm_bindgen_futures::spawn_local(async move {
-                match api::list_scripts().await {
-                    Ok(list) => scripts_state.set(Some(list)),
-                    Err(e) => push_log.emit(format!("scripts error: {e}")),
-                }
-            });
-            || ()
-        });
-    }
 
     // Refresh device data whenever the socket opens or reconnects.
     {
@@ -344,6 +349,7 @@ pub(crate) fn app() -> Html {
                     let secure_session = secure_session.clone();
                     let secure_session_view = secure_session_view.clone();
                     move |connected| {
+                        python::connection_changed(connected);
                         ws_connected.set(connected);
                         if connected {
                             *was_connected.borrow_mut() = true;
@@ -594,96 +600,70 @@ pub(crate) fn app() -> Html {
         })
     };
 
-    let on_usb_start =
-        {
-            let selected_os = selected_os.clone();
-            let set_pending = set_pending.clone();
-            let push_log = push_log.clone();
-            let toast_cb = show_toast.clone();
-            Callback::from(move |assistant: bool| {
-                let selected_os = (*selected_os).clone();
-                let set_pending = set_pending.clone();
-                let push_log = push_log.clone();
-                let show_toast = toast_cb.clone();
-                wasm_bindgen_futures::spawn_local(async move {
-                    set_pending.emit((PendingAction::UsbStart, true));
-                    let os_opt = if selected_os == "unknown" {
-                        None
-                    } else {
-                        Some(selected_os.as_str())
-                    };
-                    match api::usb_register(assistant, os_opt).await {
-                        Ok(()) => {
-                            push_log.emit("USB enabling request sent".to_string());
-                            show_toast.emit(("USB enabling…".into(), true));
-                            if assistant {
-                                match scripts::lookup("assistant_us") {
-                                    Some(script_dsl) => match dsl::compile(script_dsl) {
-                                        Ok(bytecode) => match api::run_script(&bytecode).await {
-                                            Ok(()) => push_log
-                                                .emit("macOS assistant script queued".into()),
-                                            Err(e) => push_log
-                                                .emit(format!("assistant script failed: {e}")),
-                                        },
-                                        Err(err) => {
-                                            push_log.emit(format!(
-                                                "assistant compile error: {}",
-                                                err.message
-                                            ));
-                                        }
-                                    },
-                                    None => push_log
-                                        .emit("assistant script unavailable in frontend".into()),
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            push_log.emit(format!("usb start error: {e}"));
-                            show_toast.emit((format!("USB start failed: {e}"), false));
-                        }
-                    }
-                    set_pending.emit((PendingAction::UsbStart, false));
-                });
-            })
-        };
-
-    let on_run_dsl = {
-        let dsl_text = dsl_text.clone();
+    let on_usb_start = {
+        let selected_os = selected_os.clone();
         let set_pending = set_pending.clone();
         let push_log = push_log.clone();
         let toast_cb = show_toast.clone();
-        Callback::from(move |_| {
-            let txt = (*dsl_text).clone();
-            if txt.trim().is_empty() {
-                push_log.emit("empty script".to_string());
-                toast_cb.emit(("Add commands before running the script".into(), false));
-                return;
-            }
+        Callback::from(move |_: ()| {
+            let selected_os = (*selected_os).clone();
             let set_pending = set_pending.clone();
             let push_log = push_log.clone();
             let show_toast = toast_cb.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let bytecode = match dsl::compile(&txt) {
-                    Ok(bytes) => bytes,
-                    Err(err) => {
-                        push_log.emit(format!("compile error: {}", err.message));
-                        show_toast.emit((format!("Compile failed: {}", err.message), false));
-                        return;
-                    }
+                set_pending.emit((PendingAction::UsbStart, true));
+                let os_opt = if selected_os == "unknown" {
+                    None
+                } else {
+                    Some(selected_os.as_str())
                 };
-                set_pending.emit((PendingAction::RunScript, true));
-                match api::run_script(&bytecode).await {
+                match api::usb_register(os_opt).await {
                     Ok(()) => {
-                        push_log.emit(format!("queued ({} bytes)", bytecode.len()));
-                        show_toast.emit(("Script queued".into(), true));
+                        push_log.emit("USB enabling request sent".to_string());
+                        show_toast.emit(("USB enabling…".into(), true));
                     }
                     Err(e) => {
-                        push_log.emit(format!("run error: {e}"));
-                        show_toast.emit((format!("Run failed: {e}"), false));
+                        push_log.emit(format!("usb start error: {e}"));
+                        show_toast.emit((format!("USB start failed: {e}"), false));
                     }
                 }
-                set_pending.emit((PendingAction::RunScript, false));
+                set_pending.emit((PendingAction::UsbStart, false));
             });
+        })
+    };
+
+    let on_run_python = {
+        let python_text = python_text.clone();
+        let python_status = python_status.clone();
+        let push_log = push_log.clone();
+        let toast_cb = show_toast.clone();
+        Callback::from(move |_| {
+            let txt = (*python_text).clone();
+            if txt.trim().is_empty() {
+                push_log.emit("empty script".to_string());
+                toast_cb.emit(("Add Python code before starting the process".into(), false));
+                return;
+            }
+            let python_status_for_callback = python_status.clone();
+            let push_log = push_log.clone();
+            let show_toast = toast_cb.clone();
+            match python::start(txt, move |snapshot| {
+                push_log.emit(format!("Python: {}", snapshot.message));
+                python_status_for_callback.set(snapshot);
+            }) {
+                Ok(()) => show_toast.emit(("RustPython process starting…".into(), true)),
+                Err(error) => {
+                    show_toast.emit((format!("Start failed: {error}"), false));
+                }
+            }
+        })
+    };
+
+    let on_stop_python = {
+        let toast_cb = show_toast.clone();
+        Callback::from(move |_| {
+            python::stop();
+            toast_cb.emit(("Python process stopped".into(), true));
         })
     };
 
@@ -892,7 +872,6 @@ pub(crate) fn app() -> Html {
     // UI pieces
     let st = (*status).clone();
     let conf = (*config).clone();
-    let scr = (*scripts).clone();
     let pending = (*pending_actions).clone();
     let capabilities = (*hello).clone();
     let connected = *ws_connected;
@@ -907,7 +886,7 @@ pub(crate) fn app() -> Html {
     let script_ready = device_ready
         && capabilities
             .as_ref()
-            .is_some_and(|snapshot| snapshot.supports_keyboard_feature("script_bytecode"));
+            .is_some_and(|snapshot| snapshot.supports_keyboard_feature("script_effect_v1"));
     let transfer_capable = device_ready
         && capabilities.as_ref().is_some_and(|snapshot| {
             snapshot.transfer_compatible()
@@ -944,17 +923,6 @@ pub(crate) fn app() -> Html {
                 && snapshot.host_agent.present
                 && snapshot.host_agent.version.is_some()
         });
-    let supported_layouts: Vec<String> = capabilities
-        .as_ref()
-        .map(|snapshot| {
-            dsl_core::available_layouts()
-                .iter()
-                .copied()
-                .filter(|layout| snapshot.supports_layout(layout))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
     let version_warning = capabilities.as_ref().and_then(|snapshot| {
         snapshot.compatibility_error().or_else(|| {
             (snapshot.protocols.transfer != api::TRANSFER_PROTOCOL_VERSION
@@ -1072,20 +1040,15 @@ pub(crate) fn app() -> Html {
                         },
                         AppSection::Scripts => html! {
                             <ScriptingCard
-                                dsl_text={(*dsl_text).clone()}
+                                python_text={(*python_text).clone()}
                                 on_change={{
-                                    let dsl_text = dsl_text.clone();
-                                    Callback::from(move |s: String| dsl_text.set(s))
+                                    let python_text = python_text.clone();
+                                    Callback::from(move |s: String| python_text.set(s))
                                 }}
-                                on_select_layout={{
-                                    let dsl_text = dsl_text.clone();
-                                    Callback::from(move |layout: String| dsl_text.set(dsl::set_entry_layout(&dsl_text, &layout)))
-                                }}
-                                scripts={scr.clone()}
                                 connected={script_ready}
-                                busy={pending.run_script}
-                                supported_layouts={supported_layouts.clone()}
-                                on_run={on_run_dsl.clone()} />
+                                status={(*python_status).clone()}
+                                on_start={on_run_python.clone()}
+                                on_stop={on_stop_python.clone()} />
                         },
                         AppSection::Transfers => html! {
                             <div class="transfer-workspace">

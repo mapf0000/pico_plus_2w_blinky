@@ -73,7 +73,9 @@ pub async fn server_task(id: usize, stack: net::Stack<'static>) -> ! {
         start_read_request: TimerDuration::from_secs(5),
         persistent_start_read_request: TimerDuration::from_secs(3),
         read_request: TimerDuration::from_secs(2),
-        write: TimerDuration::from_secs(3),
+        // The lazily requested RustPython runtime is ~3.7 MiB compressed.
+        // Allow slow AP clients to finish that single bounded response.
+        write: TimerDuration::from_secs(30),
     })
     .close_connection_after_response();
 

@@ -137,7 +137,7 @@ pub(crate) fn identity_card(props: &IdentityProps) -> Html {
 pub(crate) struct UsbProps {
     pub selected_os: String,
     pub on_select_os: Callback<String>,
-    pub on_start: Callback<bool>,
+    pub on_start: Callback<()>,
     pub on_stop: Callback<()>,
     pub usb_enabled: bool,
     pub connected: bool,
@@ -150,13 +150,9 @@ pub(crate) fn usb_card(props: &UsbProps) -> Html {
     let set_mac = Callback::from(move |_| on_select.emit("mac".to_string()));
     let on_select = props.on_select_os.clone();
     let set_win = Callback::from(move |_| on_select.emit("windows".to_string()));
-    let start_assist = {
+    let start_usb = {
         let cb = props.on_start.clone();
-        Callback::from(move |_| cb.emit(true))
-    };
-    let start_noassist = {
-        let cb = props.on_start.clone();
-        Callback::from(move |_| cb.emit(false))
+        Callback::from(move |_| cb.emit(()))
     };
     html! {
         <section class="card usb-card" id="usbCard">
@@ -169,10 +165,8 @@ pub(crate) fn usb_card(props: &UsbProps) -> Html {
                 <label class="radio"><input type="radio" name="os" value="windows" checked={props.selected_os=="windows"} onclick={set_win}/>{" Windows"}</label>
               </div>
               <div class="card-actions left">
-                <button id="btnUsbAssistant" class="btn-primary" onclick={start_assist} disabled={!props.connected || props.starting || props.selected_os=="windows"}>{if props.starting { "Starting…" } else { "Start with Assistant" }}</button>
-                <button id="btnUsbNoAssistant" class="btn-secondary" onclick={start_noassist} disabled={!props.connected || props.starting}>{if props.starting { "Starting…" } else { "Start USB" }}</button>
+                <button id="btnUsbStart" class="btn-primary" onclick={start_usb} disabled={!props.connected || props.starting}>{if props.starting { "Starting…" } else { "Start USB" }}</button>
               </div>
-              <div class="card-footer-note">{"Assistant runs the macOS keyboard identification sequence after registration."}</div>
             </>
           } else {
             <div class="active-state"><span class="active-state-icon">{"✓"}</span><div><strong>{"USB is active"}</strong><span>{"The device is registered with the host."}</span></div></div>

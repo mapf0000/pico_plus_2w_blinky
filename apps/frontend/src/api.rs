@@ -11,7 +11,7 @@ use std::{cell::Cell, cell::RefCell, rc::Rc};
 use wasm_bindgen::{JsCast, closure::Closure};
 use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
 
-use crate::{codec, scripts};
+use crate::python;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Status {
@@ -26,16 +26,7 @@ pub struct Config {
     pub usb_product: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct ScriptMeta {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    #[serde(default)]
-    pub dsl: Option<String>,
-}
-
-pub const WEBSOCKET_PROTOCOL_VERSION: u16 = 2;
+pub const WEBSOCKET_PROTOCOL_VERSION: u16 = 3;
 pub const TRANSFER_PROTOCOL_VERSION: u16 = transfer_protocol::TRANSFER_PROTOCOL_VERSION;
 pub const FILESYSTEM_PROTOCOL_VERSION: u16 = 1;
 
@@ -107,13 +98,6 @@ impl Hello {
             .features
             .iter()
             .any(|candidate| candidate == feature)
-    }
-
-    pub fn supports_layout(&self, layout: &str) -> bool {
-        self.keyboard
-            .layouts
-            .iter()
-            .any(|candidate| candidate == layout)
     }
 
     pub fn transfer_compatible(&self) -> bool {
@@ -375,6 +359,10 @@ fn connect_ws() {
                     (callbacks.on_transfer_text)(s);
                     return;
                 }
+                if is_script_event(&s) {
+                    python::handle_device_event(&s);
+                    return;
+                }
                 (callbacks.on_log)(format!("WS msg: {s}"));
                 return;
             }
@@ -580,6 +568,13 @@ fn is_transfer_event(text: &str) -> bool {
     event.event_type.starts_with("transfer/")
 }
 
+fn is_script_event(text: &str) -> bool {
+    let Ok(event) = serde_json::from_str::<EventTypeEnvelope>(text) else {
+        return false;
+    };
+    event.event_type.starts_with("script/")
+}
+
 fn is_current_session(session_id: u64) -> bool {
     WS.with(|cell| {
         cell.borrow()
@@ -726,12 +721,9 @@ pub async fn save_config(manufacturer: &str, product: &str) -> Result<(), ApiErr
     expect_ok(&text)
 }
 
-pub async fn usb_register(assistant: bool, os: Option<&str>) -> Result<(), ApiError> {
+pub async fn usb_register(os: Option<&str>) -> Result<(), ApiError> {
     let mut cmd = String::from("USB_REGISTER");
     let mut params: Vec<String> = Vec::new();
-    if assistant {
-        params.push("assistant=1".to_string());
-    }
     if let Some(os) = os
         && !os.is_empty()
     {
@@ -754,24 +746,43 @@ pub async fn usb_unregister() -> Result<(), ApiError> {
     expect_ok(&text)
 }
 
-pub async fn list_scripts() -> Result<Vec<ScriptMeta>, ApiError> {
-    let list = scripts::all()
-        .iter()
-        .map(|s| ScriptMeta {
-            id: s.id.to_string(),
-            name: s.name.to_string(),
-            description: s.description.to_string(),
-            dsl: Some(s.dsl.to_string()),
-        })
-        .collect();
-    Ok(list)
+pub fn send_script_effect(id: script_protocol::EffectId, bytecode: &[u8]) -> Result<(), ApiError> {
+    let mut message = vec![0u8; script_protocol::HEADER_LEN + bytecode.len()];
+    let length = script_protocol::encode_header(
+        &mut message,
+        script_protocol::OP_RUN_EFFECT,
+        id,
+        bytecode.len(),
+    )
+    .map_err(|_| ApiError::Protocol("invalid script effect envelope".into()))?;
+    message[script_protocol::HEADER_LEN..length].copy_from_slice(bytecode);
+    send_binary(&message)
 }
 
-pub async fn run_script(bytecode: &[u8]) -> Result<(), ApiError> {
-    let encoded = codec::encode_hex(bytecode);
-    let cmd = format!("SCRIPT_RUN_HEX {}", encoded);
-    let text = send_cmd(&cmd, MUTATION_TIMEOUT_MS).await?;
-    expect_ok(&text)
+pub fn cancel_script_effect(id: script_protocol::EffectId) -> Result<(), ApiError> {
+    let mut message = vec![0u8; script_protocol::HEADER_LEN];
+    script_protocol::encode_header(&mut message, script_protocol::OP_CANCEL_EFFECT, id, 0)
+        .map_err(|_| ApiError::Protocol("invalid script cancellation envelope".into()))?;
+    send_binary(&message)
+}
+
+fn send_binary(message: &[u8]) -> Result<(), ApiError> {
+    let mut error = None;
+    WS.with(|cell| {
+        let slot = cell.borrow();
+        let Some(state) = slot.as_ref() else {
+            error = Some(ApiError::Disconnected);
+            return;
+        };
+        if state.ws.ready_state() != WebSocket::OPEN {
+            error = Some(ApiError::Disconnected);
+            return;
+        }
+        if state.ws.send_with_u8_array(message).is_err() {
+            error = Some(ApiError::SendFailed);
+        }
+    });
+    error.map_or(Ok(()), Err)
 }
 
 pub fn send_secure_transfer(payload: &[u8]) -> Result<(), ApiError> {
@@ -896,10 +907,10 @@ mod tests {
     #[test]
     fn keyboard_features_are_read_from_keyboard_capabilities() {
         let mut hello = hello(WEBSOCKET_PROTOCOL_VERSION);
-        hello.keyboard.features.push("script_bytecode".into());
+        hello.keyboard.features.push("script_effect_v1".into());
 
-        assert!(hello.supports_keyboard_feature("script_bytecode"));
-        assert!(!hello.supports_feature("script_bytecode"));
+        assert!(hello.supports_keyboard_feature("script_effect_v1"));
+        assert!(!hello.supports_feature("script_effect_v1"));
     }
 
     #[test]

@@ -1,8 +1,0 @@
-# Example: entry script that uses calls + lets
-
-let USER = "myUser"
-text(USER, 20)
-tap("TAB")
-call type_password
-tap("ENTER")
-call post_login

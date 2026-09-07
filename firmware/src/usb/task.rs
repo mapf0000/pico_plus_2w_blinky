@@ -3,7 +3,6 @@ use core::sync::atomic::Ordering;
 
 use embassy_futures::join::join5;
 use embassy_futures::select::{Either, select};
-use embassy_rp::clocks::RoscRng;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver as UsbDriver;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
@@ -24,9 +23,6 @@ const USB_DESC_BUF_LEN: usize = 1024;
 const USB_MAX_PACKET_SIZE_0: u8 = 64;
 const HID_POLL_MS: u8 = 10;
 const USB_LOGGER_BUF: usize = 1024;
-
-// Force macOS Keyboard Setup Assistant on every boot by varying PID/serial
-const USB_FORCE_ASSISTANT_EACH_BOOT: bool = false;
 
 struct IdentityStrings {
     manufacturer: heapless::String<{ crate::device_config::MANUFACTURER_MAX }>,
@@ -59,33 +55,13 @@ fn identity_strings() -> &'static mut IdentityStrings {
     }
 }
 
-#[allow(dead_code)]
-static SERIAL_STORAGE: ConstStaticCell<heapless::String<16>> =
-    ConstStaticCell::new(heapless::String::new());
-#[allow(dead_code)]
-static mut SERIAL_PTR: Option<NonNull<heapless::String<16>>> = None;
-
-#[allow(dead_code)]
-fn serial_buffer() -> &'static mut heapless::String<16> {
-    unsafe {
-        if let Some(ptr) = SERIAL_PTR {
-            let mut ptr = ptr;
-            return ptr.as_mut();
-        }
-        let reference = SERIAL_STORAGE.take();
-        let mut ptr = NonNull::from(reference);
-        SERIAL_PTR = Some(ptr);
-        ptr.as_mut()
-    }
-}
-
 #[embassy_executor::task]
 pub async fn usb_task(
     cancel: &'static Signal<ThreadModeRawMutex, u64>,
-    start_req: &'static Signal<ThreadModeRawMutex, bool>,
+    start_req: &'static Signal<ThreadModeRawMutex, ()>,
 ) -> ! {
     loop {
-        let run_mac_assistant = start_req.wait().await;
+        start_req.wait().await;
 
         if !crate::usb::usb_supervisor::USB_ENABLED.load(Ordering::SeqCst) {
             // Request was cancelled before bring-up completed.
@@ -97,8 +73,7 @@ pub async fn usb_task(
         crate::usb::hid::USB_READY.store(false, Ordering::SeqCst);
         crate::usb::ctrl::CTRL_READY.store(false, Ordering::SeqCst);
 
-        let mut rng = RoscRng;
-        let cfg = build_usb_config(&mut rng).await;
+        let cfg = build_usb_config().await;
 
         let driver = UsbDriver::new(unsafe { USB::steal() }, crate::Irqs);
 
@@ -161,7 +136,7 @@ pub async fn usb_task(
             logger_class,
             usb_log_style
         );
-        let hid_fut = crate::usb::hid::run_hid(hid_writer, run_mac_assistant);
+        let hid_fut = crate::usb::hid::run_hid(hid_writer);
         let ctrl_fut = crate::usb::ctrl::run_ctrl(ctrl_class);
         let msc_fut = msc_class.run(crate::usb::msc::image());
 
@@ -198,9 +173,8 @@ fn usb_log_style(record: &Record, writer: &mut embassy_usb_logger::Writer<'_, US
     let _ = write!(writer, "{}\r\n", record.args());
 }
 
-async fn build_usb_config(rng: &mut RoscRng) -> UsbConfig<'static> {
-    let pid = select_pid(rng);
-    let mut cfg = UsbConfig::new(0x1209, pid); // pid.codes style VID/PID (dummy)
+async fn build_usb_config() -> UsbConfig<'static> {
+    let mut cfg = UsbConfig::new(0x1209, 0x0001); // pid.codes style VID/PID (dummy)
 
     // Read current device identity from runtime config
     let dev_cfg = crate::device_config::get().await;
@@ -214,30 +188,9 @@ async fn build_usb_config(rng: &mut RoscRng) -> UsbConfig<'static> {
     cfg.manufacturer = Some(identity.manufacturer.as_str());
     cfg.product = Some(identity.product.as_str());
 
-    if USB_FORCE_ASSISTANT_EACH_BOOT {
-        use core::fmt::Write as _;
-        let serial = serial_buffer();
-        serial.clear();
-        let r = rng.next_u32();
-        let _ = write!(serial, "{:08X}", r);
-        cfg.serial_number = Some(serial.as_str());
-    } else {
-        cfg.serial_number = None;
-    }
+    cfg.serial_number = None;
 
     cfg.max_power = USB_CFG_MAX_POWER_MA;
     cfg.max_packet_size_0 = USB_MAX_PACKET_SIZE_0;
     cfg
-}
-
-fn select_pid(rng: &mut RoscRng) -> u16 {
-    if USB_FORCE_ASSISTANT_EACH_BOOT {
-        if (rng.next_u32() & 1) == 0 {
-            0x0001
-        } else {
-            0x0002
-        }
-    } else {
-        0x0001
-    }
 }

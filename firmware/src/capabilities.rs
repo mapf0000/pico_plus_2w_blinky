@@ -10,7 +10,7 @@ use portable_atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::http::util::escape_json_str;
 
 pub const HELLO_VERSION: u16 = 1;
-pub const WEBSOCKET_PROTOCOL_VERSION: u16 = 2;
+pub const WEBSOCKET_PROTOCOL_VERSION: u16 = 3;
 pub const TRANSFER_PROTOCOL_VERSION: u16 = transfer_protocol::TRANSFER_PROTOCOL_VERSION;
 pub const FILESYSTEM_PROTOCOL_VERSION: u16 = 1;
 pub const HELLO_TEXT_MAX: usize = 768;
@@ -171,8 +171,8 @@ pub fn hello_json() -> String<HELLO_TEXT_MAX> {
             "\"firmware\":{{\"version\":\"{}\",\"build\":\"{}\"}},",
             "\"protocols\":{{\"websocket\":{},\"transfer\":{},\"filesystem\":{}}},",
             "\"host_agent\":{{\"present\":{},\"version\":{},\"hostname\":{}}},",
-            "\"keyboard\":{{\"layouts\":[\"mac_de-DE\"],",
-            "\"features\":[\"hid_keyboard\",\"script_bytecode\",\"macos_assistant\"]}},",
+            "\"keyboard\":{{\"layouts\":[\"win_en-US\",\"win_en-GB\",\"win_pt-BR\",\"win_de-DE\",\"mac_en-GB\",\"mac_pt-BR\",\"mac_de-DE\"],",
+            "\"features\":[\"hid_keyboard\",\"script_effect_v1\"]}},",
             "\"features\":[\"usb_identity\",\"usb_control\",\"file_transfer\",",
             "\"filesystem_browser\",\"transfer_download\"],",
             "\"privileged_operations\":{} }}"

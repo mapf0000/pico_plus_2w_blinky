@@ -107,7 +107,7 @@ Large fixed allocations to review before changing memory use include:
 - Display SPI staging buffer and render state.
 - Network stack resources for 16 sockets.
 
-The refresh-handoff build with framed and raw USB benchmark counters measures 362,816 bytes of `.bss`, 2,644 bytes of `.data`, and 1,024 bytes of `.uninit` in the 512 KiB `RAM` region. Including linker alignment, the last static allocation ends at byte 366,496, leaving 157,792 bytes before runtime stack use. The failed pooled-batching build used 465,888 bytes of `.bss`: batching state had become part of all four HTTP task futures. Keeping batching in one dedicated transfer task and placing its uniquely owned batch slot in PSRAM avoids that multiplication. The two WebSocket acceptors share the single logical transfer path; they duplicate only their bounded connection/task state. Treat async future sizes and task-pool multiplicity as part of every SRAM review; successful linking alone does not guarantee enough runtime headroom.
+The RustPython cutover release build measures 357,248 bytes of `.bss`, 2,644 bytes of `.data`, and 1,024 bytes of `.uninit` in the 512 KiB `RAM` region. Including linker alignment, the last static allocation ends at byte 360,928, leaving 163,360 bytes before runtime stack use. The one-slot HID command channel owns one bounded 4,096-byte effect; the Python VM and its heap live in the browser and consume no device SRAM. A prior failed pooled-batching build used 465,888 bytes of `.bss`: batching state had become part of all four HTTP task futures. Keeping batching in one dedicated transfer task and placing its uniquely owned batch slot in PSRAM avoids that multiplication. The two WebSocket acceptors share the single logical transfer path; they duplicate only their bounded connection/task state. Treat async future sizes and task-pool multiplicity as part of every SRAM review; successful linking alone does not guarantee enough runtime headroom.
 
 ### External PSRAM
 
@@ -164,7 +164,7 @@ Implementation:
 
 - Composite builder/session: `firmware/src/usb/task.rs`
 - Start/stop lifecycle: `firmware/src/usb/usb_supervisor.rs`
-- HID: `firmware/src/usb/hid.rs`, `crates/dsl/firmware-exec`
+- HID: `firmware/src/usb/hid.rs`, `crates/firmware-exec`
 - Control CDC: `firmware/src/usb/ctrl.rs`
 - MSC device: `firmware/src/usb/msc.rs`
 - MSC image generator: `crates/build-support/src/msc_image.rs`

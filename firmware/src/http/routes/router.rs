@@ -17,6 +17,18 @@ macro_rules! app_router {
             .route("/ui/app.wasm", get(frontend::route_frontend_wasm))
             .route("/ui/style.css", get(frontend::route_frontend_style))
             .route("/ui/idb.js", get(frontend::route_frontend_idb_js))
+            .route(
+                "/ui/python-worker.js",
+                get(frontend::route_python_worker_js),
+            )
+            .route(
+                "/ui/python-runtime.js",
+                get(frontend::route_python_runtime_js),
+            )
+            .route(
+                "/ui/python-runtime.wasm",
+                get(frontend::route_python_runtime_wasm),
+            )
             // Health-only HTTP endpoint (keep simple HTTP for probes)
             .route("/health", get(api::route_health))
     }};

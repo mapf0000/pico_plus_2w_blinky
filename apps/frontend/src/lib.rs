@@ -1,14 +1,10 @@
 use wasm_bindgen::prelude::*;
 use yew::prelude::*;
 
-use dsl_core::MAX_DSL_LINES;
-
 mod api;
 mod app;
-pub mod codec;
-pub mod dsl;
 mod filesystem;
-pub mod scripts;
+mod python;
 mod transfer;
 mod ui;
 

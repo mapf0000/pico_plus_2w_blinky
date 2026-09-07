@@ -1,6 +1,6 @@
 # System architecture
 
-This document explains how the firmware, embedded Web UI, host agent, and shared DSL crates fit together. Wire formats and numeric constants live in [PROTOCOL.md](PROTOCOL.md); board wiring and memory layout live in [HARDWARE.md](HARDWARE.md).
+This document explains how the firmware, embedded Web UI, RustPython Worker, host agent, and shared crates fit together. Wire formats and numeric constants live in [PROTOCOL.md](PROTOCOL.md); board wiring and memory layout live in [HARDWARE.md](HARDWARE.md).
 
 ## System context
 
@@ -60,7 +60,7 @@ Key responsibilities:
 - A single reconnecting WebSocket and correlated RPC in `src/api.rs`.
 - Pure transfer and filesystem decoding/state in `src/transfer/` and `src/filesystem.rs`.
 - Browser chunk persistence and save/download behavior in `ui/idb.js`.
-- Browser-side DSL compilation in `src/dsl.rs`.
+- RustPython Worker supervision, typed effects, timeouts, and reconnect handling in `src/python.rs`.
 
 The frontend is compiled to `wasm32-unknown-unknown` by Trunk. It is served from firmware in production and by the Trunk development server during local work.
 
@@ -83,27 +83,29 @@ The daemon is Tokio-based. Platform-specific behavior is isolated with `cfg` gat
 
 ```mermaid
 flowchart TD
-    Builtins[crates/builtin-scripts]
-    DSLCore["crates/dsl/dsl-core<br/>no_std by default"]
-    DSLWasm[crates/dsl/dsl-wasm]
-    FirmwareExec[crates/dsl/firmware-exec]
+    PythonWorker["apps/python-worker<br/>RustPython VM"]
+    KeyboardCore["crates/keyboard-core<br/>no_std by default"]
+    FirmwareExec[crates/firmware-exec]
+    ScriptProtocol[crates/script-protocol]
     Constants[crates/bytecode-constants]
     BuildSupport[crates/build-support]
     Frontend[apps/frontend]
     Firmware[firmware]
 
-    DSLCore --> Frontend
-    Builtins --> Frontend
-    DSLCore --> DSLWasm
-    DSLCore --> BuildSupport
-    Builtins --> BuildSupport
-    Constants --> BuildSupport
+    BuildSupport --> PythonWorker
     BuildSupport --> Firmware
+    KeyboardCore --> PythonWorker
+    KeyboardCore --> Frontend
+    KeyboardCore --> FirmwareExec
+    ScriptProtocol --> Frontend
+    ScriptProtocol --> Firmware
+    Constants --> KeyboardCore
+    Constants --> ScriptProtocol
     Constants --> Firmware
     FirmwareExec --> Firmware
 ```
 
-`dsl-core` owns parsing, preprocessing, script linking, layout-aware lowering, and `KBD1` encoding. `firmware-exec` intentionally contains a small streaming decoder/executor rather than the full compiler.
+RustPython owns Python parsing, bytecode, generator frames, and exceptions inside a dedicated browser Worker. `keyboard-core` converts typed yielded effects into bounded, layout-aware `KBD1`. `firmware-exec` validates the complete KBD1 program before emitting any report and then executes it asynchronously.
 
 ## Build-time architecture
 
@@ -115,7 +117,7 @@ flowchart LR
     BuildRS[firmware/build.rs]
     Support[crates/build-support]
     Trunk["Trunk release build<br/>wasm32-unknown-unknown"]
-    DSL[Compile built-in DSL scripts]
+    Python["RustPython Worker build<br/>wasm-bindgen + gzip"]
     MSC[Build 8 MiB FAT16 image]
     Out[Cargo OUT_DIR]
     Link[Embedded linker]
@@ -123,7 +125,7 @@ flowchart LR
 
     Cargo --> BuildRS --> Support
     Support --> Trunk --> Out
-    Support --> DSL --> Out
+    Support --> Python --> Out
     Support --> MSC --> Out
     Support -->|copy memory.x| Out
     Out --> Link
@@ -133,8 +135,8 @@ flowchart LR
 `crates/build-support` performs four important jobs:
 
 1. Copies `firmware/memory.x` into `OUT_DIR` and adds it to the linker search path.
-2. Fingerprints frontend and DSL sources, runs `trunk build --release` into an isolated directory under `OUT_DIR` when stale, and copies assets to stable generated names. It never embeds the shared `apps/frontend/dist/` development output.
-3. Compiles built-in scripts into `payloads_gen.rs` for the on-device display.
+2. Fingerprints the frontend and Python Worker, runs `trunk build --release`, builds the pinned RustPython Worker, applies wasm-bindgen, and stores its WASM as deterministic gzip. It never embeds the shared `apps/frontend/dist/` development output.
+3. Generates stable `include_*` bindings for the main UI, Worker driver/glue, and compressed Worker WASM.
 4. Constructs `host-agent.img`, an 8 MiB read-only FAT16 image embedded in its own flash region.
 
 The inner Trunk process receives a separate target directory and a scrubbed environment so Cortex-M linker flags cannot leak into wasm. Generated files in `OUT_DIR` are inputs to the final firmware link and must not be edited manually.
@@ -354,53 +356,50 @@ sequenceDiagram
 
 Starting a new browser request cancels the previous request ID on a best-effort basis. The host performs directory enumeration in `spawn_blocking` and suppresses a page when cancellation is observed before send. Pagination is both entry-count bounded and TLV-byte bounded.
 
-## DSL compile and execute paths
+## RustPython process and effect path
 
-There are two compile-time entry points and one device executor.
+One real RustPython generator runs in a dedicated browser Worker. Python state survives WebSocket disconnects as long as the tab remains open.
 
 ```mermaid
 flowchart LR
-    UserDSL[User/built-in DSL]
-    FrontCompile["Frontend dsl-core<br/>compile + link + lower"]
-    BuildCompile["Build-support dsl-core<br/>compile built-ins"]
+    Python["RustPython generator<br/>send / throw"]
+    Supervisor["Frontend supervisor<br/>deadline + one effect"]
+    Keyboard["keyboard-core<br/>layout-aware lowering"]
     KBD1["KBD1 bytecode<br/>CRC32, max 4096 bytes"]
-    Hex[Uppercase hex]
-    WS[WebSocket SCRIPT_RUN_HEX]
-    HIDQ["Firmware HID channel<br/>depth 8"]
-    Exec["firmware-exec<br/>streaming decoder"]
+    WS["Binary kind 8<br/>correlated IDs"]
+    HIDQ["Firmware HID command channel<br/>depth 1"]
+    Exec["firmware-exec<br/>validate, then execute"]
     Reports[USB boot-keyboard reports]
-    Generated["payloads_gen.rs<br/>on-device menu"]
 
-    UserDSL --> FrontCompile --> KBD1 --> Hex --> WS --> HIDQ --> Exec --> Reports
-    UserDSL --> BuildCompile --> KBD1 --> Generated --> HIDQ
+    Python -->|yield effect| Supervisor
+    Supervisor --> Keyboard --> KBD1 --> WS --> HIDQ --> Exec --> Reports
+    Exec -->|completed/rejected/cancelled| Supervisor
+    Supervisor -->|send(value) / throw(error)| Python
 ```
 
-Browser path:
+Process path:
 
-1. `dsl-core` preprocesses functions/constants/repeats, links built-in calls, requires a leading layout declaration, and lowers text to HID usages.
-2. It normalizes flat operations and emits `KBD1` bytecode with magic, reserved flags, operations, `END`, and CRC32.
-3. The frontend hex-encodes at most 4096 bytes and sends `SCRIPT_RUN_HEX`.
-4. Firmware decodes hex into a fixed-capacity buffer and tries to enqueue it on the HID channel.
-5. `firmware-exec` streams delay/tap operations into USB boot-keyboard reports and caps decoded operations at 20,000.
+1. The Worker compiles user source with RustPython 0.5 and calls `main()`. `main()` must return a generator and call `layout()` once.
+2. Each yielded typed effect returns control to the frontend. A 500 ms main-thread deadline terminates the Worker if a generator step does not yield.
+3. Local sleep/event effects remain in the browser. Keyboard effects are lowered by `keyboard-core` and encoded as KBD1.
+4. Binary kind 8 carries exact request, process, and effect IDs plus up to 4,096 KBD1 bytes.
+5. Firmware validates flags, canonical varints, usages, delays, operation count, `END` placement, trailing data, and CRC before emitting the first HID report.
+6. Completion resumes the generator. Disconnects, unavailable USB/host-agent capability, rejection, and cancellation are injected with `generator.throw()` and can be caught by Python.
 
-Build path:
-
-- `crates/build-support/src/payloads.rs` compiles every `builtin-scripts` entry during firmware build.
-- Generated byte arrays and DSL descriptions are included by the display payload page.
-- Selecting a payload on-device enqueues the same `HidCommand::RunBytecode` used by WebSocket scripts.
-
-Layouts affect compile-time text-to-key mapping only. Firmware bytecode remains layout-agnostic.
+The browser never retries a keyboard effect because its outcome may be unknown after disconnect. Closing/reloading the tab terminates the Worker; no Python state is persisted to the Pico.
 
 ## State ownership and concurrency
 
 | State | Owner | Synchronization/lifetime |
 | --- | --- | --- |
 | WebSocket socket, callbacks, RPC pending map | Browser `api.rs` | Browser thread-local `RefCell`/`Cell`; session IDs reject stale callbacks |
+| RustPython interpreter/generator | Dedicated browser Worker | One process; hard termination on step timeout or Stop |
+| Python effects/events | Browser `python.rs` | One outstanding effect, 32 queued button events, correlated process/step IDs |
 | Yew UI models | Browser `app.rs` | Yew state handles; pure stores behind mutable refs |
 | Transfer chunks | Browser IndexedDB | Serialized/batched JavaScript persistence queue |
 | Transfer relay states | Firmware USB control task | Task-local fixed-capacity vector, maximum four |
 | WebSocket transfer data plane | Firmware | Two port-81 acceptors hand off one generation-owned active browser session. A singleton pump owns the 16-event input channel, one-frame output channel, and unique PSRAM batch slot. |
-| USB/HID commands | Firmware | Embassy channels, each depth 8 |
+| USB/HID commands/results | Firmware | One 4,096-byte command slot and eight small result slots; cancellation releases all keys |
 | Host-agent health | Firmware | Critical-section mutex plus atomics with 25-second freshness |
 | Persistent USB identity | Firmware | Embassy mutex plus two alternating flash slots |
 | Serial frames | Host agent | Tokio MPSC reader/writer queues, each depth 64 |
@@ -429,7 +428,7 @@ When adding a feature, keep ownership at one layer and pass bounded messages acr
 | New host operation | Firmware WebSocket/control routing and `apps/host-agent/src/dispatch.rs` | TLV tag/payload, security, host health gating, tests |
 | Transfer behavior | Host `file_transfer.rs`, firmware `usb/ctrl/relay*.rs`, frontend `transfer/` | All three state machines and protocol tests |
 | Filesystem behavior | Host `filesystem.rs`, frontend `filesystem.rs` | Firmware forwarding, cancellation, byte caps |
-| DSL syntax/layout | `crates/dsl/dsl-core` | Frontend compiler, build-support payloads, DSL docs, executor compatibility |
+| Python effects/layout | `apps/python-worker`, `crates/keyboard-core` | Frontend supervisor, Worker protocol, firmware executor compatibility |
 | USB composition | `firmware/src/usb/task.rs` | Interface-count env limits, host port selection, hardware smoke tests |
 | Memory allocation/layout | `firmware/memory.x`, `device_config.rs`, `psram_pool.rs`, HTTP buffers | Linker build, size report, persistence/MSC boundaries |
 | Startup ordering | `firmware/src/main.rs` and supervisor tasks | Static resource ownership and hardware recovery |

@@ -1,6 +1,0 @@
-# Example: slow typing with per-char delay via let
-
-let MSG = "This is slow typing..."
-let PER = 50
-text(MSG, PER)
-tap("ENTER")
