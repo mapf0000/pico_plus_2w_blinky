@@ -392,7 +392,7 @@ The browser never retries a keyboard effect because its outcome may be unknown a
 
 `crates/build-support/src/presets.rs` defines typed Rust keyboard operations and
 lowers them with `keyboard-core` during the firmware build. Generated static KBD1
-and bounded metadata are included by the hardware Payloads page. Launcher paths
+and bounded metadata are included by the display service adapter. Launcher paths
 and availability come from the same normalized volume label and target metadata
 that build the MSC image. The firmware adds no interpreter, heap allocation, or
 second bytecode format. Python remains a browser-resident process.
@@ -421,6 +421,47 @@ The display reports keyboard completion separately from host-agent detection and
 waits up to 15 seconds for the latter. Local controls are consumed before publishing
 button events to Python, preventing one press from triggering two keyboard producers.
 
+The hardware display is split between `firmware/src/display/` and
+`firmware/src/display_core/`. The former owns GPIO, panel transport, ADC/linker
+metrics, and adapters to HID, USB control, and host-agent state. The latter is an
+allocation-free module also exported by the firmware library for native tests.
+It accepts raw button samples and service snapshots, updates page models, and
+returns bounded action intents. Models and drawing never access device globals.
+
+Menu gestures retain ownership until both A and X are released. Device-wide Y
+Stop wins over simultaneous X activation. Local completion is consumed once per
+50 ms display tick regardless of which page is visible; the internal completion
+timestamp anchors the 15-second handshake deadline. Transfer byte/chunk progress
+is coalesced to 10 Hz, while identity, connection, and terminal changes bypass
+that limit. The HID job controller and browser wire format remain unchanged.
+
+Typed `PageView` variants bind page identity to its data. Shared widgets generate
+at most 20 bounded text rows for the visible page. The renderer caches only the
+previously drawn rows and geometry, comparing normalized text, rectangle, font,
+and colors before writing SPI. Layout changes invalidate pixels without resetting
+selection, status severity, pending handles, or deadlines. Headers and unchanged
+rows draw once; list selections repaint only affected rows. Payloads reserves a
+footer and derives a scroll window independently of total preset count. Logs
+snapshots copy at most 18 tail lines with their generation under one short lock;
+SPI drawing happens after that lock has been released.
+
+Panel startup commands and waits are asynchronous. A small board-specific
+ST7789 transport preserves the panel setup and uses SPI0 with DMA_CH1;
+CYW43 retains DMA_CH0. The renderer prepares an owned, bounded frame, then the
+backend rasterizes its damaged rectangles into one 320x8 RGB565 tile (5,120 bytes)
+and awaits DMA writes. The pinned flush is selected against the 50 ms input
+ticker, so Stop, gestures, local completions, and service state continue updating
+while it is pending. Timer ticks borrow the flush rather than cancel it. Models
+changed during a flush schedule a subsequent frame. Pixel caches commit only
+after successful transmission; failure or an uncommitted frame forces a repaint.
+Full-frame backgrounds exclude text rows, avoiding duplicate pixel transfers.
+
+Bounded 30-second diagnostic summaries report frame wall time, maximum tile
+rasterization time, SPI writes/bytes, missed sampling ticks, and Stop dispatch
+time. Frame wall time includes awaited DMA and scheduling; it is not a measure
+of executor blocking. Physical button-release latency requires a board
+measurement; diagnostics measure dispatch from the sampling instant.
+
 ## State ownership and concurrency
 
 | State | Owner | Synchronization/lifetime |
@@ -434,6 +475,7 @@ button events to Python, preventing one press from triggering two keyboard produ
 | WebSocket transfer data plane | Firmware | Two port-81 acceptors hand off one generation-owned active browser session. A singleton pump owns the 16-event input channel, one-frame output channel, and unique PSRAM batch slot. |
 | USB/HID commands/results | Firmware | One command slot (4,096-byte browser effect or flash preset reference), a small job controller, one local-result signal and one browser-completion slot/router task; browser delivery uses the existing generation-owned event queue |
 | Host-agent health | Firmware | Critical-section mutex plus atomics with 25-second freshness |
+| Hardware display models/cache | Firmware display task | Pure page models, one bounded 20-row renderer cache, and an 18-line log-tail snapshot; local completion/deadlines update even on hidden pages |
 | Persistent USB identity | Firmware | Embassy mutex plus two alternating flash slots |
 | Serial frames | Host agent | Tokio MPSC reader/writer queues, each depth 64 |
 | Transfer requests/feedback | Host agent | Tokio MPSC queues, depths 32 and 128 |
@@ -463,5 +505,6 @@ When adding a feature, keep ownership at one layer and pass bounded messages acr
 | Filesystem behavior | Host `filesystem.rs`, frontend `filesystem.rs` | Firmware forwarding, cancellation, byte caps |
 | Python effects/layout | `apps/python-worker`, `crates/keyboard-core` | Frontend supervisor, Worker protocol, firmware executor compatibility |
 | USB composition | `firmware/src/usb/task.rs` | Interface-count env limits, host port selection, hardware smoke tests |
+| Hardware display | `firmware/src/display_core/`, `firmware/src/display/` | Input ownership, model/cache separation, bounded rows, native rendering tests, embedded size and board timing |
 | Memory allocation/layout | `firmware/memory.x`, `device_config.rs`, `psram_pool.rs`, HTTP buffers | Linker build, size report, persistence/MSC boundaries |
 | Startup ordering | `firmware/src/main.rs` and supervisor tasks | Static resource ownership and hardware recovery |

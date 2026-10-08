@@ -96,12 +96,35 @@ fn compile(preset: &Preset) -> Result<Vec<u8>> {
     bytecode::validate(&bytes).map_err(|e| anyhow::anyhow!("preset exceeds KBD1 limits: {e:?}"))?;
     Ok(bytes)
 }
+
+fn validate_catalog(presets: &[Preset]) -> Result<()> {
+    if presets.is_empty() {
+        bail!("keyboard preset catalog must not be empty");
+    }
+    // Metadata remains in flash. Bound catalog growth and keep labels within the
+    // display's 96-character formatting limit; viewport ellipsis is applied later.
+    if presets.len() > 64 {
+        bail!("keyboard preset catalog exceeds 64 entries");
+    }
+    for preset in presets {
+        if preset.name.is_empty()
+            || preset.name.len() > 96
+            || !preset.name.is_ascii()
+            || preset.name.chars().any(char::is_control)
+        {
+            bail!("keyboard preset name must be 1..=96 printable ASCII characters");
+        }
+    }
+    Ok(())
+}
 pub(super) fn prepare(cfg: &Config, image: AgentImage<'_>) -> Result<()> {
     use std::fmt::Write;
     let mut generated = String::from(
         "// Generated from typed Rust presets; do not edit.\nstatic PRESETS: &[Preset] = &[\n",
     );
-    for preset in catalog(&image)? {
+    let presets = catalog(&image)?;
+    validate_catalog(&presets)?;
+    for preset in presets {
         let bytes = compile(&preset)?;
         writeln!(
             generated,
@@ -150,5 +173,25 @@ mod tests {
                 assert!(preset.available);
             }
         }
+    }
+
+    #[test]
+    fn catalog_bounds_reject_empty_oversized_and_unrenderable_metadata() {
+        assert!(validate_catalog(&[]).is_err());
+        let image = AgentImage {
+            volume: "PICO_AGENT",
+            directory: "MAC",
+            binary: "HOSTAGNT",
+            present: true,
+        };
+        let mut presets = catalog(&image).unwrap();
+        assert!(validate_catalog(&presets).is_ok());
+        presets[0].name = "invalid\nname";
+        assert!(validate_catalog(&presets).is_err());
+        presets[0].name = "valid name";
+        while presets.len() <= 64 {
+            presets.extend(catalog(&image).unwrap());
+        }
+        assert!(validate_catalog(&presets).is_err());
     }
 }

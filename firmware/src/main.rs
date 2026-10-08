@@ -14,7 +14,7 @@ use embassy_rp::bind_interrupts;
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::dma;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIO0, USB};
 use embassy_rp::pio::Pio;
 // USB classes are handled in `crate::usb` now
 use static_cell::StaticCell;
@@ -31,8 +31,8 @@ bind_interrupts!(pub struct Irqs {
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<USB>;
     // PIO interrupt for CYW43 PIO-SPI
     PIO0_IRQ_0  => embassy_rp::pio::InterruptHandler<PIO0>;
-    // DMA channel used by the CYW43 PIO-SPI transport.
-    DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<DMA_CH0>;
+    // Separate DMA channels for CYW43 PIO-SPI and display SPI0.
+    DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<DMA_CH0>, embassy_rp::dma::InterruptHandler<DMA_CH1>;
 });
 
 // ===== Module-local constants (small & auditable) =====
@@ -165,6 +165,7 @@ async fn main(spawner: Spawner) {
         adc: p.ADC,
         temp_sensor: p.ADC_TEMP_SENSOR,
         spi: p.SPI0,
+        dma: p.DMA_CH1,
         sck: p.PIN_18,
         mosi: p.PIN_19,
         cs: p.PIN_17,
@@ -261,6 +262,7 @@ mod capabilities;
 mod device_config;
 mod dhcp;
 mod display;
+mod display_core;
 mod health;
 mod host;
 mod http;

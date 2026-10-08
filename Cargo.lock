@@ -1377,16 +1377,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embedded-hal-bus"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "513e0b3a8fb7d3013a8ae17a834283f170deaf7d0eeab0a7c1a36ad4dd356d22"
-dependencies = [
- "critical-section",
- "embedded-hal 1.0.0",
-]
-
-[[package]]
 name = "embedded-hal-nb"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2925,16 +2915,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mipidsi"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "790ebd28bd67addbccf41b1c0c188c26bb9f5bdcd91d4d6da9bd558e20d97a1d"
-dependencies = [
- "embedded-graphics-core",
- "embedded-hal 1.0.0",
-]
-
-[[package]]
 name = "mock-pico"
 version = "0.1.0"
 dependencies = [
@@ -3252,13 +3232,10 @@ dependencies = [
  "embassy-usb",
  "embassy-usb-logger",
  "embedded-graphics",
- "embedded-hal 1.0.0",
- "embedded-hal-bus",
  "firmware-exec",
  "heapless 0.9.3",
  "leasehund",
  "log",
- "mipidsi",
  "panic-probe",
  "picoserve",
  "portable-atomic",

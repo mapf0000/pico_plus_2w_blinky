@@ -44,8 +44,8 @@ use relay::{
     handle_file_chunk, handle_file_close, handle_file_open,
 };
 pub use view::{
-    CTRL_CHAN, CTRL_READY, TransferRelayMode, TransferViewSnapshot, TransferViewState,
-    set_transfer_relay_mode, transfer_relay_mode, transfer_view_snapshot,
+    CTRL_CHAN, CTRL_READY, TransferRelayMode, TransferViewState, set_transfer_relay_mode,
+    transfer_relay_mode, transfer_view_snapshot,
 };
 use view::{
     TRANSFER_CHUNK_COUNT, TRANSFER_FINISHED_CHUNKS, TRANSFER_ID, TRANSFER_RECEIVED_SIZE,

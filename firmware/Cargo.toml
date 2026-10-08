@@ -54,9 +54,6 @@ embassy-futures = "0.1.2"
 heapless = "0.9.3"
 portable-atomic = { version = "1.15.0", features = ["critical-section"] }
 embedded-graphics = "0.8.2"
-embedded-hal-bus = { version = "0.3.0", default-features = false }
-embedded-hal = "1.0.0"
-mipidsi = { version = "0.10.0", default-features = false }
 
 cyw43 = { version = "0.7.0", optional = true, features = [
     "defmt",

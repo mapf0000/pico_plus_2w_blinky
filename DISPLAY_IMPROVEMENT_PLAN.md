@@ -1,6 +1,6 @@
 **Hardware display improvement plan**
 
-Prepared on 2026-10-08 against HEAD `ed124e7babfb147857f8c27f5e3f355b43199d9f` and the current uncommitted working tree. This document proposes follow-up work; it does not implement or replace the changes already in progress.
+Prepared on 2026-10-08 against HEAD `ed124e7babfb147857f8c27f5e3f355b43199d9f` and the current uncommitted working tree. The six implementation phases are now implemented on top of the subsequently committed Payloads changes. The original review and acceptance criteria are retained below; implementation evidence is recorded at the end.
 
 **Objective and scope**
 
@@ -8,16 +8,16 @@ Improve display correctness, code ownership, extensibility, and responsiveness w
 
 The scope is `firmware/src/display/`, its hardware-independent test surface, and narrow adapters to existing services. Changes to HID execution, preset generation, or WebSocket routing are needed only where a display-facing interface requires them. Preserve unrelated working-tree changes.
 
-**Current implementation**
+**Implementation at review time (before the refactor)**
 
 | Source | Responsibility |
 | --- | --- |
 | [firmware/src/main.rs](firmware/src/main.rs) | Assign peripherals and spawn the display task. |
 | [firmware/src/display/mod.rs](firmware/src/display/mod.rs) | Initialize hardware, sample buttons every 50 ms, route events, update LEDs, collect System metrics, and coordinate rendering. |
 | [firmware/src/display/backend.rs](firmware/src/display/backend.rs) | Board-specific ST7789 initialization and blocking SPI transport with a 512-byte static buffer. |
-| [firmware/src/display/input.rs](firmware/src/display/input.rs), [ui.rs](firmware/src/display/ui.rs) | Debounce GPIO samples and manage menu navigation. |
-| [firmware/src/display/renderer.rs](firmware/src/display/renderer.rs) | Compute layout, plan redraws, draw the sidebar/content shell, and invalidate page state. |
-| [firmware/src/display/pages.rs](firmware/src/display/pages.rs) | Statically dispatch five pages: Payloads, Transfer, Host Agent, System, and Logs. |
+| `firmware/src/display/input.rs`, `ui.rs` | Debounce GPIO samples and manage menu navigation. |
+| `firmware/src/display/renderer.rs` | Compute layout, plan redraws, draw the sidebar/content shell, and invalidate page state. |
+| `firmware/src/display/pages.rs` | Statically dispatch five pages: Payloads, Transfer, Host Agent, System, and Logs. |
 | `firmware/src/display/page_*.rs` | Page state, input handling, service calls, drawing, and some render caches. |
 
 The existing `no_std` design, fixed-capacity storage, generic `DrawTarget`, static page dispatch, and change-based text updates provide a useful foundation. Keep them.
@@ -163,3 +163,93 @@ Update README and `docs/ARCHITECTURE.md` for changed UI workflow or module owner
 - No firmware build, flashing, board timing measurement, or browser execution was performed for this documentation-only change.
 
 No clarification is required to begin the correctness phases: the current code and updated documentation establish the intended controls and execution semantics. Preserve those semantics by default; select a transport budget from measurements before committing to DMA.
+
+
+**Implementation record — 2026-10-08**
+
+All six phases are implemented on top of `8c70052` (`bring back device presets`).
+Hardware-independent input, models, shared scenes,
+render planning, and tile rasterization live in `firmware/src/display_core/`.
+Hardware ownership, snapshots/intents, ADC/linker metrics, diagnostics, and the
+ST7789 DMA transport live in `firmware/src/display/`. Page files that mixed these
+responsibilities have been replaced by typed views and bounded shared widgets.
+The firmware library exposes the pure core, and disabling firmware features
+skips the frontend/embedded asset build pipeline for native tests.
+
+The consuming A+X gesture, global Stop priority, off-page completion handling,
+completion-time handshake deadline, selection contrast, bounded scrolling,
+status wrapping/ellipsis, empty-list behavior, automatic transfer refresh, style
+invalidation, removed-row erasure, and failed-flush retry are covered by tests.
+Preset generation rejects empty catalogs, more than 64 entries, and names outside
+1..=96 printable ASCII characters. Logs snapshot only their bounded tail and
+capture its generation under the same lock.
+
+The conditional transport gate was triggered: the first refactored blocking
+build measured a 134,220 µs maximum redraw, 134,250 µs maximum sampling gap,
+three missed sampling periods, and up to 301,945 SPI bytes/2,358 writes per frame.
+Those are cumulative high-water values from the manual page/menu check, rather
+than a controlled per-page benchmark. The user confirmed readable labels/layout.
+
+Runtime transport therefore uses asynchronous SPI0 DMA_CH1, retaining CYW43's
+DMA_CH0 and the existing panel pins/setup. One 5,120-byte SRAM tile replaces the
+512-byte staging buffer; no 150 KiB framebuffer is allocated. Owned frames permit
+models/input/Stop to advance while DMA is pending. The pinned flush is borrowed
+by `select`, so sampling does not cancel it. Full-frame background planning
+excludes rows, removing redundant pixel transmissions. CS has a drop guard,
+and caches commit only after successful transmission.
+
+Native tests compare tiled/direct pixels on all five pages, prove full-frame
+regions cover each screen pixel exactly once, check RGB565 byte order and
+capacity/clip boundaries, verify every transmitted byte is initialized, and
+exercise model changes during an owned frame plus uncommitted-frame retry.
+
+Release resource review (2026-10-08): the linked application uses 6,124,480 flash
+bytes, with 2,255,936 bytes remaining before the persistent slots. Static striped
+SRAM ends at 248,380 bytes, leaving 275,908 bytes before runtime stacks. Relative
+to the saved pre-refactor local release artifact, flash increases by 12,416 bytes
+and static SRAM by 10,400 bytes. The display task pool grows from 5,360 to 11,136
+bytes because it retains its owned frame across DMA awaits; the tile adds 4,608
+bytes over the original staging buffer. This comparison is to a saved local
+artifact, rather than a reproducible isolated HEAD rebuild. The release
+prologues reserve about 8.3 KiB for frame preparation and 3.0 KiB for scene
+construction on the nested call path, plus small caller frames and callees.
+Static headroom covers these allocations comfortably; peak stack use has not
+been measured. No flash layout, PSRAM placement, protocol, or queue capacity
+changes were made. The obsolete blocking mipidsi/embedded-hal-bus dependencies
+were removed without updating other package versions.
+
+The final DMA board check passed all 11 USB control cases, the restricted
+production host-agent handshake/two keepalives, and read-only 8 MiB FAT16
+mass-storage metadata checks. The user confirmed correct colors, labels, and
+redraws while browsing all five pages and toggling the sidebar. Captured
+cumulative diagnostics during that session reported zero missed ticks,
+50,620 µs maximum sample gap, 80,146 µs maximum frame wall time,
+1,731 µs maximum tile raster time, and 155,965 maximum SPI bytes/1,290 writes per
+frame. These are observed high-water values, not worst-case guarantees.
+The sampling target is the existing 50 ms cadence, with less than 2 ms observed
+jitter and no skipped periods during the exercised workload. Full frames can
+span multiple ticks because DMA is awaited while input continues.
+
+Physical Y-release-to-HID-cancellation latency and a sustained concurrent
+Wi-Fi/browser file transfer were not measured. No payloads were activated during
+the visual test. Gesture/Stop priority, off-page completion, timeout, stale
+handles, and cancellation behavior were checked at the native model/controller
+layer; that does not replace an end-to-end physical Stop test.
+
+Final validation (all passed):
+
+| Command/check | Result |
+| --- | --- |
+| `cargo test -p pico_rust --lib --no-default-features` | 24 tests passed. |
+| `cargo test -p firmware-exec -p build-support` | 9 executor and 4 build-support tests passed. |
+| `cargo clippy -p pico_rust --lib --tests --no-default-features -- -D warnings` | Passed without warnings. |
+| `cargo check -p pico_rust --release --target thumbv8m.main-none-eabihf` | Passed on the final DMA code. |
+| `cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf` | Passed and linked within flash/SRAM limits; pre-existing proc-macro-error2 future-compatibility notice remains. |
+| `cargo fmt --all -- --check` | Passed. |
+| `git diff --check` | Passed. |
+| `scripts/device-test --flash --elf target/thumbv8m.main-none-eabihf/release/pico_rust` | Verified flash/reboot; 11 USB cases, restricted host-agent transport, and read-only MSC checks passed. |
+| Manual page/sidebar check | User confirmed the first refactor and final DMA build both look correct. |
+
+All changes remain uncommitted. Generated assets and local diagnostic captures
+were not added to the repository. Browser/keyboard protocol formats, job
+admission/ownership, and transfer backpressure are preserved.

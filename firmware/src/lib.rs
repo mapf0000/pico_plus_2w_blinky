@@ -2,4 +2,5 @@
 
 // Re-export only the modules that are platform-agnostic so we can run
 // unit tests on a host (macOS) with `cargo test --lib`.
+pub mod display_core;
 pub mod host;

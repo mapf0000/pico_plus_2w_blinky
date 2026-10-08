@@ -33,8 +33,8 @@ fn push_line(line: String<LOG_LINE_MAX>) {
             let _ = ring.lines.pop_front();
         }
         let _ = ring.lines.push_back(line);
+        let _ = LOG_GEN.fetch_add(1, Ordering::Relaxed);
     });
-    let _ = LOG_GEN.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn push_record(record: &Record) {
@@ -47,12 +47,14 @@ pub fn generation() -> u32 {
     LOG_GEN.load(Ordering::Relaxed)
 }
 
-pub fn snapshot(out: &mut Vec<String<LOG_LINE_MAX>, LOG_CAPACITY>) {
+/// Copy only the visible tail; generation and contents belong to the same snapshot.
+pub fn snapshot_tail<const N: usize>(out: &mut Vec<String<LOG_LINE_MAX>, N>) -> u32 {
     out.clear();
     LOG_RING.lock(|cell| {
         let ring = cell.borrow();
-        for line in ring.lines.iter() {
+        for line in ring.lines.iter().skip(ring.lines.len().saturating_sub(N)) {
             let _ = out.push(line.clone());
         }
-    });
+        LOG_GEN.load(Ordering::Relaxed)
+    })
 }

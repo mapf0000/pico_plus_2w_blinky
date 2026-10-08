@@ -8,7 +8,7 @@ use embassy_sync::{
     channel::Channel,
     signal::Signal,
 };
-use embassy_time::{Duration, Timer, with_timeout};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use embassy_usb::class::hid::HidWriter as UsbHidWriter;
 use firmware_exec::jobs::{Controller, JobHandle};
 use heapless::{String, Vec};
@@ -81,6 +81,7 @@ pub struct HidResult {
 pub struct LocalResult {
     pub handle: JobHandle,
     pub status: HidResultStatus,
+    pub completed_at_ms: u64,
 }
 #[derive(Clone, Copy, Debug)]
 pub enum SubmitError {
@@ -240,7 +241,11 @@ fn complete(handle: JobHandle, status: HidResultStatus) {
                 })
                 .expect("one reserved job publishes exactly one completion");
         } else {
-            LOCAL_RESULT.signal(LocalResult { handle, status });
+            LOCAL_RESULT.signal(LocalResult {
+                handle,
+                status,
+                completed_at_ms: Instant::now().as_millis(),
+            });
             JOBS.lock(|cell| {
                 cell.borrow_mut().finish(handle);
             });

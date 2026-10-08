@@ -91,12 +91,21 @@ and reports a timeout after 15 seconds without an agent. Missing packaged binari
 disable the launchers. The keyboard test types `Hello from Pico!` into the focused
 application; focus a text editor before using it.
 
+The preset list scrolls to keep the selection visible and reserves space for
+layout details and status. Status messages wrap across two rows; long labels use
+ellipsis with the sidebar open. Menu gestures consume both A and X releases,
+so closing the sidebar cannot also run the selected preset. Completion and the
+agent-handshake timeout continue while other pages are visible.
+
 Y stops the active keyboard job from any display page, including browser effects.
 Jobs never preempt each other: a second Run returns busy. Cancellation is terminal,
 with bounded key-release cleanup and no automatic restart after USB reconnect.
 Payloads/menu controls and the Stop press are consumed locally rather than also
 being delivered to a Python button-event handler. With no active job, Y retains
 its LED-color behavior outside Payloads.
+
+The Transfer page refreshes connection and transfer status automatically. Progress
+is coalesced to 10 Hz; connection changes and terminal states update immediately.
 
 ## Host agent USB mass storage image
 - One-command local flow:

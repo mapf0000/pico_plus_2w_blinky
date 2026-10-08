@@ -120,10 +120,14 @@ fn store_safe_token<const N: usize>(target: &mut String<N>, value: &str) {
     }
 }
 
-pub fn host_agent_snapshot() -> HostAgentSnapshot {
+pub fn host_agent_present() -> bool {
     let last_seen = HOST_AGENT_LAST_SEEN_MS.load(Ordering::Acquire);
-    let present = HOST_AGENT_SEEN.load(Ordering::Acquire)
-        && Instant::now().as_millis().saturating_sub(last_seen) <= HOST_AGENT_STALE_AFTER_MS;
+    HOST_AGENT_SEEN.load(Ordering::Acquire)
+        && Instant::now().as_millis().saturating_sub(last_seen) <= HOST_AGENT_STALE_AFTER_MS
+}
+
+pub fn host_agent_snapshot() -> HostAgentSnapshot {
+    let present = host_agent_present();
     HOST_AGENT_STATE.lock(|cell| {
         let state = cell.borrow();
         HostAgentSnapshot {

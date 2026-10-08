@@ -48,6 +48,7 @@ Detailed references:
 - `src/http/`: HTTP/WebSocket server, RPC routes, and embedded frontend serving.
 - `src/usb/`: USB HID, CDC control/relay protocol, MSC image, and USB supervision.
 - `src/display/`: on-device pages, including standalone Payloads, input, rendering, and status views.
+- `src/display_core/`: hardware-independent button routing, page models, bounded row scenes, and incremental rendering. `src/display/` owns GPIO/SPI/ADC and service adapters.
 - `src/device_config.rs`: persistent flash-backed configuration. Its constants must agree with `memory.x`.
 - `src/psram_pool.rs`: external-memory allocation for HTTP buffers.
 - `memory.x`: 16 MiB flash layout, including two persistent 4 KiB configuration slots.
@@ -239,6 +240,17 @@ cargo test -p frontend --target wasm32-unknown-unknown --no-run
 The integration tests are configured with `run_in_browser`; execute them with the repository's available browser/WebDriver setup when behavior changes. Also run `trunk build --release` for asset, HTML, CSS, or build-pipeline changes.
 
 ### Firmware changes
+
+Display model, input, and rendering tests run on the host without firmware assets
+or RP peripherals:
+
+```sh
+cargo test -p pico_rust --lib --no-default-features
+cargo clippy -p pico_rust --lib --tests --no-default-features -- -D warnings
+```
+
+The build script skips embedded asset generation when the `firmware` feature is
+disabled. Keep pure display modules free of generated presets and device globals.
 
 Compile the real embedded release target:
 
