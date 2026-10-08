@@ -4,12 +4,14 @@ use embedded_graphics::prelude::DrawTarget;
 
 use super::page_daemon::DaemonPageState;
 use super::page_logs::LogsPageState;
+use super::page_payloads::PayloadsPageState;
 use super::page_system::{SystemMetrics, SystemPageState};
 use super::page_transfer::TransferPageState;
 use super::{DisplayConfig, DisplayPalette};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PageId {
+    Payloads,
     Transfer,
     Daemon,
     System,
@@ -21,7 +23,11 @@ pub struct MenuItem {
     pub label: &'static str,
 }
 
-pub const MENU_ITEMS: [MenuItem; 4] = [
+pub const MENU_ITEMS: [MenuItem; 5] = [
+    MenuItem {
+        id: PageId::Payloads,
+        label: "Payloads",
+    },
     MenuItem {
         id: PageId::Transfer,
         label: "Transfer",
@@ -112,6 +118,7 @@ pub trait Page {
 }
 
 pub struct PageRegistry {
+    payloads: PayloadsPageState,
     transfer: TransferPageState,
     daemon: DaemonPageState,
     system: SystemPageState,
@@ -121,6 +128,7 @@ pub struct PageRegistry {
 impl PageRegistry {
     pub fn new() -> Self {
         Self {
+            payloads: PayloadsPageState::new(),
             transfer: TransferPageState::new(),
             daemon: DaemonPageState::new(),
             system: SystemPageState::new(),
@@ -149,6 +157,7 @@ impl PageRegistry {
     }
 
     pub fn reset_all(&mut self) {
+        self.payloads.on_reset();
         self.transfer.on_reset();
         self.daemon.on_reset();
         self.system.on_reset();
@@ -157,6 +166,7 @@ impl PageRegistry {
 
     pub fn handle_input(&mut self, id: PageId, input: &PageInput, ctx: &PageContext) -> bool {
         match id {
+            PageId::Payloads => self.payloads.handle_input(input, ctx),
             PageId::Transfer => self.transfer.handle_input(input, ctx),
             PageId::Daemon => self.daemon.handle_input(input, ctx),
             PageId::System => self.system.handle_input(input, ctx),
@@ -166,6 +176,7 @@ impl PageRegistry {
 
     pub fn on_tick(&mut self, id: PageId, ctx: &PageContext) -> bool {
         match id {
+            PageId::Payloads => self.payloads.on_tick(ctx),
             PageId::Transfer => self.transfer.on_tick(ctx),
             PageId::Daemon => self.daemon.on_tick(ctx),
             PageId::System => self.system.on_tick(ctx),
@@ -180,6 +191,7 @@ impl PageRegistry {
         data: PageRenderData<'_>,
     ) {
         match id {
+            PageId::Payloads => self.payloads.render(args, data),
             PageId::Transfer => self.transfer.render(args, data),
             PageId::Daemon => self.daemon.render(args, data),
             PageId::System => self.system.render(args, data),

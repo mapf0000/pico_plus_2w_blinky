@@ -206,3 +206,5 @@ mod linker {
 mod frontend;
 
 mod msc_image;
+
+mod presets;

@@ -79,6 +79,25 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
 - Frontend only (release build):
   - `cd apps/frontend && trunk build --release` (outputs to `apps/frontend/dist/`)
 
+## Hardware keyboard payloads
+
+The display's **Payloads** page works without a browser or a running host agent.
+Use A/B to select, X to run, and A+X to enter or leave the sidebar. macOS agent
+launch and debug presets are provided for German and US input layouts; select the
+layout matching the host's active input source. The launchers open Terminal, copy
+the packaged agent from the USB drive to `~/pico-agent/HOSTAGNT`, and start it.
+The display distinguishes completed keyboard input from a detected agent handshake
+and reports a timeout after 15 seconds without an agent. Missing packaged binaries
+disable the launchers. The keyboard test types `Hello from Pico!` into the focused
+application; focus a text editor before using it.
+
+Y stops the active keyboard job from any display page, including browser effects.
+Jobs never preempt each other: a second Run returns busy. Cancellation is terminal,
+with bounded key-release cleanup and no automatic restart after USB reconnect.
+Payloads/menu controls and the Stop press are consumed locally rather than also
+being delivered to a Python button-event handler. With no active job, Y retains
+its LED-color behavior outside Payloads.
+
 ## Host agent USB mass storage image
 - One-command local flow:
   - `scripts/fw-deploy-with-agent`

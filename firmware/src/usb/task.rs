@@ -90,6 +90,7 @@ pub async fn usb_task(
         let mut msc_state = crate::usb::msc::State::new();
 
         // Build USB device + classes
+        let mut link_handler = crate::usb::hid::LinkHandler;
         let mut builder = UsbBuilder::new(
             driver,
             cfg,
@@ -98,6 +99,8 @@ pub async fn usb_task(
             &mut msos_descriptor,
             &mut control_buf,
         );
+
+        builder.handler(&mut link_handler);
 
         // CDC-ACM class used by embassy-usb-logger
         let logger_class = UsbCdcAcmClass::new(

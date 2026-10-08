@@ -156,6 +156,20 @@ pub fn prepare(cfg: &Config) -> Result<()> {
         data: readme.into_bytes(),
     });
 
+    let mac = status
+        .iter()
+        .find(|target| target.volume_dir == "MAC")
+        .context("macOS image metadata missing")?;
+    super::presets::prepare(
+        cfg,
+        super::presets::AgentImage {
+            volume: core::str::from_utf8(&label_bytes)?.trim_end(),
+            directory: mac.volume_dir,
+            binary: mac.file_name,
+            present: mac.present,
+        },
+    )?;
+
     let image = build_image(&label_bytes, root_files, dir_specs)?;
     let out_path = cfg.out_dir.join("host-agent.img");
     fs::write(&out_path, image).context("write host-agent.img")?;

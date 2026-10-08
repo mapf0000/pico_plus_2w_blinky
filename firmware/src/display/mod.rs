@@ -20,6 +20,7 @@ mod input;
 mod page_common;
 mod page_daemon;
 mod page_logs;
+mod page_payloads;
 mod page_system;
 mod page_transfer;
 mod pages;
@@ -444,22 +445,34 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
         ticker.next().await;
 
         let buttons = input.sample(&btn_a, &btn_b, &btn_x, &btn_y);
-        if buttons.a.released {
-            publish_script_button("A");
-        }
-        if buttons.b.released {
-            publish_script_button("B");
-        }
-        if buttons.x.released {
-            publish_script_button("X");
-        }
-        if buttons.y.released {
-            publish_script_button("Y");
-        }
         let ui_signals = apply_input(&mut ui_state, &buttons, pages.menu_len());
         let page = pages.page_for_index(ui_state.menu_selected);
-
-        if buttons.y.released {
+        // Y is device-wide Stop while any job is reserved, including cleanup.
+        // Consume that edge even if cleanup has already committed its result.
+        let stopped = buttons.y.released && crate::usb::hid::active_job().is_some();
+        if stopped {
+            crate::usb::hid::stop_device();
+        }
+        let local_controls = matches!(page, PageId::Payloads)
+            || ui_state.menu_open
+            || ui_state.nav_blocked()
+            || ui_signals.nav_block_cleared
+            || stopped;
+        if !local_controls {
+            if buttons.a.released {
+                publish_script_button("A");
+            }
+            if buttons.b.released {
+                publish_script_button("B");
+            }
+            if buttons.x.released {
+                publish_script_button("X");
+            }
+            if buttons.y.released {
+                publish_script_button("Y");
+            }
+        }
+        if buttons.y.released && !stopped && !matches!(page, PageId::Payloads) {
             color_idx = (color_idx + 1) % LED_COLORS.len();
             log::info!("Y press -> LED color {}", LED_COLORS[color_idx].name);
         }

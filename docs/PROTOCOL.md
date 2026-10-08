@@ -720,6 +720,15 @@ Run is acknowledged only by an asynchronous terminal result after validation/exe
 
 IDs are fixed-width hexadecimal strings so JavaScript never loses integer precision. Status is `completed`, `rejected`, `cancelled`, or `usb_unavailable`. A WebSocket disconnect cancels the browser's wait and injects a catchable Python exception; the frontend never retries an effect with an unknown outcome.
 
+The effect wire format and statuses are unchanged by hardware presets. A Run while
+another local or browser job is reserved returns `rejected` without interrupting
+that job. Cancel matches the originating WebSocket generation and process/effect
+IDs; stale or unrelated cancels are no-ops. Session teardown cancels its own active
+job. Device Y may cancel either owner, reporting `cancelled` for a browser effect.
+Completion is routed only to the original generation. Cancellation never resumes
+or replays input; key-release cleanup precedes admission of the next job.
+
+
 Button releases are published to a waiting Python process as:
 
 ```json

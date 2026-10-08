@@ -1,4 +1,4 @@
-use embassy_futures::select::{Either as SelectEither, Either4 as SelectEither4, select, select4};
+use embassy_futures::select::{Either as SelectEither, Either3 as SelectEither3, select, select3};
 use picoserve::futures::Either;
 use picoserve::io::{Read, Write};
 use picoserve::response::ws;
@@ -7,10 +7,7 @@ use crate::host::{self, HostOs};
 use crate::http::transfer::{self, TRANSFER_TEXT_MAX};
 use crate::http::util::{escape_json_str, percent_decode_str};
 use crate::usb::ctrl::{CTRL_CHAN, CtrlCommand, MAX_SECURE_TRANSFER_FRAME, MAX_TRANSFER_PATH_LEN};
-use crate::usb::hid::{
-    HID_CANCEL, HID_CHAN, HID_RESULT_CHAN, HidCancel, HidCommand, HidResult, HidResultStatus,
-    MAX_BYTECODE, USB_READY,
-};
+use crate::usb::hid::{self, HidResult, HidResultStatus, MAX_BYTECODE, SubmitError, USB_READY};
 use crate::usb::usb_supervisor;
 use heapless::{String, Vec};
 
@@ -43,21 +40,20 @@ impl ws::WebSocketCallback for HelloWs {
         let mut buf = [0u8; WS_COMMAND_MAX];
         let mut exit = ConnectionExit::Peer;
         loop {
-            match select4(
+            match select3(
                 session.replaced(),
                 rx.next_message(&mut buf, core::future::pending::<()>()),
                 transfer::receive_frame(&session),
-                HID_RESULT_CHAN.receive(),
             )
             .await
             {
                 // Replacement is polled first, then browser control traffic,
                 // then bulk output. A saturated transfer cannot delay handoff.
-                SelectEither4::First(()) => {
+                SelectEither3::First(()) => {
                     exit = ConnectionExit::Replaced;
                     break;
                 }
-                SelectEither4::Second(result) => match result {
+                SelectEither3::Second(result) => match result {
                     Ok(Either::First(Ok(ws::Message::Text(s)))) => {
                         let cmd = s.trim();
                         if cmd.is_empty() {
@@ -114,7 +110,7 @@ impl ws::WebSocketCallback for HelloWs {
                             continue;
                         }
                         if kind == script_protocol::WS_BINARY_KIND_SCRIPT_EFFECT {
-                            let result = handle_script_binary(binary);
+                            let result = handle_script_binary(session.generation(), binary);
                             if let Some(result) = result {
                                 match send_hid_result_unless_replaced(&session, &mut tx, result)
                                     .await
@@ -145,18 +141,8 @@ impl ws::WebSocketCallback for HelloWs {
                     Ok(Either::Second(_)) => break,
                     Err(_) => break,
                 },
-                SelectEither4::Third(frame) => {
+                SelectEither3::Third(frame) => {
                     match send_frame_unless_replaced(&session, frame, &mut tx).await {
-                        Ok(false) => {}
-                        Ok(true) => {
-                            exit = ConnectionExit::Replaced;
-                            break;
-                        }
-                        Err(_) => break,
-                    }
-                }
-                SelectEither4::Fourth(result) => {
-                    match send_hid_result_unless_replaced(&session, &mut tx, result).await {
                         Ok(false) => {}
                         Ok(true) => {
                             exit = ConnectionExit::Replaced;
@@ -224,7 +210,7 @@ async fn send_frame_unless_replaced<W: Write>(
     }
 }
 
-fn handle_script_binary(frame: &[u8]) -> Option<HidResult> {
+fn handle_script_binary(session: u32, frame: &[u8]) -> Option<HidResult> {
     match script_protocol::decode(frame).ok()? {
         script_protocol::Message::Run { id, bytecode } => {
             if !USB_READY.load(core::sync::atomic::Ordering::SeqCst) {
@@ -246,26 +232,21 @@ fn handle_script_binary(frame: &[u8]) -> Option<HidResult> {
                     status: HidResultStatus::Rejected,
                 });
             }
-            match HID_CHAN.try_send(HidCommand::RunEffect {
-                request_id: id.request_id,
-                process_id: id.process_id,
-                effect_id: id.effect_id,
-                program,
-            }) {
-                Ok(()) => None,
-                Err(_) => Some(HidResult {
+            match hid::submit_browser(session, id, program) {
+                Ok(_) => None,
+                Err(error) => Some(HidResult {
                     request_id: id.request_id,
                     process_id: id.process_id,
                     effect_id: id.effect_id,
-                    status: HidResultStatus::Rejected,
+                    status: match error {
+                        SubmitError::UsbUnavailable => HidResultStatus::UsbUnavailable,
+                        SubmitError::Busy | SubmitError::Invalid => HidResultStatus::Rejected,
+                    },
                 }),
             }
         }
         script_protocol::Message::Cancel { id } => {
-            HID_CANCEL.signal(HidCancel {
-                process_id: id.process_id,
-                effect_id: id.effect_id,
-            });
+            hid::cancel_browser(session, id.process_id, id.effect_id);
             None
         }
     }
@@ -276,24 +257,7 @@ async fn send_hid_result_unless_replaced<W: Write>(
     tx: &mut ws::SocketTx<W>,
     result: HidResult,
 ) -> Result<bool, W::Error> {
-    let status = match result.status {
-        HidResultStatus::Completed => "completed",
-        HidResultStatus::Rejected => "rejected",
-        HidResultStatus::Cancelled => "cancelled",
-        HidResultStatus::UsbUnavailable => "usb_unavailable",
-    };
-    let mut event: String<TRANSFER_TEXT_MAX> = String::new();
-    let _ = core::fmt::write(
-        &mut event,
-        format_args!(
-            concat!(
-                "{{\"event_type\":\"script/effect_result\",\"version\":1,",
-                "\"request_id\":\"{:016x}\",\"process_id\":\"{:016x}\",",
-                "\"effect_id\":\"{:016x}\",\"status\":\"{}\"}}"
-            ),
-            result.request_id, result.process_id, result.effect_id, status,
-        ),
-    );
+    let event = hid::result_event(result);
     send_text_unless_replaced(session, tx, event.as_str()).await
 }
 

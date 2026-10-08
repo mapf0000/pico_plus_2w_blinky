@@ -7,6 +7,7 @@ extern crate std;
 use embassy_time::Timer;
 use embassy_usb::{class::hid::HidWriter as UsbHidWriter, driver::EndpointError};
 pub use keyboard_core::bytecode;
+pub mod jobs;
 use usbd_hid::descriptor::KeyboardReport;
 
 const DELAY_MOD_DOWN_MS: u64 = 8;
@@ -38,13 +39,21 @@ pub async fn release_all<'d, D>(w: &mut UsbHidWriter<'d, D, 8>)
 where
     D: embassy_usb::driver::Driver<'d>,
 {
+    let _ = release_all_checked(w).await;
+}
+
+/// Release keys while exposing USB failure to the execution service.
+pub async fn release_all_checked<'d, D>(w: &mut UsbHidWriter<'d, D, 8>) -> Result<(), EndpointError>
+where
+    D: embassy_usb::driver::Driver<'d>,
+{
     let release = KeyboardReport {
         keycodes: [0, 0, 0, 0, 0, 0],
         leds: 0,
         modifier: 0,
         reserved: 0,
     };
-    let _ = w.write_serialize(&release).await;
+    w.write_serialize(&release).await
 }
 
 #[inline]

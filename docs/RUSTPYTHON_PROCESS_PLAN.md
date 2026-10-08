@@ -1,5 +1,15 @@
 # RustPython browser process: greenfield one-session implementation plan
 
+## Firmware preset extension (2026-10-08)
+
+The historical DSL cutover below remains implemented. Standalone device launching
+is restored as typed Rust presets compiled by `build-support` through `keyboard-core`
+into static KBD1. This deliberately supersedes the statements requiring the absence
+of a hardware payload page: the new page contains no DSL compiler or Python runtime.
+It shares the tracked HID execution service with browser Python, with explicit
+job ownership, scoped cancellation, physical Y Stop, and no automatic preemption.
+See `ARCHITECTURE.md` and the root README for the current workflow and lifecycles.
+
 ## Status and objective
 
 Dependency upgrade review (2026-10-08, Rust 1.99.0): RustPython is now pinned
@@ -578,7 +588,7 @@ The one-session implementation is complete only when:
 5. Reconnection permits new effects without restarting Python.
 6. A non-yielding Python loop is hard-terminated without freezing the Yew UI.
 7. Tracked HID effects have completion and cancellation semantics and always release keys.
-8. The DSL editor/compiler, built-in payloads, payload display page, text/hex script RPC, and obsolete DSL workspace members are absent from the final tree.
+8. The DSL editor/compiler, built-in DSL scripts, text/hex script RPC, and obsolete DSL workspace members are absent. The firmware preset extension above permits a device page for statically compiled KBD1 presets.
 9. Worker assets and final firmware pass the flash/SRAM gates.
 10. The targeted build and test commands pass, or unavailable browser/hardware checks are explicitly recorded.
 

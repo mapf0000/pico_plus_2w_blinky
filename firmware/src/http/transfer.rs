@@ -97,6 +97,32 @@ pub fn queue_text(event: String<TRANSFER_TEXT_MAX>) -> Result<(), TransferQueueE
     })
 }
 
+/// Route keyboard completion to its originating browser, never a replacement.
+pub async fn send_text_for_generation(
+    generation: u32,
+    event: String<TRANSFER_TEXT_MAX>,
+) -> Result<(), TransferQueueError> {
+    if !is_active_generation(generation) {
+        return Err(TransferQueueError::NoClient);
+    }
+    let mut payload = Vec::new();
+    payload
+        .extend_from_slice(event.as_bytes())
+        .expect("text fits bounded event payload");
+    INPUT_EVENTS
+        .send(TransferEvent {
+            generation,
+            kind: EventKind::Text,
+            payload,
+        })
+        .await;
+    if is_active_generation(generation) {
+        Ok(())
+    } else {
+        Err(TransferQueueError::NoClient)
+    }
+}
+
 pub async fn send_text(event: String<TRANSFER_TEXT_MAX>) -> Result<(), TransferQueueError> {
     let mut payload = Vec::new();
     payload
@@ -176,6 +202,10 @@ pub(super) struct SessionGuard {
 }
 
 impl SessionGuard {
+    pub(super) fn generation(&self) -> u32 {
+        self.generation
+    }
+
     pub(super) async fn replaced(&self) {
         if CURRENT_SESSION_GENERATION.load(Ordering::Acquire) != self.generation {
             return;
@@ -192,6 +222,7 @@ impl SessionGuard {
 
 impl Drop for SessionGuard {
     fn drop(&mut self) {
+        crate::usb::hid::cancel_browser_session(self.generation);
         end_session(self.generation);
     }
 }

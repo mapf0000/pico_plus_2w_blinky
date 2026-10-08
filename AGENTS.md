@@ -21,7 +21,7 @@ Browser (Yew) <-- WebSocket :81/ws --> Firmware <-- USB CDC TLV --> Host agent
                                       +-- USB mass-storage host-agent image
 ```
 
-For keyboard automation, a real RustPython generator runs in a dedicated browser Worker. Yielded keyboard effects are lowered to bounded KBD1, transported with correlated IDs, strictly validated, and executed as USB HID reports.
+For keyboard automation, a real RustPython generator runs in a dedicated browser Worker. Yielded keyboard effects are lowered to bounded KBD1, transported with correlated IDs, strictly validated, and executed as USB HID reports. Hardware Payloads are typed Rust presets compiled at build time through the same keyboard core. Both producers share one non-preempting execution service with job-scoped cancellation and device-wide Y Stop.
 
 Detailed references:
 
@@ -47,7 +47,7 @@ Detailed references:
 - `src/main.rs`: board initialization, Wi-Fi AP, network stack, task startup, and pin assignments.
 - `src/http/`: HTTP/WebSocket server, RPC routes, and embedded frontend serving.
 - `src/usb/`: USB HID, CDC control/relay protocol, MSC image, and USB supervision.
-- `src/display/`: on-device pages, input, rendering, and status views.
+- `src/display/`: on-device pages, including standalone Payloads, input, rendering, and status views.
 - `src/device_config.rs`: persistent flash-backed configuration. Its constants must agree with `memory.x`.
 - `src/psram_pool.rs`: external-memory allocation for HTTP buffers.
 - `memory.x`: 16 MiB flash layout, including two persistent 4 KiB configuration slots.
@@ -87,7 +87,7 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 - `firmware-exec`: strict, two-pass `no_std` KBD1 validator/executor.
 - `script-protocol`: versioned correlated browser-to-firmware effect envelopes.
 - `bytecode-constants`: cross-target bytecode limits.
-- `build-support`: firmware build-time frontend/Worker compilation, compressed asset embedding, linker setup, and MSC image generation.
+- `build-support`: firmware build-time frontend/Worker compilation, compressed asset embedding, typed keyboard-preset generation, linker setup, and MSC image generation.
 
 ### Scripts and configuration
 
@@ -304,6 +304,7 @@ Do not silently reuse an existing tag or reinterpret a payload without versionin
 - RustPython runs only in the dedicated Worker with stdlib/import/host/JS bridges disabled. Every external action must be a yielded, bounded effect.
 - Preserve the 32 KiB source, 1,024-line, 500 ms step, 1,024-character text, 4,096-byte KBD1, and one-outstanding-effect limits unless all endpoints and docs change together.
 - Hard cancellation is `Worker.terminate()`; do not rely on RustPython signal interruption on wasm.
+- Hardware presets contain no interpreter. Preserve one-job admission through key-release cleanup, scoped browser cancellation, independent local completion, and generation-owned browser results when changing the shared HID service. Run `cargo test -p firmware-exec -p build-support` for preset/executor changes.
 - Add process `send`/`throw`, keyboard lowering, strict firmware validation, correlation, disconnect, and stale-result tests at the narrowest layer.
 
 ## Build-system and dependency guidance

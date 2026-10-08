@@ -388,6 +388,39 @@ Process path:
 
 The browser never retries a keyboard effect because its outcome may be unknown after disconnect. Closing/reloading the tab terminates the Worker; no Python state is persisted to the Pico.
 
+### Firmware-resident keyboard presets
+
+`crates/build-support/src/presets.rs` defines typed Rust keyboard operations and
+lowers them with `keyboard-core` during the firmware build. Generated static KBD1
+and bounded metadata are included by the hardware Payloads page. Launcher paths
+and availability come from the same normalized volume label and target metadata
+that build the MSC image. The firmware adds no interpreter, heap allocation, or
+second bytecode format. Python remains a browser-resident process.
+
+`usb/hid.rs` is the sole execution service for local presets and browser effects.
+The allocation-free `firmware-exec::jobs::Controller` reserves one firmware-issued
+job handle before queueing, then transitions Queued → Running → Releasing → Idle.
+New requests are rejected while any job is reserved. Cancellation is a sticky flag
+scoped to that handle; browser requests additionally match WebSocket generation,
+process and effect IDs. Session teardown cancels only that session's job. Display
+Y explicitly stops any active owner. Presets retain ownership for the whole sequence.
+
+The execution future is raced against matching cancellation and USB link loss.
+Terminal decisions commit once, before an all-zero report with a 250 ms timeout.
+Failed cleanup closes readiness; after USB reconnect a successful zero report is
+required before admission reopens. Bus reset/disconfiguration closes admission even
+during a programmed delay. Dropping the USB task also clears reserved/queued work.
+Local completion goes to a dedicated signal, independent of a browser. A singleton
+completion task and one small completion slot survive USB task shutdown, claim each
+result once, and keep admission closed until browser delivery is enqueued or the
+originating session disappears. Browser completion uses the existing bounded event
+queue with backpressure and the original
+session generation; a replacement socket cannot receive an old job's result.
+
+The display reports keyboard completion separately from host-agent detection and
+waits up to 15 seconds for the latter. Local controls are consumed before publishing
+button events to Python, preventing one press from triggering two keyboard producers.
+
 ## State ownership and concurrency
 
 | State | Owner | Synchronization/lifetime |
@@ -399,7 +432,7 @@ The browser never retries a keyboard effect because its outcome may be unknown a
 | Transfer chunks | Browser IndexedDB | Serialized/batched JavaScript persistence queue |
 | Transfer relay states | Firmware USB control task | Task-local fixed-capacity vector, maximum four |
 | WebSocket transfer data plane | Firmware | Two port-81 acceptors hand off one generation-owned active browser session. A singleton pump owns the 16-event input channel, one-frame output channel, and unique PSRAM batch slot. |
-| USB/HID commands/results | Firmware | One 4,096-byte command slot and eight small result slots; cancellation releases all keys |
+| USB/HID commands/results | Firmware | One command slot (4,096-byte browser effect or flash preset reference), a small job controller, one local-result signal and one browser-completion slot/router task; browser delivery uses the existing generation-owned event queue |
 | Host-agent health | Firmware | Critical-section mutex plus atomics with 25-second freshness |
 | Persistent USB identity | Firmware | Embassy mutex plus two alternating flash slots |
 | Serial frames | Host agent | Tokio MPSC reader/writer queues, each depth 64 |

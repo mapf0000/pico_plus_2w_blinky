@@ -384,6 +384,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "flate2",
+ "keyboard-core",
  "which",
 ]
 

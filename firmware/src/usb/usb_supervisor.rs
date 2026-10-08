@@ -14,6 +14,11 @@ static USB_STOPPED: Signal<ThreadModeRawMutex, ()> = Signal::new();
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 pub fn init(spawner: Spawner) {
+    let _ = crate::log_spawn(
+        &spawner,
+        "hid_completion",
+        crate::usb::hid::completion_task(),
+    );
     // Spawn a single USB task that will wait for START_REQ, then run sessions on demand.
     let _ = crate::log_spawn(
         &spawner,
