@@ -2,6 +2,16 @@
 
 ## Status and objective
 
+Dependency upgrade review (2026-10-08, Rust 1.99.0): RustPython remains pinned
+to 0.5.0. The 0.6.0 release fails to compile with its latest permitted Ruff
+0.16.10 dependencies. Constraining the Ruff family to 0.16.5 allows compilation,
+but seven of eight native Worker tests then fail during essential interpreter
+initialization with a `RecursionError` while importing `codecs`. Its compressed
+release Worker also measures 4,527,096 bytes, exceeding the unchanged 4,500,000-byte
+size gate. Revisit the upgrade when minimal-VM initialization and artifact size
+both pass; do not enable host/stdlib bridges or raise capacities to bypass these
+failures.
+
 This document defines one bounded implementation session for replacing the existing user-facing DSL scripting system with a single long-lived RustPython process in the Web frontend.
 
 Implementation status (2026-08-17): the greenfield cutover is implemented. The former DSL editor, parser/linker/WASM adapter, built-in scripts, payload generator/page, and `SCRIPT_RUN_HEX` path have been removed. RustPython 0.5.0 is built as a dedicated Worker; its 12,011,052-byte post-bindgen WASM is stored as deterministic gzip (3,739,823 bytes in the validated release build) and served with `Content-Encoding: gzip`. The linked firmware uses 5,320,832 of the 8,380,416-byte `FLASH` region, leaving 3,059,584 bytes (2.92 MiB). Its statically allocated striped SRAM ends at byte 360,928 of 524,288, leaving 163,360 bytes before runtime stacks; the two direct 4 KiB banks remain separate.

@@ -109,6 +109,13 @@ Large fixed allocations to review before changing memory use include:
 
 The RustPython cutover release build measures 357,248 bytes of `.bss`, 2,644 bytes of `.data`, and 1,024 bytes of `.uninit` in the 512 KiB `RAM` region. Including linker alignment, the last static allocation ends at byte 360,928, leaving 163,360 bytes before runtime stack use. The one-slot HID command channel owns one bounded 4,096-byte effect; the Python VM and its heap live in the browser and consume no device SRAM. A prior failed pooled-batching build used 465,888 bytes of `.bss`: batching state had become part of all four HTTP task futures. Keeping batching in one dedicated transfer task and placing its uniquely owned batch slot in PSRAM avoids that multiplication. The two WebSocket acceptors share the single logical transfer path; they duplicate only their bounded connection/task state. Treat async future sizes and task-pool multiplicity as part of every SRAM review; successful linking alone does not guarantee enough runtime headroom.
 
+The dependency update validated with Rust 1.99.0 (2026-10-08) uses 5,318,368
+bytes of the 8,380,416-byte application flash region, leaving 3,062,048 bytes.
+Static allocations end at byte 236,220 of striped SRAM, leaving 288,068 bytes
+before runtime stacks. The compressed RustPython 0.5 Worker is 3,744,774 bytes,
+below its 4,500,000-byte hard limit. The linker aligns `.text` to eight bytes
+after the boot information; flash regions and persistent slots are unchanged.
+
 ### External PSRAM
 
 The default `psram` feature probes the external memory through QMI CS1 using an APS6404L configuration. The reported board capacity is 8 MiB.

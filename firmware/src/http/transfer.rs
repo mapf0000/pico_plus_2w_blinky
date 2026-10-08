@@ -5,7 +5,7 @@ use embassy_futures::select::{Either, select};
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel, watch::Watch};
 use embassy_time::{Duration, Timer};
 use heapless::{String, Vec};
-use picoserve::{io::embedded_io_async, response::ws};
+use picoserve::{io::Write, response::ws};
 use portable_atomic::{AtomicU32, AtomicUsize};
 #[cfg(not(feature = "psram"))]
 use static_cell::StaticCell;
@@ -294,7 +294,7 @@ fn reclaim_frame(frame: OutboundFrame) {
     }
 }
 
-pub(super) async fn send_frame<W: embedded_io_async::Write>(
+pub(super) async fn send_frame<W: Write>(
     frame: OutboundFrame,
     tx: &mut ws::SocketTx<W>,
 ) -> Result<(), W::Error> {

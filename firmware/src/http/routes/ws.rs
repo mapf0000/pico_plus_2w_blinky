@@ -1,7 +1,7 @@
 use embassy_futures::select::{Either as SelectEither, Either4 as SelectEither4, select, select4};
 use picoserve::futures::Either;
-use picoserve::io::embedded_io_async;
-use picoserve::response::ws; // for Read/Write trait bounds
+use picoserve::io::{Read, Write};
+use picoserve::response::ws;
 
 use crate::host::{self, HostOs};
 use crate::http::transfer::{self, TRANSFER_TEXT_MAX};
@@ -27,7 +27,7 @@ pub(crate) async fn ws_handler(
 struct HelloWs;
 
 impl ws::WebSocketCallback for HelloWs {
-    async fn run<R: embedded_io_async::Read, W: embedded_io_async::Write<Error = R::Error>>(
+    async fn run<R: Read, W: Write<Error = R::Error>>(
         self,
         mut rx: ws::SocketRx<R>,
         mut tx: ws::SocketTx<W>,
@@ -189,7 +189,7 @@ enum ConnectionExit {
     Replaced,
 }
 
-async fn send_text_unless_replaced<W: embedded_io_async::Write>(
+async fn send_text_unless_replaced<W: Write>(
     session: &transfer::SessionGuard,
     tx: &mut ws::SocketTx<W>,
     text: &str,
@@ -200,7 +200,7 @@ async fn send_text_unless_replaced<W: embedded_io_async::Write>(
     }
 }
 
-async fn send_pong_unless_replaced<W: embedded_io_async::Write>(
+async fn send_pong_unless_replaced<W: Write>(
     session: &transfer::SessionGuard,
     tx: &mut ws::SocketTx<W>,
     payload: &[u8],
@@ -211,7 +211,7 @@ async fn send_pong_unless_replaced<W: embedded_io_async::Write>(
     }
 }
 
-async fn send_frame_unless_replaced<W: embedded_io_async::Write>(
+async fn send_frame_unless_replaced<W: Write>(
     session: &transfer::SessionGuard,
     frame: transfer::OutboundFrame,
     tx: &mut ws::SocketTx<W>,
@@ -271,7 +271,7 @@ fn handle_script_binary(frame: &[u8]) -> Option<HidResult> {
     }
 }
 
-async fn send_hid_result_unless_replaced<W: embedded_io_async::Write>(
+async fn send_hid_result_unless_replaced<W: Write>(
     session: &transfer::SessionGuard,
     tx: &mut ws::SocketTx<W>,
     result: HidResult,

@@ -63,7 +63,7 @@ pub fn derive_session_psk(
         return Err(CryptoError::BootstrapSecret);
     }
     let mut code_bytes = Zeroizing::new([0u8; 16]);
-    for (index, chunk) in code.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in code.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let text = core::str::from_utf8(chunk).map_err(|_| CryptoError::BootstrapSecret)?;
         code_bytes[index] =
             u8::from_str_radix(text, 16).map_err(|_| CryptoError::BootstrapSecret)?;

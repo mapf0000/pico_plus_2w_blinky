@@ -33,7 +33,8 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
 - Trunk for building the Web UI
   - `cargo install trunk`
 - wasm-bindgen CLI for the separately built RustPython Worker
-  - `cargo install wasm-bindgen-cli --version 0.2.126`
+  - `cargo install wasm-bindgen-cli --version 0.2.129 --locked`
+  - The CLI version must match the workspace's `wasm-bindgen` dependency.
 - Picotool for flashing
   - macOS: `brew install picotool` (or build from source: https://github.com/raspberrypi/picotool)
 
