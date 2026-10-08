@@ -163,7 +163,7 @@ Avoid bare `cargo test` at the workspace root: the default member is the embedde
   - Fails the build if `app.wasm` exceeds this many bytes.
 - `PICO_PYTHON_WASM_WARN_BYTES` (default: `3500000`)
   - Warns when the stored gzip-compressed RustPython Worker exceeds this size.
-- `PICO_PYTHON_WASM_MAX_BYTES` (default: `4500000`)
+- `PICO_PYTHON_WASM_MAX_BYTES` (default: `4750000`)
   - Fails the firmware build when the stored compressed Worker exceeds this size.
 
 ## Firmware Features

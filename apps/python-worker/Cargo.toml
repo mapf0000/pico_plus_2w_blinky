@@ -17,10 +17,18 @@ keyboard-core = { path = "../../crates/keyboard-core", features = [
     "layout_mac_pt_br",
     "layout_mac_de_de",
 ] }
-# 0.6.0 fails minimal-VM initialization tests and exceeds the Worker size gate.
-# See docs/RUSTPYTHON_PROCESS_PLAN.md for the dependency upgrade measurements.
-rustpython-common = { version = "=0.5.0", features = ["wasm_js"] }
-rustpython-vm = { version = "=0.5.0", default-features = false, features = ["compiler", "serde"] }
+rustpython-common = { version = "=0.6.0", features = ["wasm_js"] }
+rustpython-vm = { version = "=0.6.0", default-features = false, features = ["compiler", "serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 wasm-bindgen = "0.2.129"
+
+# RustPython 0.6.0 uses the Ruff 0.16.5 AST API; 0.16.10 breaks it.
+rustpython-ruff_python_ast = "=0.16.5"
+rustpython-ruff_python_parser = "=0.16.5"
+rustpython-ruff_python_trivia = "=0.16.5"
+rustpython-ruff_source_file = "=0.16.5"
+rustpython-ruff_text_size = "=0.16.5"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3.79"

@@ -109,12 +109,38 @@ Large fixed allocations to review before changing memory use include:
 
 The RustPython cutover release build measures 357,248 bytes of `.bss`, 2,644 bytes of `.data`, and 1,024 bytes of `.uninit` in the 512 KiB `RAM` region. Including linker alignment, the last static allocation ends at byte 360,928, leaving 163,360 bytes before runtime stack use. The one-slot HID command channel owns one bounded 4,096-byte effect; the Python VM and its heap live in the browser and consume no device SRAM. A prior failed pooled-batching build used 465,888 bytes of `.bss`: batching state had become part of all four HTTP task futures. Keeping batching in one dedicated transfer task and placing its uniquely owned batch slot in PSRAM avoids that multiplication. The two WebSocket acceptors share the single logical transfer path; they duplicate only their bounded connection/task state. Treat async future sizes and task-pool multiplicity as part of every SRAM review; successful linking alone does not guarantee enough runtime headroom.
 
-The dependency update validated with Rust 1.99.0 (2026-10-08) uses 5,318,368
-bytes of the 8,380,416-byte application flash region, leaving 3,062,048 bytes.
+The dependency update validated with Rust 1.99.0 (2026-10-08) uses 6,100,672
+bytes of the 8,380,416-byte application flash region, leaving 2,279,744 bytes.
 Static allocations end at byte 236,220 of striped SRAM, leaving 288,068 bytes
-before runtime stacks. The compressed RustPython 0.5 Worker is 3,744,774 bytes,
-below its 4,500,000-byte hard limit. The linker aligns `.text` to eight bytes
+before runtime stacks. The compressed RustPython 0.6 Worker is 4,527,096 bytes,
+below its 4,750,000-byte hard limit. The linker aligns `.text` to eight bytes
 after the boot information; flash regions and persistent slots are unchanged.
+
+The display System page shows the configured CPU clock in MHz and static
+striped SRAM use from the linker boundaries (`_ram_start`, `_ram_end`, and
+`__euninit`), rounded up to KiB. This includes static buffers, task storage,
+and alignment in the 512 KiB region; it excludes the two direct 4 KiB banks
+and runtime stack use. Firmware has no general heap allocator. CPU load and
+peak stack use are not instrumented, so the former heap/stack/load placeholders
+are omitted. An ADC read failure displays `Temp: read error`.
+
+The display metrics update adds 640 bytes of application flash and saves
+64 bytes of static SRAM compared with the dependency-update build above.
+The linked release uses 6,101,312 application flash bytes (2,279,104 remain)
+and 236,156 striped SRAM bytes (288,132 remain before runtime stacks).
+
+Validation for the display metrics update (2026-10-08): all commands below
+passed. Flash verification and reboot succeeded, both CDC interfaces
+enumerated, and all 11 USB control smoke cases passed. Screen rendering was
+not visually inspected remotely.
+
+```sh
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+cargo fmt --all -- --check
+git diff --check
+picotool load -u -v -x -t elf target/thumbv8m.main-none-eabihf/release/pico_rust
+target/debug/device-test --wait-secs 45
+```
 
 ### External PSRAM
 
@@ -305,7 +331,7 @@ Use this checklist for changes to startup, pins, memory, network, USB, transfer,
 - [ ] Buttons A, B, X, and Y register one debounced action each.
 - [ ] RGB LED red/green/blue channels illuminate correctly and turn fully off.
 - [ ] Backlight remains enabled.
-- [ ] System page temperature, flash, PSRAM, and uptime values are credible.
+- [ ] System page CPU clock, static SRAM, temperature, flash, PSRAM, and uptime values are credible.
 
 ### Wi-Fi and HTTP
 

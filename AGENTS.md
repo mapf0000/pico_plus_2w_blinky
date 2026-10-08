@@ -215,6 +215,17 @@ cargo test -p keyboard-core --features "std layout_win_en_gb layout_win_pt_br la
 cargo test -p python-worker
 ```
 
+Worker tests also support browser execution on the actual wasm release target:
+
+```sh
+cargo test -p python-worker --release --target wasm32-unknown-unknown
+```
+
+This requires a compatible WebDriver/browser; set `GECKODRIVER` or
+`CHROMEDRIVER` to its executable when it is not on `PATH`. Native tests optimize
+only `rustpython-vm` to keep RustPython 0.6 codec bootstrap within the default
+test-thread stack, with debug assertions and stack guards enabled.
+
 Also compile affected Worker/executor code for its real target. If bytecode format or limits change, update and test `keyboard-core`, `firmware-exec`, `bytecode-constants`, `script-protocol`, frontend encoding, and firmware decoding.
 
 ### Frontend changes

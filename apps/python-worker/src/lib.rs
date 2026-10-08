@@ -308,7 +308,7 @@ fn parse_effect(
         return Err("main() yielded a value that is not a Pico effect".to_owned());
     }
     let payload = vm
-        .get_attribute_opt(yielded, "payload")
+        .get_attribute_opt(&yielded, "payload")
         .map_err(|error| render_exception(vm, &error))?
         .ok_or_else(|| "effect payload is missing".to_owned())?;
     let value = serde_json::to_value(py_serde::PyObjectSerializer::new(vm, &payload))
@@ -418,7 +418,7 @@ impl PythonProcess {
             let scope = vm.new_scope_with_builtins();
             let code = vm
                 .compile(PRELUDE, Mode::Exec, "<pico-prelude>".to_owned())
-                .map_err(|error| vm.new_syntax_error(&error, Some(PRELUDE)))?;
+                .map_err(|error| error.into_pyexception(vm, Some(PRELUDE)))?;
             vm.run_code_obj(code, scope.clone())?;
             let effect_class = scope
                 .globals
@@ -480,7 +480,7 @@ impl PythonProcess {
                 Err(error) => {
                     return StepResult::Error {
                         phase: "syntax",
-                        message: render_exception(vm, &vm.new_syntax_error(&error, Some(source))),
+                        message: render_exception(vm, &error.into_pyexception(vm, Some(source))),
                     };
                 }
             };
@@ -683,7 +683,7 @@ def main():
 "#;
         let code = vm
             .compile(source, Mode::Exec, "<generator-smoke>".to_owned())
-            .map_err(|err| py_error(vm.new_syntax_error(&err, Some(source))))?;
+            .map_err(|err| py_error(err.into_pyexception(vm, Some(source))))?;
         vm.run_code_obj(code, scope.clone()).map_err(py_error)?;
 
         let main = scope
@@ -722,6 +722,9 @@ def main():
 mod tests {
     use super::*;
 
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
     fn response(value: String) -> serde_json::Value {
         serde_json::from_str(&value).expect("worker response must be JSON")
     }
@@ -731,7 +734,8 @@ mod tests {
             .expect("keyboard effect bytecode")
     }
 
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn process_preserves_state_across_effects() {
         let mut process = PythonProcess::new().expect("prelude should initialize");
         let first = response(process.start(
@@ -755,7 +759,8 @@ def main():
         assert_eq!(response(process.resume("null"))["status"], "completed");
     }
 
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn device_failure_is_catchable_in_python() {
         let mut process = PythonProcess::new().expect("prelude should initialize");
         let first = response(process.start(
@@ -777,7 +782,8 @@ def main():
         assert!(keyboard_core::bytecode::validate(&bytecode(&caught)).is_ok());
     }
 
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn invalid_yield_and_missing_layout_are_rejected() {
         let mut process = PythonProcess::new().expect("prelude should initialize");
         let missing = response(process.start("def main():\n    yield tap(\"A\")\n"));
@@ -791,7 +797,8 @@ def main():
         assert_eq!(invalid["phase"], "effect");
     }
 
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn source_limits_are_checked_before_parsing() {
         let mut process = PythonProcess::new().expect("prelude should initialize");
         let source = "x\n".repeat(MAX_SOURCE_LINES + 1);
@@ -800,7 +807,8 @@ def main():
         assert_eq!(result["phase"], "limits");
     }
 
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn diagnostic_truncation_preserves_utf8_boundaries() {
         let message = "é".repeat(MAX_DIAGNOSTIC_BYTES);
         let bounded = bounded_message(message);
@@ -809,7 +817,8 @@ def main():
         assert!(bounded.ends_with("[diagnostic truncated]"));
     }
 
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn generator_retains_loop_state_for_one_hundred_steps() {
         let mut process = PythonProcess::new().expect("prelude should initialize");
         let first = response(process.start(
@@ -835,7 +844,8 @@ def main():
         }
     }
 
-    #[test]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn every_supervisor_exception_is_catchable() {
         for (code, class_name) in [
             ("device_disconnected", "DeviceDisconnected"),
@@ -863,19 +873,54 @@ def main():
         }
     }
 
-    #[test]
-    fn imports_are_unavailable() {
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn generator_send_and_throw_smoke() {
+        assert_eq!(generator_smoke().expect("generator smoke"), "1,2,3,true");
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn compile_errors_retain_python_diagnostics() {
+        let mut process = PythonProcess::new().expect("prelude should initialize");
+        let result = response(process.start("def main(:\n    yield sleep(0)\n"));
+        assert_eq!(result["status"], "error");
+        assert_eq!(result["phase"], "syntax");
+        assert!(result["message"].as_str().unwrap().contains("SyntaxError"));
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn core_codecs_work_without_unsafe_builtins() {
         let mut process = PythonProcess::new().expect("prelude should initialize");
         let result = response(process.start(
             r#"
 layout("win_en-GB")
-import os
 
 def main():
-    yield sleep(0)
+    for name in ("open", "__import__", "eval", "exec", "compile", "input", "print"):
+        if hasattr(__builtins__, name):
+            raise RuntimeError("unsafe builtin is exposed: " + name)
+    value = "Grüße".encode("utf-8")
+    if value.decode("utf-8") != "Grüße":
+        raise RuntimeError("core codec roundtrip failed")
+    yield sleep(len(value))
 "#,
         ));
-        assert_eq!(result["status"], "error");
-        assert_eq!(result["phase"], "startup");
+        assert_eq!(result["status"], "effect", "{result}");
+        assert_eq!(result["effect"]["milliseconds"], 7);
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn imports_are_unavailable() {
+        for module in ["os", "sys", "codecs", "_io", "js"] {
+            let mut process = PythonProcess::new().expect("prelude should initialize");
+            let result = response(process.start(&format!(
+                "layout(\"win_en-GB\")\nimport {module}\n\ndef main():\n    yield sleep(0)\n"
+            )));
+            assert_eq!(result["status"], "error", "{module} was imported");
+            assert_eq!(result["phase"], "startup");
+        }
     }
 }

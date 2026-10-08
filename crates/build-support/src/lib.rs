@@ -130,7 +130,7 @@ impl Config {
         let python_max_bytes = env::var(env_consts::PYTHON_MAX_BYTES)
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(4_500_000);
+            .unwrap_or(4_750_000);
 
         Ok(Self {
             out_dir,

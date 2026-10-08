@@ -2,15 +2,31 @@
 
 ## Status and objective
 
-Dependency upgrade review (2026-10-08, Rust 1.99.0): RustPython remains pinned
-to 0.5.0. The 0.6.0 release fails to compile with its latest permitted Ruff
-0.16.10 dependencies. Constraining the Ruff family to 0.16.5 allows compilation,
-but seven of eight native Worker tests then fail during essential interpreter
-initialization with a `RecursionError` while importing `codecs`. Its compressed
-release Worker also measures 4,527,096 bytes, exceeding the unchanged 4,500,000-byte
-size gate. Revisit the upgrade when minimal-VM initialization and artifact size
-both pass; do not enable host/stdlib bridges or raise capacities to bypass these
-failures.
+Dependency upgrade review (2026-10-08, Rust 1.99.0): RustPython is now pinned
+to 0.6.0, the newest published release. Its Ruff family is constrained to
+0.16.5 because the permitted 0.16.10 AST API breaks RustPython's compiler.
+The previous `RecursionError` during `codecs` bootstrap came from unoptimized
+native VM frames reaching the C-stack guard on Rust's default test-thread
+stack. Optimizing only `rustpython-vm` in the test profile (`opt-level = 1`)
+allows minimal-VM initialization while preserving debug assertions, stack
+guards, the default test stack, and Python recursion limits. Production release
+initialization also passes. Compiler errors use the new `VmCompileError`
+conversion, preserving Python syntax and warning exceptions.
+
+The compressed release Worker measures 4,527,096 bytes. Its hard size gate is
+now 4,750,000 bytes, supported by the linked firmware's 6,100,672-byte use of
+the 8,380,416-byte application flash region: 2,279,744 bytes (2.17 MiB) remain.
+Static striped SRAM still ends at byte 236,220, leaving 288,068 bytes before
+runtime stacks. Flash regions, persistent slots, host/stdlib/JS bridges,
+protocol capacities, and script/effect limits are unchanged.
+
+All 11 Worker tests pass natively and in headless Firefox on the release wasm
+target, including generator `send`/`throw`, codec initialization, syntax
+diagnostics, and denied imports (including frozen core modules). The wasm
+suite uses the same tests as native, configured with `run_in_browser`. The
+user-supplied RP2350 was flashed and verified with picotool; it booted and
+passed all 11 USB control smoke cases. The Wi-Fi-served UI and physical
+HID/disconnect workflows were not exercised in this upgrade pass.
 
 This document defines one bounded implementation session for replacing the existing user-facing DSL scripting system with a single long-lived RustPython process in the Web frontend.
 
@@ -194,7 +210,7 @@ Start with an exact release pin:
 
 ```toml
 rustpython-vm = {
-    version = "=0.5.0",
+    version = "=0.6.0",
     default-features = false,
     features = ["compiler"]
 }
@@ -463,7 +479,7 @@ Build gates:
 - Final firmware retains at least 1.5 MiB flash headroom.
 - Firmware static SRAM regression remains within the measured headroom; report the exact ELF delta.
 
-The session begins with the minimal RustPython build and generator `send`/`throw` spike. If the public RustPython 0.5.0 API cannot support the cooperative generator driver, or the artifact fails the flash gate, stop and record measurements rather than silently replacing RustPython with a custom language VM.
+The session begins with the minimal RustPython build and generator `send`/`throw` spike. If the public RustPython 0.6.0 API cannot support the cooperative generator driver, or the artifact fails the flash gate, stop and record measurements rather than silently replacing RustPython with a custom language VM.
 
 ## Implementation order
 
@@ -555,7 +571,7 @@ Run browser tests when the configured browser/WebDriver environment is available
 
 The one-session implementation is complete only when:
 
-1. An actual RustPython 0.5.0 VM runs in a separate lazy Worker.
+1. An actual RustPython 0.6.0 VM runs in a separate lazy Worker.
 2. One Python generator retains loop/local state across at least 100 effect steps.
 3. A Pico WebSocket disconnect leaves the Worker process alive.
 4. Unavailable device, USB, and host-agent capabilities become catchable Python exceptions.

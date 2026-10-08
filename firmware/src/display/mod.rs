@@ -175,6 +175,30 @@ fn psram_status_line() -> String<32> {
     }
 }
 
+fn static_sram_status_line() -> String<32> {
+    unsafe extern "C" {
+        static _ram_start: u8;
+        static _ram_end: u8;
+        static __euninit: u8;
+    }
+    // Linker addresses delimit striped SRAM and its static allocations,
+    // including alignment, .data, .bss, and .uninit. No memory is read here.
+    // The remainder also holds runtime stacks; it is not a free-heap metric.
+    let start = core::ptr::addr_of!(_ram_start) as usize;
+    let end = core::ptr::addr_of!(_ram_end) as usize;
+    let static_end = core::ptr::addr_of!(__euninit) as usize;
+    let total = end.saturating_sub(start);
+    let used = static_end.saturating_sub(start).min(total);
+    let mut line: String<32> = String::new();
+    let _ = write!(
+        line,
+        "SRAM: {} / {} KiB static",
+        used.div_ceil(1024),
+        total / 1024
+    );
+    line
+}
+
 fn firmware_size_bytes() -> usize {
     unsafe extern "C" {
         static __start_block_addr: u8;
@@ -238,10 +262,9 @@ fn flash_status_line(total: usize, free: usize) -> String<48> {
 
 struct SystemMetricsSnapshot {
     uptime_line: String<32>,
-    cpu_line: String<32>,
+    cpu_clock_line: String<32>,
     temp_line: String<32>,
-    heap_line: String<32>,
-    stack_line: String<32>,
+    sram_line: String<32>,
     psram_line: String<32>,
     flash_line: String<48>,
 }
@@ -250,6 +273,7 @@ struct SystemMetricsTracker {
     start_instant: Instant,
     last_uptime_secs: u64,
     flash_line: String<48>,
+    sram_line: String<32>,
 }
 
 impl SystemMetricsTracker {
@@ -258,6 +282,7 @@ impl SystemMetricsTracker {
             start_instant: Instant::now(),
             last_uptime_secs: 0,
             flash_line: flash_status_line(flash_total, flash_free),
+            sram_line: static_sram_status_line(),
         }
     }
 
@@ -283,7 +308,12 @@ impl SystemMetricsTracker {
             .unwrap_or_default();
         let uptime_text = format_hms(uptime);
         let uptime_line: String<32> = build_text_line("Uptime: ", uptime_text.as_str());
-        let cpu_line: String<32> = build_text_line("CPU: ", "n/a");
+        let mut cpu_clock_line: String<32> = String::new();
+        let _ = write!(
+            cpu_clock_line,
+            "CPU clock: {}MHz",
+            embassy_rp::clocks::clk_sys_freq() / 1_000_000
+        );
         let temp_line: String<32> = match adc.read(temp_channel).await {
             Ok(raw) => {
                 let temp_c = adc_temp_to_celsius(raw);
@@ -291,19 +321,17 @@ impl SystemMetricsTracker {
                 let _ = write!(s, "Temp: {:.1}C", temp_c);
                 s
             }
-            Err(_) => build_text_line("Temp: ", "n/a"),
+            Err(_) => build_text_line("Temp: ", "read error"),
         };
-        let heap_line: String<32> = build_text_line("Heap: ", "n/a");
-        let stack_line: String<32> = build_text_line("Stack: ", "n/a");
+        let sram_line = self.sram_line.clone();
         let psram_line: String<32> = psram_status_line();
         let flash_line = self.flash_line.clone();
 
         SystemMetricsSnapshot {
             uptime_line,
-            cpu_line,
+            cpu_clock_line,
             temp_line,
-            heap_line,
-            stack_line,
+            sram_line,
             psram_line,
             flash_line,
         }
@@ -485,10 +513,9 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
                                 ap_ssid,
                                 metrics: SystemMetrics {
                                     uptime: snapshot.uptime_line.as_str(),
-                                    cpu: snapshot.cpu_line.as_str(),
+                                    cpu_clock: snapshot.cpu_clock_line.as_str(),
                                     temp: snapshot.temp_line.as_str(),
-                                    heap: snapshot.heap_line.as_str(),
-                                    stack: snapshot.stack_line.as_str(),
+                                    sram: snapshot.sram_line.as_str(),
                                     psram: snapshot.psram_line.as_str(),
                                     flash: snapshot.flash_line.as_str(),
                                 },

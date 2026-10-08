@@ -9,10 +9,9 @@ use super::pages::{Page, PageContext, PageInput, PageRenderArgs, PageRenderData}
 
 pub struct SystemMetrics<'a> {
     pub uptime: &'a str,
-    pub cpu: &'a str,
+    pub cpu_clock: &'a str,
     pub temp: &'a str,
-    pub heap: &'a str,
-    pub stack: &'a str,
+    pub sram: &'a str,
     pub psram: &'a str,
     pub flash: &'a str,
 }
@@ -20,10 +19,9 @@ pub struct SystemMetrics<'a> {
 pub struct SystemPageState {
     prev_ap_line: String<32>,
     prev_uptime_line: String<32>,
-    prev_cpu_line: String<32>,
+    prev_cpu_clock_line: String<32>,
     prev_temp_line: String<32>,
-    prev_heap_line: String<32>,
-    prev_stack_line: String<32>,
+    prev_sram_line: String<32>,
     prev_psram_line: String<32>,
     prev_flash_line: String<48>,
 }
@@ -33,10 +31,9 @@ impl SystemPageState {
         Self {
             prev_ap_line: String::new(),
             prev_uptime_line: String::new(),
-            prev_cpu_line: String::new(),
+            prev_cpu_clock_line: String::new(),
             prev_temp_line: String::new(),
-            prev_heap_line: String::new(),
-            prev_stack_line: String::new(),
+            prev_sram_line: String::new(),
             prev_psram_line: String::new(),
             prev_flash_line: String::new(),
         }
@@ -45,10 +42,9 @@ impl SystemPageState {
     pub fn reset(&mut self) {
         self.prev_ap_line.clear();
         self.prev_uptime_line.clear();
-        self.prev_cpu_line.clear();
+        self.prev_cpu_clock_line.clear();
         self.prev_temp_line.clear();
-        self.prev_heap_line.clear();
-        self.prev_stack_line.clear();
+        self.prev_sram_line.clear();
         self.prev_psram_line.clear();
         self.prev_flash_line.clear();
     }
@@ -143,8 +139,8 @@ fn render<D: DrawTarget<Color = Rgb565>>(
         Point::new(line_x, y_pos),
         Size::new(clear_w, line_h as u32),
         bg_color,
-        metrics.cpu,
-        &mut state.prev_cpu_line,
+        metrics.cpu_clock,
+        &mut state.prev_cpu_clock_line,
         body_style,
     );
     y_pos += line_h;
@@ -163,18 +159,8 @@ fn render<D: DrawTarget<Color = Rgb565>>(
         Point::new(line_x, y_pos),
         Size::new(clear_w, line_h as u32),
         bg_color,
-        metrics.heap,
-        &mut state.prev_heap_line,
-        body_style,
-    );
-    y_pos += line_h;
-    update_line(
-        disp,
-        Point::new(line_x, y_pos),
-        Size::new(clear_w, line_h as u32),
-        bg_color,
-        metrics.stack,
-        &mut state.prev_stack_line,
+        metrics.sram,
+        &mut state.prev_sram_line,
         body_style,
     );
     y_pos += line_h;

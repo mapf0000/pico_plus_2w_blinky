@@ -29,3 +29,9 @@ codegen-units = 1
 [profile.release.package.python-worker]
 opt-level = "z"
 codegen-units = 1
+
+# RustPython 0.6 unoptimized frame evaluation hits the native test stack guard
+# during codec bootstrap. Optimize the VM while retaining debug assertions,
+# stack guards, and the default test stack and Python recursion limits.
+[profile.test.package.rustpython-vm]
+opt-level = 1

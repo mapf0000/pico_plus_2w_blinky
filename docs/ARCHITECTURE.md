@@ -379,7 +379,7 @@ flowchart LR
 
 Process path:
 
-1. The Worker compiles user source with RustPython 0.5 and calls `main()`. `main()` must return a generator and call `layout()` once.
+1. The Worker compiles user source with RustPython 0.6 and calls `main()`. `main()` must return a generator and call `layout()` once.
 2. Each yielded typed effect returns control to the frontend. A 500 ms main-thread deadline terminates the Worker if a generator step does not yield.
 3. Local sleep/event effects remain in the browser. Keyboard effects are lowered by `keyboard-core` and encoded as KBD1.
 4. Binary kind 8 carries exact request, process, and effect IDs plus up to 4,096 KBD1 bytes.

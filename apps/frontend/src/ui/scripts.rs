@@ -44,7 +44,7 @@ pub(crate) fn scripting_card(props: &ScriptProps) -> Html {
       <div class="script-workspace">
         <section class="card editor-card">
           <div class="card-header editor-header">
-            <div><span class="eyebrow">{"RustPython 0.5"}</span><h2>{"Cooperative Python process"}</h2></div>
+            <div><span class="eyebrow">{"RustPython 0.6"}</span><h2>{"Cooperative Python process"}</h2></div>
             <div class="editor-meta">
               <span class={classes!("line-count", (line_count > 1_024).then_some("error"))}>{format!("{line_count} / 1024 lines")}</span>
             </div>
