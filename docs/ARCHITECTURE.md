@@ -397,6 +397,10 @@ and availability come from the same normalized volume label and target metadata
 that build the MSC image. The firmware adds no interpreter, heap allocation, or
 second bytecode format. Python remains a browser-resident process.
 
+Build-time validation requires 1–64 presets with names of 1–96 printable ASCII
+characters. Preset metadata remains in flash; visible-row storage is bounded
+independently of catalog size.
+
 `usb/hid.rs` is the sole execution service for local presets and browser effects.
 The allocation-free `firmware-exec::jobs::Controller` reserves one firmware-issued
 job handle before queueing, then transitions Queued → Running → Releasing → Idle.

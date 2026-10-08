@@ -124,14 +124,14 @@ and runtime stack use. Firmware has no general heap allocator. CPU load and
 peak stack use are not instrumented, so the former heap/stack/load placeholders
 are omitted. An ADC read failure displays `Temp: read error`.
 
-The display architecture refactor keeps the panel wiring, orientation, colors,
-and requested SPI rate. Startup commands and reset/sleep/display waits yield
+The ST7789 display uses SPI mode 0, a requested 62.5 MHz clock, and landscape
+orientation (MADCTL 0x70). Startup commands and reset/sleep/display waits yield
 through asynchronous SPI and Embassy timers. Runtime transport uses SPI0 with
 DMA_CH1, separately owned from CYW43's DMA_CH0; both handlers are bound on
-DMA_IRQ_0. One static 320x8 RGB565 tile consumes 5,120 SRAM bytes, replacing the
-512-byte blocking staging buffer. There is no full-screen framebuffer or double
-buffer. Each damaged rectangle is rasterized in bounded stripes, then transmitted
-in big-endian RGB565 with inclusive ST7789 column/row windows. The buffer remains
+DMA_IRQ_0. One static 320x8 RGB565 tile consumes 5,120 SRAM bytes. There is no
+full-screen framebuffer or double buffer. Each damaged rectangle is rasterized
+in bounded stripes, then transmitted in big-endian RGB565 with inclusive ST7789
+column/row windows. The buffer remains
 borrowed throughout DMA, and a guard restores CS on error or cancellation.
 
 The owned frame contains at most 20 content rows, five menu rows, and 128 bounded
@@ -149,56 +149,23 @@ other task scheduling. No page text or file/credential data is included. The Sto
 number excludes physical debounce latency and is not an end-to-end physical
 response measurement.
 
-Release resource review (2026-10-08): the linked application uses 6,124,480 flash
-bytes, with 2,255,936 bytes remaining before the persistent slots. Static striped
-SRAM ends at 248,380 bytes, leaving 275,908 bytes before runtime stacks. Relative
-to the saved pre-refactor local release artifact, flash increases by 12,416 bytes
-and static SRAM by 10,400 bytes. The display task pool grows from 5,360 to 11,136
-bytes because it retains its owned frame across DMA awaits; the tile adds 4,608
-bytes over the original staging buffer. This comparison is to a saved local
-artifact, rather than a reproducible isolated HEAD rebuild. The release
-prologues reserve about 8.3 KiB for frame preparation and 3.0 KiB for scene
-construction on the nested call path, plus small caller frames and callees.
-Static headroom covers these allocations comfortably; peak stack use has not
-been measured. No flash layout, PSRAM placement, protocol, or queue capacity
-changes were made. The obsolete blocking mipidsi/embedded-hal-bus dependencies
-were removed without updating other package versions.
+The release validated on 2026-10-08 uses 6,124,480 application flash bytes,
+leaving 2,255,936 bytes before the persistent slots. Static striped SRAM ends
+at 248,380 bytes, leaving 275,908 bytes before runtime stacks. The display task
+pool occupies 11,136 bytes, including its owned frame retained across DMA awaits.
+Release prologues reserve about 8.3 KiB for frame preparation and 3.0 KiB for
+scene construction on the nested call path, plus caller frames and callees;
+peak stack use has not been measured.
 
-The final DMA board check passed all 11 USB control cases, the restricted
-production host-agent handshake/two keepalives, and read-only 8 MiB FAT16
-mass-storage metadata checks. The user confirmed correct colors, labels, and
-redraws while browsing all five pages and toggling the sidebar. Captured
-cumulative diagnostics during that session reported zero missed ticks,
-50,620 µs maximum sample gap, 80,146 µs maximum frame wall time,
-1,731 µs maximum tile raster time, and 155,965 maximum SPI bytes/1,290 writes per
-frame. These are observed high-water values, not worst-case guarantees.
-The sampling target is the existing 50 ms cadence, with less than 2 ms observed
-jitter and no skipped periods during the exercised workload. Full frames can
-span multiple ticks because DMA is awaited while input continues.
-
-Physical Y-release-to-HID-cancellation latency and a sustained concurrent
-Wi-Fi/browser file transfer were not measured. No payloads were activated during
-the visual test. Gesture/Stop priority, off-page completion, timeout, stale
-handles, and cancellation behavior were checked at the native model/controller
-layer; that does not replace an end-to-end physical Stop test.
-
-The display metrics update adds 640 bytes of application flash and saves
-64 bytes of static SRAM compared with the dependency-update build above.
-The linked release uses 6,101,312 application flash bytes (2,279,104 remain)
-and 236,156 striped SRAM bytes (288,132 remain before runtime stacks).
-
-Validation for the display metrics update (2026-10-08): all commands below
-passed. Flash verification and reboot succeeded, both CDC interfaces
-enumerated, and all 11 USB control smoke cases passed. Screen rendering was
-not visually inspected remotely.
-
-```sh
-cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
-cargo fmt --all -- --check
-git diff --check
-picotool load -u -v -x -t elf target/thumbv8m.main-none-eabihf/release/pico_rust
-target/debug/device-test --wait-secs 45
-```
+That build passed verified flashing, all 11 USB control smoke cases, the
+restricted host-agent handshake/two keepalives, and read-only 8 MiB FAT16
+mass-storage checks. Manual inspection confirmed correct colors, labels, and
+redraws on all five pages with the sidebar open and closed. Observed timing
+maxima were 50,620 µs between samples, 80,146 µs frame wall time, and 1,731 µs
+per tile rasterization, with zero missed sampling periods. These observations
+are not worst-case guarantees. Physical Y-release-to-HID-cancellation latency,
+peak stack use, and sustained concurrent Wi-Fi/browser file transfer remain
+unmeasured.
 
 ### External PSRAM
 
