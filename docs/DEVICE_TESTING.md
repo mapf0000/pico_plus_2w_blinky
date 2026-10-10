@@ -94,11 +94,11 @@ The wrapper then starts the real host-agent executable in its restricted one-sho
 
 Unit tests additionally inject a device-side shell-command tag and verify that restricted mode rejects it without invoking the general dispatcher.
 
-On macOS the wrapper then checks, without attempting a write, that both the media and mounted `PICO_AGENT` volume are reported read-only, that it is an exact 8 MiB USB FAT16 device, and that `/README.TXT`, `/MAC`, `/WIN`, `/LINUX`, and the required `/MAC/HOSTAGNT` artifact exist. Linux read-only mount metadata is checked when the common auto-mount paths and `findmnt` are available. Unsupported or unlocatable mount layouts are reported as skipped, not silently passed.
+On macOS the wrapper then checks, without attempting a write, that both the media and mounted `PICO_AGENT` volume are reported read-only, that it is an exact 4 MiB USB FAT16 device, and that `/README.TXT`, `/MAC`, `/WIN`, `/LINUX`, and the required `/MAC/HOSTAGNT` artifact exist. Linux read-only mount metadata is checked when the common auto-mount paths and `findmnt` are available. Unsupported or unlocatable mount layouts are reported as skipped, not silently passed.
 
 Every assertion prints `[PASS]`, `[FAIL]`, or `[SKIP]`, and any failure produces a nonzero process exit status.
 
-## What remains untested without Wi-Fi
+## Connected-browser and security validation
 
 The suite intentionally cannot prove the successful browser-to-host security path. The following require a Wi-Fi client, the Web UI, and its WebSocket:
 
@@ -109,4 +109,22 @@ The suite intentionally cannot prove the successful browser-to-host security pat
 - real USB-to-WebSocket backpressure and browser-disconnect cleanup;
 - a successful end-to-end encrypted file transfer.
 
-Those belong in a later connected-browser suite. They should not be simulated here in a way that weakens the production encryption boundary.
+These require a connected-browser suite or an explicitly reported manual test. They should not be simulated here in a way that weakens the production encryption boundary. The local Firefox asset/Worker smoke test recorded in [HARDWARE.md](HARDWARE.md#16-mib-xip-flash) exercises the release bundle, but does not establish end-to-end Pico Wi-Fi transfer coverage.
+
+### Scripting coverage
+
+The dependency upgrade on 2026-10-08 recorded all 11 native RustPython VM tests passing and the same suite passing on the release wasm target in headless Firefox. Those tests cover generator state across 100 steps, send/throw, all injected exception classes, invalid yields/missing layout, source bounds, UTF-8 diagnostic truncation, syntax diagnostics, codec initialization, and denied imports. The current tests are in `apps/python-worker/src/lib.rs`; browser execution uses `run_in_browser` with an installed WebDriver/browser. Temporary machine-specific driver paths from that run are not setup requirements.
+
+That VM suite does not exercise the Yew supervisor or physical HID. Separately verify lazy asset loading, hard timeout and recovery from a non-yielding loop, single-process/one-effect ownership, stale process/effect results, matching event waits, disconnect/reconnect continuity, no effect retry, and Stop teardown. Hardware HID checks must use a safe capture target and cover cancellation during key/modifier-down, delay, USB writes, reconnect key release, local/browser job admission, and generation-owned completion. These checks are not part of the default USB suite; physical cancellation latency and peak stack use remain unmeasured.
+
+### Transfer/security coverage
+
+Current unit tests in `crates/transfer-crypto`, `crates/transfer-protocol`, and the host/frontend transfer modules cover Noise transport, record type/index authentication, manifest/close codecs, malformed bootstrap secrets, exact chunk/TLV bounds, batch bounds/trailing data, and streaming ciphertext with a browser receipt. Host PTY tests exercise general daemon/serial behavior; they do not prove a complete physical encrypted file transfer.
+
+The former implementation plan required the following acceptance coverage. Preserve these as checks to confirm or extend, rather than assuming that implementation or compilation proves them all:
+
+- Tampered ciphertext/authenticated metadata, wrong keys, record-domain separation, malformed/oversized/trailing envelopes, and stale session/transfer identities.
+- Empty files, exact maximum chunks, source length changes, out-of-order/duplicate chunks, ACK regression/future offsets, retry ciphertext identity, cancellation, and mismatched/missing browser receipts.
+- Disconnect/reconnect under queue pressure, real USB-to-WebSocket backpressure, browser decryption/hash/persistence failures, and bounded receiver resource use against a hostile source PC.
+
+Use [AGENTS.md](../AGENTS.md#validation-matrix) for reproducible build/test commands and [THREAT_MODEL.md](THREAT_MODEL.md#receiver-defenses-and-review-priorities) for the security review scope. Frontend browser integration tests and Linux/Windows builds were not run in the recorded dependency upgrade; that gap must not be inferred closed from macOS or Worker-only tests. Independent cryptographic review, fuzzing, and sustained connected-browser/hardware tests remain follow-up work.

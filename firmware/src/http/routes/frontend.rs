@@ -13,84 +13,91 @@ pub(crate) async fn route_frontend_index() -> impl picoserve::response::IntoResp
     log::debug!("http: serve index.html");
     Response::ok(BytesWithType {
         ty: "text/html; charset=utf-8",
-        data: frontend_static::INDEX_HTML.as_bytes(),
+        data: frontend_static::INDEX_HTML_GZIP,
     })
+    .with_header("Content-Encoding", "gzip")
     .with_header("Cache-Control", "no-store")
 }
 
 pub(crate) async fn route_frontend_js() -> impl picoserve::response::IntoResponse {
     crate::health::mark(crate::health::Stage::HttpJavascript);
     log::debug!(
-        "http: serve app.js ({} bytes)",
-        frontend_static::APP_JS.len()
+        "http: serve app.js ({} stored bytes)",
+        frontend_static::APP_JS_GZIP.len()
     );
     Response::ok(BytesWithType {
         ty: "application/javascript",
-        data: frontend_static::APP_JS,
+        data: frontend_static::APP_JS_GZIP,
     })
+    .with_header("Content-Encoding", "gzip")
     .with_header("Cache-Control", "no-store")
 }
 
 pub(crate) async fn route_frontend_wasm() -> impl picoserve::response::IntoResponse {
     crate::health::mark(crate::health::Stage::HttpWasm);
     log::debug!(
-        "http: serve app.wasm ({} bytes)",
-        frontend_static::APP_WASM.len()
+        "http: serve app.wasm ({} stored bytes)",
+        frontend_static::APP_WASM_GZIP.len()
     );
     Response::ok(BytesWithType {
         ty: "application/wasm",
-        data: frontend_static::APP_WASM,
+        data: frontend_static::APP_WASM_GZIP,
     })
+    .with_header("Content-Encoding", "gzip")
     .with_header("Cache-Control", "no-store")
 }
 
 pub(crate) async fn route_frontend_style() -> impl picoserve::response::IntoResponse {
     crate::health::mark(crate::health::Stage::HttpStylesheet);
     log::debug!(
-        "http: serve style.css ({} bytes)",
-        frontend_static::STYLE_CSS.len()
+        "http: serve style.css ({} stored bytes)",
+        frontend_static::STYLE_CSS_GZIP.len()
     );
     Response::ok(BytesWithType {
         ty: "text/css; charset=utf-8",
-        data: frontend_static::STYLE_CSS.as_bytes(),
+        data: frontend_static::STYLE_CSS_GZIP,
     })
+    .with_header("Content-Encoding", "gzip")
     .with_header("Cache-Control", "no-store")
 }
 
 pub(crate) async fn route_frontend_idb_js() -> impl picoserve::response::IntoResponse {
     crate::health::mark(crate::health::Stage::HttpIndexedDb);
     log::debug!(
-        "http: serve idb.js ({} bytes)",
-        frontend_static::IDB_JS.len()
+        "http: serve idb.js ({} stored bytes)",
+        frontend_static::IDB_JS_GZIP.len()
     );
     Response::ok(BytesWithType {
         ty: "application/javascript",
-        data: frontend_static::IDB_JS,
+        data: frontend_static::IDB_JS_GZIP,
     })
+    .with_header("Content-Encoding", "gzip")
     .with_header("Cache-Control", "no-store")
 }
 
 pub(crate) async fn route_python_worker_js() -> impl picoserve::response::IntoResponse {
     log::debug!(
-        "http: serve python-worker.js ({} bytes)",
-        frontend_static::PYTHON_WORKER_JS.len()
+        "http: serve python-worker.js ({} stored bytes)",
+        frontend_static::PYTHON_WORKER_JS_GZIP.len()
     );
     Response::ok(BytesWithType {
         ty: "application/javascript",
-        data: frontend_static::PYTHON_WORKER_JS,
+        data: frontend_static::PYTHON_WORKER_JS_GZIP,
     })
+    .with_header("Content-Encoding", "gzip")
     .with_header("Cache-Control", "no-store")
 }
 
 pub(crate) async fn route_python_runtime_js() -> impl picoserve::response::IntoResponse {
     log::debug!(
-        "http: serve python-runtime.js ({} bytes)",
-        frontend_static::PYTHON_RUNTIME_JS.len()
+        "http: serve python-runtime.js ({} stored bytes)",
+        frontend_static::PYTHON_RUNTIME_JS_GZIP.len()
     );
     Response::ok(BytesWithType {
         ty: "application/javascript",
-        data: frontend_static::PYTHON_RUNTIME_JS,
+        data: frontend_static::PYTHON_RUNTIME_JS_GZIP,
     })
+    .with_header("Content-Encoding", "gzip")
     .with_header("Cache-Control", "no-store")
 }
 

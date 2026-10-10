@@ -61,4 +61,8 @@ access the Pico Web UI can establish a session and request host files.
 The session is memory-only and is cleared on WebSocket disconnect or page
 refresh. Decrypted chunks are staged in IndexedDB for download; filesystem
 browsing remains outside this encryption scope. See
-[`docs/SECURE_FILE_TRANSFER.md`](../../docs/SECURE_FILE_TRANSFER.md).
+[the threat model](../../docs/THREAT_MODEL.md), [transfer architecture](../../docs/ARCHITECTURE.md#file-transfer-path-and-backpressure), and [wire protocol](../../docs/PROTOCOL.md#secure-file-transfer-protocol-v2).
+
+## Python scripting
+
+The dedicated RustPython Worker runs one cooperative generator while the tab stays open. See [the scripting reference](../../docs/SCRIPTING.md) for the API, examples, exceptions, Stop/reconnect behavior, and enforced limits.

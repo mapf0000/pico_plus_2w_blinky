@@ -11,8 +11,11 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
 
 - [System architecture](docs/ARCHITECTURE.md): components, startup, lifecycle, data flow, backpressure, and RustPython execution.
 - [Protocol reference](docs/PROTOCOL.md): USB TLV, WebSocket RPC/HELLO, transfer/filesystem layouts, versions, errors, and compatibility.
+- [Threat model](docs/THREAT_MODEL.md): hostile source PC, trusted Pico/Wi-Fi clients, encryption guarantees, accepted limitations, and receiver hardening priorities.
 - [Hardware and recovery](docs/HARDWARE.md): supported board, pin and memory maps, USB/Wi-Fi configuration, flashing, BOOTSEL, and smoke tests.
-- [RustPython process plan](docs/RUSTPYTHON_PROCESS_PLAN.md): process semantics, limits, effects, and cutover decisions.
+- [Python scripting](docs/SCRIPTING.md): current API, examples, process lifecycle, exceptions, limits, and Worker implementation.
+- [USB device testing](docs/DEVICE_TESTING.md): safe hardware checks, commands, and connected-browser coverage gaps.
+- [Throughput experiments](docs/THROUGHPUT_EXPERIMENTS.md): measured USB results, rejected optimizations, and remaining experiments.
 
 ## Overview
 - Primary hardware target: Pimoroni Pico Plus 2 W (RP2350B) with 16 MiB QSPI flash, 8 MiB PSRAM, and 520 KiB SRAM.
@@ -117,7 +120,7 @@ is coalesced to 10 Hz; connection changes and terminal states update immediately
   - macOS: `apps/host-agent/artifacts/aarch64-apple-darwin/host-agent`
   - Windows (optional): `apps/host-agent/artifacts/x86_64-pc-windows-msvc/host-agent.exe`
   - Linux (optional): `apps/host-agent/artifacts/x86_64-unknown-linux-gnu/host-agent`
-- Firmware builds embed a read-only 8 MiB FAT16 image at `OUT_DIR/host-agent.img`.
+- Firmware builds embed a read-only 4 MiB FAT16 image at `OUT_DIR/host-agent.img`. Packaged binaries share this capacity; the build fails if their combined size plus FAT metadata exceeds it.
 - The device exposes a USB drive (label `PICO_AGENT` by default) with:
   - `/MAC/HOSTAGNT`
   - `/WIN/HOSTAGNT.EXE` (if provided)
@@ -133,13 +136,14 @@ is coalesced to 10 Hz; connection changes and terminal states update immediately
 
 ## Secure file transfer
 
+- The USB-connected source PC is considered hostile; the Pico and receiving Wi-Fi clients are trusted. Encryption protects file contents from passive USB observers, but cannot hide source files or agent keys from that PC or make its files trustworthy. See the [threat model](docs/THREAT_MODEL.md).
 - Start the host agent and open the Web UI. The browser automatically negotiates an encrypted file-transfer session.
 - After the UI reports an encrypted session, select or enter a host file path and queue it.
 - The host streams the file through bounded plaintext buffers, encrypts each record before USB transfer, and waits for an authenticated browser hash receipt.
 - The Pico display reports transfer progress but intentionally cannot start a transfer without an active encrypted session. Plaintext transfer commands and legacy simulation/drop mode are disabled.
 - `--send-file <path>` records a default candidate but does not bypass browser session negotiation.
 - Unattended negotiation does not authenticate the browser: every client that can access the Pico Web UI can establish a session and request host files.
-- Security scope, trust assumptions, metadata leakage, and follow-up work are documented in [Secure file-transfer design](docs/SECURE_FILE_TRANSFER.md).
+- Security guarantees and accepted limitations are in the [threat model](docs/THREAT_MODEL.md); session/data flow is in [architecture](docs/ARCHITECTURE.md#file-transfer-path-and-backpressure), and wire formats are in [protocol](docs/PROTOCOL.md#secure-file-transfer-protocol-v2).
 
 ## Source filesystem browser
 - With the browser WebSocket connected and the host-agent running, the Web UI can browse the source computer's filesystem through the Pico.
@@ -181,7 +185,7 @@ Avoid bare `cargo test` at the workspace root: the default member is the embedde
      - The build forces `CARGO_BUILD_TARGET=wasm32-unknown-unknown`.
      - Release assets are written to an isolated directory inside `OUT_DIR`; firmware builds never reuse the development output in `apps/frontend/dist/`.
   4) Build the real RustPython Worker, run wasm-bindgen, gzip the Worker WASM deterministically, and copy the Worker driver/glue into `OUT_DIR`.
-  5) Normalize all assets and generate `frontend_static.rs` containing `include_*` declarations.
+  5) Normalize asset paths, gzip all HTML/CSS/JavaScript/WASM assets deterministically, and generate `frontend_static.rs` containing compressed `include_bytes!` declarations. HTTP responses retain their media types and include `Content-Encoding: gzip`; decompression happens in the browser.
   6) Apply frontend and compressed-Worker size gates.
 
 ### Environment knobs (optional)

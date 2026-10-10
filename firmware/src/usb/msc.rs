@@ -7,7 +7,7 @@ use embassy_usb::types::InterfaceNumber;
 use embassy_usb::{Builder, Handler};
 use log::{debug, info, warn};
 
-const MSC_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const MSC_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 const BLOCK_SIZE: usize = 512;
 
 const CBW_SIGNATURE: u32 = 0x43425355;

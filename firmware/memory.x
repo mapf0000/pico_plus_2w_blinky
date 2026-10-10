@@ -6,12 +6,12 @@ MEMORY {
      * `psram` feature is enabled.)
      */
     /*
-     * Reserve 8 MiB for the read-only USB MSC image and 8 KiB at the end of
+     * Reserve 4 MiB for the read-only USB MSC image and 8 KiB at the end of
      * flash for persistent config.
      */
-    FLASH : ORIGIN = 0x10000000, LENGTH = 8184K
-    MSC : ORIGIN = 0x10000000 + 8184K, LENGTH = 8192K
-    PERSIST : ORIGIN = 0x10000000 + 8184K + 8192K, LENGTH = 8K
+    FLASH : ORIGIN = 0x10000000, LENGTH = 12280K
+    MSC : ORIGIN = 0x10000000 + 12280K, LENGTH = 4096K
+    PERSIST : ORIGIN = 0x10000000 + 12280K + 4096K, LENGTH = 8K
     /*
      * RAM consists of 8 banks, SRAM0-SRAM7, with a striped mapping.
      * This is usually good for performance, as it distributes load on
@@ -77,6 +77,8 @@ SECTIONS {
         __msc_image_end = .;
     } > MSC
 } INSERT AFTER .text;
+
+ASSERT(SIZEOF(.msc_image) == LENGTH(MSC), "MSC image must fill its flash region");
 
 SECTIONS {
     /* ### Boot ROM extra info

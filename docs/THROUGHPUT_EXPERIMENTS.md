@@ -65,7 +65,7 @@ Writing one host syscall per 64-byte USB packet is about 7.5% slower. At 512 byt
 
 The non-64-byte packet counts in the larger-write variants show that the macOS CDC stack sometimes terminates packets short at internal boundaries. This did not reduce aggregate throughput.
 
-## Current conclusion
+## Conclusion from recorded measurements
 
 The remaining USB limit is below the TLV and flow-control layers. The strongest current candidate is the single-buffered RP USB endpoint path:
 
@@ -76,7 +76,9 @@ The remaining USB limit is below the TLV and flow-control layers. The strongest 
 
 At 499.9 KiB/s, the device processes roughly 8,000 full 64-byte packets per second, or one packet every 125 microseconds. The single-buffer rearm gap and/or the macOS CDC/TTY stack is therefore a much more plausible ceiling than application framing. This remains a measured inference until a double-buffer or alternate-host comparison is run.
 
-## Experiments not yet tried
+## Follow-up experiments
+
+These hypotheses are not established by the measurements above. Record firmware revision, dependency versions, OS, composite interfaces, and test settings for each new run before comparing results.
 
 Ordered by expected information value:
 
@@ -89,7 +91,7 @@ Ordered by expected information value:
 
 ## Throughput improvements still worth considering
 
-### Recommended next implementation
+### Next driver experiment
 
 Add double-buffer support for the dedicated control OUT endpoint and keep CDC for compatibility. It is the smallest architectural change that directly targets the measured ceiling. It should be treated as an experimental driver patch until it passes fragmentation, short-packet, disconnect, overflow, control-health, and full transfer tests.
 
@@ -105,12 +107,12 @@ These should be measured only after locating the slowest post-USB stage:
 - Use a bounded PSRAM ring or ownership-transfer buffers to reduce firmware copies between the USB decoder and WebSocket writer.
 - Increase WebSocket batch depth only if Wi-Fi frame overhead is measured as limiting. The current batch already carries up to eight approximately 2 KiB chunks and uses a 32 KiB TCP transmit buffer.
 - Stream browser output directly to a writable file or OPFS where supported, avoiding the later IndexedDB readback pass. Keep IndexedDB as the compatibility path.
-- Offer optional streaming compression for compressible inputs. This improves effective file throughput, not raw link throughput, and must retain bounded memory and authenticated metadata.
+- Evaluate optional streaming compression for compressible inputs only as a separate format/security change. Current transfers deliberately omit compression; any experiment must account for size leakage, bounded decompression, and authenticated metadata. This improves effective file throughput, not raw link throughput.
 
 Increasing ACK windows, increasing serial writes beyond 512 bytes, replacing the decoder with bulk slice copying, or changing the nominal CDC baud rate are not promising next steps based on the recorded evidence.
 
 ## Diagnostic footprint and safety
 
-Adding the raw benchmark state increased firmware `.bss` by 64 bytes. The measured image uses 362,816 bytes of `.bss`, 2,644 bytes of `.data`, and 1,024 bytes of `.uninit`; 157,792 bytes remain before runtime stack use.
+Adding the raw benchmark state increased that benchmark build's `.bss` by 64 bytes. Its image used 362,816 bytes of `.bss`, 2,644 bytes of `.data`, and 1,024 bytes of `.uninit`; 157,792 bytes remained before runtime stack use. This is a historical experiment snapshot, not current firmware headroom. Current layout and dated release measurements are maintained in [HARDWARE.md](HARDWARE.md#flash-and-ram-layout).
 
 Raw mode accepts only declared sizes from 1 through 64 MiB, begins only after an explicit diagnostic tag, retains no payload, and returns to TLV mode after completion, overflow, or five seconds without a packet. It does not use Wi-Fi or access host files.

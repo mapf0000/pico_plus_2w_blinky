@@ -128,11 +128,10 @@ fn try_python_worker_build(cfg: &Config) -> Result<bool> {
 
     let raw_wasm = fs::read(bindgen_dir.join("python_runtime_bg.wasm"))
         .context("read bound Python runtime WASM")?;
-    let output = std::fs::File::create(cfg.out_dir.join("frontend_python_runtime.wasm.gz"))
-        .context("create compressed Python runtime WASM")?;
-    let mut encoder = GzBuilder::new().mtime(0).write(output, Compression::best());
-    encoder.write_all(&raw_wasm)?;
-    encoder.finish()?;
+    write_gzip(
+        &cfg.out_dir.join("frontend_python_runtime.wasm.gz"),
+        &raw_wasm,
+    )?;
     let compressed_len = fs::metadata(cfg.out_dir.join("frontend_python_runtime.wasm.gz"))?.len();
     if compressed_len > cfg.python_warn_bytes {
         cargo::warn(format!(
@@ -231,18 +230,26 @@ fn embed_dist(cfg: &Config) -> Result<()> {
         fs::read_to_string(&index_src).with_context(|| format!("read {}", index_src.display()))?;
     rewrite_paths(&mut index, &js, &wasm, &css);
 
-    // Copy to OUT_DIR with stable names
-    fs::write(cfg.out_dir.join("frontend_index.html"), index)?;
-    fs::copy(&js, cfg.out_dir.join("frontend_app.js")).context("copy js")?;
-    fs::copy(&wasm, cfg.out_dir.join("frontend_app.wasm")).context("copy wasm")?;
+    // Store only gzip representations in firmware; HTTP routes preserve the
+    // original media types and let the browser decompress them.
+    write_gzip(
+        &cfg.out_dir.join("frontend_index.html.gz"),
+        index.as_bytes(),
+    )?;
+    copy_gzip(&js, &cfg.out_dir.join("frontend_app.js.gz"))?;
+    copy_gzip(&wasm, &cfg.out_dir.join("frontend_app.wasm.gz"))?;
 
     // Static UI assets copied by Trunk.
     let css_dist = dist.join("ui/style.css");
-    fs::copy(&css_dist, cfg.out_dir.join("frontend_style.css"))
-        .with_context(|| format!("copy required frontend asset {}", css_dist.display()))?;
+    copy_gzip(&css_dist, &cfg.out_dir.join("frontend_style.css.gz"))?;
     let idb_js_dist = dist.join("ui/idb.js");
-    fs::copy(&idb_js_dist, cfg.out_dir.join("frontend_idb.js"))
-        .with_context(|| format!("copy required frontend asset {}", idb_js_dist.display()))?;
+    copy_gzip(&idb_js_dist, &cfg.out_dir.join("frontend_idb.js.gz"))?;
+    for name in ["frontend_python_runtime.js", "frontend_python_worker.js"] {
+        copy_gzip(
+            &cfg.out_dir.join(name),
+            &cfg.out_dir.join(format!("{name}.gz")),
+        )?;
+    }
 
     // Size checks
     let wasm_len = fs::metadata(&wasm)?.len();
@@ -266,38 +273,39 @@ fn embed_dist(cfg: &Config) -> Result<()> {
     let gen_rs = cfg.out_dir.join(GEN_RS);
     let mut f = std::fs::File::create(&gen_rs).context("create frontend_static.rs")?;
     use std::io::Write;
-    writeln!(
-        f,
-        "pub static INDEX_HTML: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/frontend_index.html\"));"
-    )?;
-    writeln!(
-        f,
-        "pub static APP_JS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/frontend_app.js\"));"
-    )?;
-    writeln!(
-        f,
-        "pub static APP_WASM: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/frontend_app.wasm\"));"
-    )?;
-    writeln!(
-        f,
-        "pub static STYLE_CSS: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/frontend_style.css\"));"
-    )?;
-    writeln!(
-        f,
-        "pub static IDB_JS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/frontend_idb.js\"));"
-    )?;
-    writeln!(
-        f,
-        "pub static PYTHON_WORKER_JS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/frontend_python_worker.js\"));"
-    )?;
-    writeln!(
-        f,
-        "pub static PYTHON_RUNTIME_JS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/frontend_python_runtime.js\"));"
-    )?;
-    writeln!(
-        f,
-        "pub static PYTHON_RUNTIME_WASM_GZIP: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/frontend_python_runtime.wasm.gz\"));"
-    )?;
+    for (symbol, file) in [
+        ("INDEX_HTML_GZIP", "frontend_index.html.gz"),
+        ("APP_JS_GZIP", "frontend_app.js.gz"),
+        ("APP_WASM_GZIP", "frontend_app.wasm.gz"),
+        ("STYLE_CSS_GZIP", "frontend_style.css.gz"),
+        ("IDB_JS_GZIP", "frontend_idb.js.gz"),
+        ("PYTHON_WORKER_JS_GZIP", "frontend_python_worker.js.gz"),
+        ("PYTHON_RUNTIME_JS_GZIP", "frontend_python_runtime.js.gz"),
+        (
+            "PYTHON_RUNTIME_WASM_GZIP",
+            "frontend_python_runtime.wasm.gz",
+        ),
+    ] {
+        writeln!(
+            f,
+            "pub static {symbol}: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{file}\"));"
+        )?;
+    }
+    Ok(())
+}
+
+fn copy_gzip(source: &Path, destination: &Path) -> Result<()> {
+    let bytes = fs::read(source).with_context(|| format!("read asset {}", source.display()))?;
+    write_gzip(destination, &bytes)
+}
+
+fn write_gzip(destination: &Path, bytes: &[u8]) -> Result<()> {
+    let output = fs::File::create(destination)
+        .with_context(|| format!("create compressed asset {}", destination.display()))?;
+    // No filename or timestamp: identical source bytes produce identical assets.
+    let mut encoder = GzBuilder::new().mtime(0).write(output, Compression::best());
+    encoder.write_all(bytes)?;
+    encoder.finish()?;
     Ok(())
 }
 
@@ -383,6 +391,135 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>, skip_dirs: &[&str]) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read as _;
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = env::temp_dir().join(format!("pico-assets-{}-{nonce}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn compressed_embedding_preserves_assets_paths_and_size_gates() {
+        let root = TestDir::new();
+        let mut cfg = Config {
+            out_dir: root.0.clone(),
+            manifest_dir: root.0.clone(),
+            repo_root: root.0.clone(),
+            frontend_dir: root.0.clone(),
+            python_worker_dir: root.0.clone(),
+            profile: "release".into(),
+            target: "thumbv8m.main-none-eabihf".into(),
+            warn_bytes: u64::MAX,
+            max_bytes: None,
+            python_warn_bytes: u64::MAX,
+            python_max_bytes: u64::MAX,
+        };
+        let dist = release_dist(&cfg.out_dir);
+        fs::create_dir_all(dist.join("ui")).unwrap();
+        fs::write(
+            dist.join("index.html"),
+            b"<script src=\"app-123.js\"></script><link href=\"style-123.css\">app-123.wasm",
+        )
+        .unwrap();
+        let assets: &[(&str, &str, &[u8])] = &[
+            ("app-123.js", "frontend_app.js.gz", b"export const app = 1;"),
+            ("app-123.wasm", "frontend_app.wasm.gz", b"\0asm\x01\0\0\0"),
+            (
+                "ui/style.css",
+                "frontend_style.css.gz",
+                b"body { color: red; }",
+            ),
+            ("ui/idb.js", "frontend_idb.js.gz", b"export const idb = 2;"),
+        ];
+        for (source, _, bytes) in assets {
+            fs::write(dist.join(source), bytes).unwrap();
+        }
+        fs::write(dist.join("style-123.css"), b"body { color: red; }").unwrap();
+        let worker_assets: &[(&str, &[u8])] = &[
+            (
+                "frontend_python_runtime.js",
+                b"export default async function init() {}",
+            ),
+            (
+                "frontend_python_worker.js",
+                b"import init from '/ui/python-runtime.js';",
+            ),
+        ];
+        for (name, bytes) in worker_assets {
+            fs::write(cfg.out_dir.join(name), bytes).unwrap();
+        }
+        let runtime_wasm = b"\0asm\x01\0\0\0";
+        write_gzip(
+            &cfg.out_dir.join("frontend_python_runtime.wasm.gz"),
+            runtime_wasm,
+        )
+        .unwrap();
+
+        embed_dist(&cfg).unwrap();
+        let generated = fs::read_to_string(cfg.out_dir.join(GEN_RS)).unwrap();
+        assert_eq!(generated.lines().count(), 8);
+        assert!(generated.lines().all(|line| line.contains(".gz\"))")));
+        let expected_index =
+            b"<script src=\"ui/app.js\"></script><link href=\"ui/style.css\">ui/app.wasm";
+        let mut expected = vec![(
+            "frontend_index.html.gz".to_owned(),
+            expected_index.as_slice(),
+        )];
+        expected.extend(
+            assets
+                .iter()
+                .map(|(_, destination, bytes)| ((*destination).into(), *bytes)),
+        );
+        expected.extend(
+            worker_assets
+                .iter()
+                .map(|(name, bytes)| (format!("{name}.gz"), *bytes)),
+        );
+        expected.push((
+            "frontend_python_runtime.wasm.gz".into(),
+            runtime_wasm.as_slice(),
+        ));
+        let mut first_build = Vec::new();
+        for (name, original) in &expected {
+            let compressed = fs::read(cfg.out_dir.join(name)).unwrap();
+            let mut decoded = Vec::new();
+            flate2::read::GzDecoder::new(compressed.as_slice())
+                .read_to_end(&mut decoded)
+                .unwrap();
+            assert_eq!(&decoded, original, "{name}");
+            first_build.push(compressed);
+        }
+        // Cached Worker bundles and frontend dist still get deterministic gzip
+        // assets whenever build.rs embeds them again.
+        embed_dist(&cfg).unwrap();
+        for ((name, _), previous) in expected.iter().zip(first_build) {
+            assert_eq!(fs::read(cfg.out_dir.join(name)).unwrap(), previous);
+        }
+        cfg.max_bytes = Some(7);
+        assert!(
+            embed_dist(&cfg)
+                .unwrap_err()
+                .to_string()
+                .contains("PICO_WASM_MAX_BYTES=7")
+        );
+        fs::remove_file(dist.join("ui/idb.js")).unwrap();
+        assert!(embed_dist(&cfg).unwrap_err().to_string().contains("idb.js"));
+    }
 
     #[test]
     fn firmware_release_dist_is_scoped_to_cargo_out_dir() {

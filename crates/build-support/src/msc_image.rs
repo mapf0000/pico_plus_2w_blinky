@@ -3,7 +3,7 @@
 use super::*;
 use std::fmt::Write as _;
 
-const IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const IMAGE_BYTES: usize = 4 * 1024 * 1024;
 const BYTES_PER_SECTOR: usize = 512;
 const SECTORS_PER_CLUSTER: usize = 1;
 const CLUSTER_SIZE: usize = BYTES_PER_SECTOR * SECTORS_PER_CLUSTER;
@@ -593,4 +593,89 @@ fn cluster_offset(data_start: usize, cluster: u16) -> Result<usize> {
     }
     let idx = (cluster as usize - 2) * CLUSTER_SIZE;
     Ok(data_start + idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn four_mib_fat16_image_preserves_packaged_binary() {
+        let label = normalize_label("PICO_AGENT").unwrap();
+        let binary: Vec<u8> = (0..1_500_001).map(|i| (i % 251) as u8).collect();
+        let image = build_image(
+            &label,
+            Vec::new(),
+            vec![DirSpec {
+                name: short_name("MAC", "").unwrap(),
+                files: vec![FileSpec {
+                    name: short_name("HOSTAGNT", "").unwrap(),
+                    data: binary.clone(),
+                }],
+            }],
+        )
+        .unwrap();
+        assert_eq!(image.len(), 4 * 1024 * 1024);
+        assert_eq!(&image[54..62], b"FAT16   ");
+        assert_eq!(&image[510..512], &[0x55, 0xaa]);
+        let u16_at = |offset| u16::from_le_bytes(image[offset..offset + 2].try_into().unwrap());
+        assert_eq!(u16_at(11), 512);
+        assert_eq!(image[13], 1);
+        assert_eq!(u16_at(19) as usize * 512, image.len());
+        let fat_bytes = u16_at(22) as usize * 512;
+        let fat_start = u16_at(14) as usize * 512;
+        assert_eq!(image[16], 2);
+        assert_eq!(
+            &image[fat_start..fat_start + fat_bytes],
+            &image[fat_start + fat_bytes..fat_start + 2 * fat_bytes]
+        );
+        let root_start = fat_start + 2 * fat_bytes;
+        let root_bytes = u16_at(17) as usize * 32;
+        let data_start = root_start + root_bytes;
+        let clusters = (image.len() - data_start) / 512;
+        assert!((4085..=65524).contains(&clusters));
+        let mac_entry = root_start + 32; // First entry is the volume label.
+        assert_eq!(&image[mac_entry..mac_entry + 11], b"MAC        ");
+        let mac_start = data_start + (u16_at(mac_entry + 26) as usize - 2) * 512;
+        let file_entry = mac_start + 64; // Skip '.' and '..'.
+        assert_eq!(&image[file_entry..file_entry + 11], b"HOSTAGNT   ");
+        assert_eq!(image[file_entry + 11], 0x01); // Read-only file.
+        let size = u32::from_le_bytes(image[file_entry + 28..file_entry + 32].try_into().unwrap());
+        assert_eq!(size as usize, binary.len());
+        let mut cluster = u16_at(file_entry + 26);
+        let mut recovered = Vec::new();
+        for _ in 0..binary.len().div_ceil(512) {
+            assert!((2..clusters + 2).contains(&(cluster as usize)));
+            let offset = data_start + (cluster as usize - 2) * 512;
+            recovered.extend_from_slice(&image[offset..offset + 512]);
+            cluster = u16_at(fat_start + cluster as usize * 2);
+        }
+        assert_eq!(cluster, 0xffff);
+        recovered.truncate(binary.len());
+        assert_eq!(recovered, binary);
+    }
+
+    #[test]
+    fn image_rejects_files_beyond_usable_capacity() {
+        let layout = compute_layout().unwrap();
+        let label = normalize_label("PICO_AGENT").unwrap();
+        let build = |size| {
+            build_image(
+                &label,
+                vec![FileSpec {
+                    name: short_name("HOSTAGNT", "").unwrap(),
+                    data: vec![0x5a; size],
+                }],
+                Vec::new(),
+            )
+        };
+        let capacity = layout.cluster_count * CLUSTER_SIZE;
+        assert!(build(capacity).is_ok());
+        assert!(
+            build(capacity + 1)
+                .unwrap_err()
+                .to_string()
+                .contains("image too small")
+        );
+    }
 }

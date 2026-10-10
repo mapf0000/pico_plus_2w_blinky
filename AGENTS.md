@@ -151,7 +151,7 @@ Build and package the local host agent before flashing:
 scripts/fw-deploy-with-agent
 ```
 
-Firmware compilation runs `firmware/build.rs`. It may invoke Trunk, build/wasm-bindgen/gzip the RustPython Worker, construct the 8 MiB FAT16 host-agent image, and embed all results. A firmware build therefore needs the frontend, wasm-bindgen CLI, and tooling inputs even when the Rust change is firmware-only.
+Firmware compilation runs `firmware/build.rs`. It may invoke Trunk, build/wasm-bindgen/gzip the RustPython Worker, construct the 4 MiB FAT16 host-agent image, and embed all results. A firmware build therefore needs the frontend, wasm-bindgen CLI, and tooling inputs even when the Rust change is firmware-only.
 
 ### Frontend
 
@@ -206,6 +206,8 @@ cargo clippy -p host-agent --all-targets -- -D warnings
 ```
 
 On macOS, the test command includes the PTY-based e2e tests. Add unit tests beside protocol/config logic and extend e2e coverage when behavior crosses the daemon/serial boundary.
+
+For secure file-transfer changes, also run `cargo test -p transfer-crypto -p transfer-protocol` and the affected frontend/embedded checks below. Connected-browser, hostile-input, and hardware acceptance coverage is tracked in `docs/DEVICE_TESTING.md`; unit tests and wasm compilation do not replace those checks.
 
 ### RustPython, layout, or bytecode changes
 
@@ -330,7 +332,7 @@ Do not silently reuse an existing tag or reinterpret a payload without versionin
 
 ## Documentation and handoff
 
-Update documentation in the same change when commands, paths, hardware assumptions, protocols, environment variables, UI workflows, Python effects, or keyboard behavior change. The root `README.md` is the operator overview; this file is the contributor/agent guide; `docs/RUSTPYTHON_PROCESS_PLAN.md` captures the scripting design.
+Update documentation in the same change when commands, paths, hardware assumptions, protocols, environment variables, UI workflows, Python effects, or keyboard behavior change. The root `README.md` is the operator overview; this file is the contributor/agent guide; `docs/SCRIPTING.md` is the current Python API and lifecycle reference; `docs/THREAT_MODEL.md` defines the security boundary. Keep wire formats in `docs/PROTOCOL.md`, component ownership in `docs/ARCHITECTURE.md`, hardware facts in `docs/HARDWARE.md`, and device validation coverage in `docs/DEVICE_TESTING.md`.
 
 Before handoff:
 

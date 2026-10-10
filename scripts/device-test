@@ -232,8 +232,8 @@ case "$(uname -s)" in
       fi
       if printf '%s\n' "$INFO" | grep -Eq 'Protocol:[[:space:]]+USB' \
         && printf '%s\n' "$INFO" | grep -Eq 'File System Personality:[[:space:]]+MS-DOS FAT16' \
-        && printf '%s\n' "$INFO" | grep -Eq 'Disk Size:.*\(8388608 Bytes\)'; then
-        echo "[PASS] Mass-storage is an exact 8 MiB USB FAT16 device"
+        && printf '%s\n' "$INFO" | grep -Eq 'Disk Size:.*\(4194304 Bytes\)'; then
+        echo "[PASS] Mass-storage is an exact 4 MiB USB FAT16 device"
       else
         echo "[FAIL] Unexpected mass-storage protocol, filesystem, or size" >&2
         MSC_STATUS=1

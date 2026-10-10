@@ -118,7 +118,7 @@ flowchart LR
     Support[crates/build-support]
     Trunk["Trunk release build<br/>wasm32-unknown-unknown"]
     Python["RustPython Worker build<br/>wasm-bindgen + gzip"]
-    MSC[Build 8 MiB FAT16 image]
+    MSC[Build 4 MiB FAT16 image]
     Out[Cargo OUT_DIR]
     Link[Embedded linker]
     ELF[Firmware ELF]
@@ -135,9 +135,9 @@ flowchart LR
 `crates/build-support` performs four important jobs:
 
 1. Copies `firmware/memory.x` into `OUT_DIR` and adds it to the linker search path.
-2. Fingerprints the frontend and Python Worker, runs `trunk build --release`, builds the pinned RustPython Worker, applies wasm-bindgen, and stores its WASM as deterministic gzip. It never embeds the shared `apps/frontend/dist/` development output.
+2. Fingerprints the frontend and Python Worker, runs `trunk build --release`, builds the pinned RustPython Worker, applies wasm-bindgen, and stores all embedded frontend and Worker assets as deterministic gzip, served with `Content-Encoding: gzip`. It never embeds the shared `apps/frontend/dist/` development output.
 3. Generates stable `include_*` bindings for the main UI, Worker driver/glue, and compressed Worker WASM.
-4. Constructs `host-agent.img`, an 8 MiB read-only FAT16 image embedded in its own flash region.
+4. Constructs `host-agent.img`, a 4 MiB read-only FAT16 image embedded in its own flash region.
 
 The inner Trunk process receives a separate target directory and a scrubbed environment so Cortex-M linker flags cannot leak into wasm. Generated files in `OUT_DIR` are inputs to the final firmware link and must not be edited manually.
 
@@ -283,7 +283,7 @@ The presence flag is a freshness signal, not authentication. It says that a proc
 
 ## File-transfer path and backpressure
 
-The transfer path sends a host file to a browser download through the Pico. The browser and host agent are the cryptographic endpoints. Firmware relays the unattended bootstrap secret and ciphertext, never stores the whole file, and never receives the session master or a file key. See [SECURE_FILE_TRANSFER.md](SECURE_FILE_TRANSFER.md) for the trust model and lifecycle.
+The transfer path sends a host file to a browser download through the Pico. The browser and host agent are the cryptographic endpoints. Firmware relays the unattended bootstrap secret and ciphertext, never stores the whole file, and never receives the session master or a file key. See [THREAT_MODEL.md](THREAT_MODEL.md) for security assumptions and [PROTOCOL.md](PROTOCOL.md#secure-file-transfer-protocol-v2) for wire formats.
 
 ```mermaid
 sequenceDiagram
@@ -335,6 +335,12 @@ Backpressure boundaries:
 
 The receipt proves authenticated browser processing through the final hash, but not durable filesystem storage or successful user handling of the save dialog.
 
+Session negotiation is single-use and in memory: the host generates the bootstrap secret and session ID, rate-limits requests to one per two seconds, and expires incomplete negotiation after five minutes. The browser generates the session master after the Noise handshake; the host returns an encrypted fixed confirmation before the browser marks the session ready. A WebSocket reconnect or refresh negotiates a new session.
+
+Each file derives its own key with HKDF-SHA-256 from the session master, random public salt, session ID, and transfer ID. This isolates file keys and keeps the session master out of direct record encryption; record type/index separate nonce domains. Retries reuse the cached ciphertext exactly, never re-encrypting under a reused nonce. The sender opens one regular-file handle, hashes each bounded read as it encrypts, best-effort zeroizes plaintext buffers, and rechecks file length and modification time before close. It retains only bounded ciphertext for retry.
+
+Automatic compression is omitted: already compressed inputs often gain little, content-dependent sizes leak information, and a second transformation adds resource costs. The transfer path omits file paths, names, contents, hashes, and key material from its logs; session secrets are not persisted. Browser file staging remains plaintext in IndexedDB. Best-effort zeroization does not erase OS caches, swap, driver/browser copies, or allocator remnants; the hostile PC can inspect its endpoint regardless.
+
 Legacy simulation/drop mode is disabled for secure v2 because it cannot produce an authenticated browser receipt.
 
 ## Filesystem request path
@@ -358,7 +364,7 @@ Starting a new browser request cancels the previous request ID on a best-effort 
 
 ## RustPython process and effect path
 
-One real RustPython generator runs in a dedicated browser Worker. Python state survives WebSocket disconnects as long as the tab remains open.
+One real RustPython generator runs in a dedicated browser Worker. Python state survives WebSocket disconnects as long as the tab remains open. The API, exceptions, enforced limits, and Worker message lifecycle are documented in [SCRIPTING.md](SCRIPTING.md).
 
 ```mermaid
 flowchart LR
@@ -371,20 +377,20 @@ flowchart LR
     Exec["firmware-exec<br/>validate, then execute"]
     Reports[USB boot-keyboard reports]
 
-    Python -->|yield effect| Supervisor
-    Supervisor --> Keyboard --> KBD1 --> WS --> HIDQ --> Exec --> Reports
+    Python -->|keyboard effect in Worker| Keyboard --> KBD1 --> Supervisor
+    Supervisor --> WS --> HIDQ --> Exec --> Reports
     Exec -->|completed/rejected/cancelled| Supervisor
     Supervisor -->|send(value) / throw(error)| Python
 ```
 
 Process path:
 
-1. The Worker compiles user source with RustPython 0.6 and calls `main()`. `main()` must return a generator and call `layout()` once.
-2. Each yielded typed effect returns control to the frontend. A 500 ms main-thread deadline terminates the Worker if a generator step does not yield.
-3. Local sleep/event effects remain in the browser. Keyboard effects are lowered by `keyboard-core` and encoded as KBD1.
+1. The Worker compiles user source with RustPython 0.6, requires a module-scope `layout()` call, and calls `main()` to obtain a generator.
+2. Initialization, compilation, and the first yield share a 30-second deadline; subsequent resume/raise steps have 500 ms. The frontend terminates the Worker when a deadline expires.
+3. Local sleep/event effects remain in the browser. The Worker lowers keyboard effects through `keyboard-core` and returns KBD1 to the frontend for validation and transport.
 4. Binary kind 8 carries exact request, process, and effect IDs plus up to 4,096 KBD1 bytes.
 5. Firmware validates flags, canonical varints, usages, delays, operation count, `END` placement, trailing data, and CRC before emitting the first HID report.
-6. Completion resumes the generator. Disconnects, unavailable USB/host-agent capability, rejection, and cancellation are injected with `generator.throw()` and can be caught by Python.
+6. Completion resumes the generator. Disconnects, unavailable USB/host-agent capability, rejection, firmware cancellation, and device-effect timeout are injected with `generator.throw()` and can be caught by Python. The Web UI Stop action immediately terminates the Worker after best-effort device cancellation; it does not resume Python cleanup.
 
 The browser never retries a keyboard effect because its outcome may be unknown after disconnect. Closing/reloading the tab terminates the Worker; no Python state is persisted to the Pico.
 
@@ -488,6 +494,8 @@ measurement; diagnostics measure dispatch from the sampling instant.
 When adding a feature, keep ownership at one layer and pass bounded messages across boundaries. Avoid introducing a second WebSocket owner, bypassing the USB control task, or sharing mutable firmware state without an existing Embassy/static synchronization pattern.
 
 ## Failure containment
+
+The [threat model](THREAT_MODEL.md) treats the USB-connected PC and host-agent instance as hostile, while trusting the Pico firmware and Wi-Fi clients. Host-provided data remains untrusted after successful transfer authentication; encrypted delivery and matching hashes do not establish file provenance. The controls below describe current containment, not a complete malicious-host security audit.
 
 - Firmware rejects oversized TLV, bytecode, path, filename, and WebSocket payloads before copying into fixed buffers.
 - Unknown USB tags and many malformed frames are logged/ignored rather than panicking.

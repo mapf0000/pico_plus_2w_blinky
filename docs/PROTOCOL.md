@@ -7,7 +7,8 @@ Related documents:
 - [Architecture](ARCHITECTURE.md)
 - [Hardware](HARDWARE.md)
 - [Contributor guidance](../AGENTS.md)
-- [RustPython process design](RUSTPYTHON_PROCESS_PLAN.md)
+- [Python scripting reference](SCRIPTING.md)
+- [Threat model](THREAT_MODEL.md)
 
 ## Scope and conventions
 
@@ -182,6 +183,8 @@ The browser generates the random 256-bit session master after the Noise handshak
 
 This unattended mode provides encrypted transport but no browser authentication. Any client that can access the Pico Web UI can request a bootstrap secret, establish a session, and request host files. It protects established transfers from passive observers that did not participate in negotiation, but it does not protect against an active firmware/USB relay or another authorized Pico Web UI client.
 
+The project [threat model](THREAT_MODEL.md) considers the source PC and host agent untrusted. That endpoint has the source plaintext and session keys and can generate valid encrypted malicious files with matching hashes. AEAD and SHA-256 verify transport consistency, not source trust or file provenance. The trusted receiving browser's local storage is not exposed to the source PC by this protocol.
+
 The session envelope used inside USB tags 32/33 and WebSocket binary kind 3 is:
 
 | Field | Type | Notes |
@@ -278,7 +281,7 @@ The close plaintext is `total_size: u64`, `chunk_count: u32`, and `sha256: bytes
 
 ### ACK, result, abort, and backpressure
 
-Tags 22, 24, and 25 retain their v1 binary layouts below. They are unencrypted flow-control/diagnostic messages and are never treated as proof of end-to-end authenticity. The host validates ACK monotonicity, sent-index bounds, and offset consistency. Firmware waits for WebSocket queue capacity before ACKing a new chunk, preserving the existing USB-to-browser backpressure chain. Duplicate chunks are ACKed without a second relay.
+Tags 22, 24, and 25 use the current layouts below, unchanged from v1. They are unencrypted flow-control/diagnostic messages and are never treated as proof of end-to-end authenticity. The host validates ACK monotonicity, sent-index bounds, and offset consistency. Firmware waits for WebSocket queue capacity before ACKing a new chunk, preserving the existing USB-to-browser backpressure chain. Duplicate chunks are ACKed without a second relay.
 
 The host opens one regular-file handle and reads the file once in at most 2002-byte plaintext buffers. It hashes and encrypts each buffer immediately, zeroizes best-effort plaintext buffers, and retains only bounded ciphertext for retries. It does not pre-read, buffer the whole file, or automatically compress it. Compression is deliberately omitted because many inputs are already compressed, content-dependent sizes can leak information, and streaming encryption meets the memory/privacy goal without a second transformation.
 
@@ -290,57 +293,6 @@ Implementation:
 - Opaque firmware relay/backpressure: `firmware/src/usb/ctrl/relay.rs`
 - Frontend session/decryption/receipt and state: `apps/frontend/src/transfer/secure.rs`, `store.rs`
 
-## Legacy file-transfer protocol v1 (disabled)
-
-The following layouts are retained only for tag-history and migration reference. Current firmware does not produce them, the frontend does not accept plaintext transfer manifests/chunks, and the current host rejects plaintext start/default requests.
-
-### Limits and integrity
-
-| Item | Limit/value |
-| --- | ---: |
-| TLV payload | 2048 bytes |
-| File-chunk fixed overhead | 26 bytes |
-| Maximum chunk data | 2022 bytes |
-| Firmware file name | 96 bytes |
-| Concurrent firmware relay states | 4 |
-| Initial sender window | 8 chunks |
-| Firmware advertised window | 8 chunks |
-| Host accepted credit range | 1–64 chunks |
-| ACK timeout | 5 seconds |
-| Retries per oldest unacknowledged chunk | 5 |
-| Final result timeout | 300 seconds |
-| Browser transfer-event queue | 16 events |
-
-Each file is hashed with SHA-256 before transfer. Every chunk carries CRC32/IEEE over the data bytes. Firmware validates CRC32 before relaying or acknowledging a chunk. The browser validates CRC32 again, enforces ordering/size, computes rolling SHA-256, stages chunks in IndexedDB, and compares the final SHA-256 before download.
-
-### `FILE_OPEN` — tag 20
-
-| Field | Type |
-| --- | --- |
-| `protocol_version` | `u16`, must be 1 |
-| `transfer_id` | `u64` |
-| `total_size` | `u64` |
-| `chunk_size` | `u16`, must be 1–2022 |
-| `chunk_count` | `u32` |
-| `sha256` | `bytes[32]` |
-| `file_name_len` | `u16` |
-| `file_name` | `utf8[file_name_len]` |
-
-The host derives `chunk_count = ceil(total_size / chunk_size)`; an empty file has zero chunks. Firmware accepts a duplicate open with identical metadata and returns current ACK state. A duplicate ID with different metadata is aborted.
-
-### `FILE_CHUNK` — tag 21
-
-| Field | Type |
-| --- | --- |
-| `transfer_id` | `u64` |
-| `chunk_index` | `u32` |
-| `offset` | `u64` |
-| `payload_len` | `u16` |
-| `payload` | `bytes[payload_len]` |
-| `chunk_crc32` | `u32`, CRC32/IEEE of `payload` |
-
-The required offset is `chunk_index * chunk_size`. All chunks except the final chunk are exactly `chunk_size`; the final chunk covers the remaining bytes. Firmware accepts chunks strictly in order. A duplicate is acknowledged without being relayed twice; a future/out-of-order chunk receives an ACK with zero credit and is not accepted.
-
 ### `FILE_ACK` — tag 22
 
 | Field | Type |
@@ -351,16 +303,6 @@ The required offset is `chunk_index * chunk_size`. All chunks except the final c
 | `window_credit` | `u16` |
 
 The host removes all in-flight chunks through `highest_contiguous_chunk`. It clamps credit into 1–64, so a zero-credit out-of-order response effectively reduces the sender to one in-flight chunk rather than pausing it completely.
-
-### `FILE_CLOSE` — tag 23
-
-| Field | Type |
-| --- | --- |
-| `transfer_id` | `u64` |
-| `sent_chunk_count` | `u32` |
-| `sent_total_size` | `u64` |
-
-Firmware succeeds only if sender totals, received bytes, and accepted chunk count all match the open metadata.
 
 ### `FILE_RESULT` — tag 24
 
@@ -375,9 +317,9 @@ Result codes:
 
 | Code | Meaning | Current firmware emission |
 | ---: | --- | --- |
-| 0 | OK | Successful close |
+| 0 | OK | All declared chunks accepted and encrypted close queued for the browser |
 | 1 | Hash mismatch | Defined by host decoder; not currently emitted by firmware |
-| 2 | Size/count mismatch | Close validation failed |
+| 2 | Size/count mismatch | Close session ID or accepted chunk count does not match the relay state |
 | 3 | Aborted | Firmware received `FILE_ABORT` |
 | 4 | Internal error | Defined by host decoder; not currently emitted by firmware |
 | Other | Unknown/future | Preserved by host decoder |
@@ -391,50 +333,42 @@ Result codes:
 | `detail_len` | `u16` |
 | `detail` | `utf8[detail_len]` |
 
-Firmware-generated reason codes:
+Abort reason codes:
 
-| Code | Meaning |
+| Code | Meaning and current use |
 | ---: | --- |
-| 1 | Protocol/version/metadata-shape error |
-| 2 | Duplicate transfer ID with mismatched metadata |
-| 3 | Invalid chunk index, offset, size, or bounds |
+| 1 | Host sender failure, including read/metadata errors and exhausted ACK retries; malformed encrypted envelopes are logged and rejected silently by firmware |
+| 2 | Duplicate transfer ID with a mismatched public open envelope |
+| 3 | Invalid encrypted chunk session/size/bounds |
 | 4 | Unknown transfer ID |
-| 5 | Capacity/relay failure, including no browser, a disconnected browser, full state, or envelope overflow |
+| 5 | Capacity/relay failure, including no browser, a disconnected browser, or full relay state |
 
-The host also uses reason 1 when its ACK retry budget is exhausted. Treat reason strings as diagnostics and reason numbers as the stable machine-readable field.
+Codes 2–5 are emitted by firmware; the host uses code 1 for local sender failures. Treat reason strings as diagnostics and reason numbers as the stable machine-readable field.
 
-### Transfer state machine
+### Transfer completion lifecycle
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Opening: host sends FILE_OPEN
-    Opening --> Sending: firmware validates and ACKs
-    Opening --> Aborted: firmware sends FILE_ABORT
-    Sending --> Sending: FILE_CHUNK -> relay/drop -> FILE_ACK
-    Sending --> Sending: timeout -> resend oldest chunk
-    Sending --> Aborted: retry limit or validation/relay failure
-    Sending --> Closing: all chunks acknowledged; host sends FILE_CLOSE
-    Closing --> Complete: firmware sends FILE_RESULT(OK)
-    Closing --> Failed: firmware sends non-OK FILE_RESULT
+    [*] --> Opening: host sends encrypted FILE_OPEN
+    Opening --> Sending: firmware queues open and ACKs
+    Opening --> Aborted: relay rejects open
+    Sending --> Sending: encrypted chunk queued, then ACK
+    Sending --> Sending: timeout, resend cached ciphertext
+    Sending --> Aborted: retry limit or sender/relay failure
+    Sending --> AwaitingCompletion: all chunks acknowledged, send encrypted FILE_CLOSE
+    AwaitingCompletion --> AwaitingCompletion: collect relay result or browser receipt
+    AwaitingCompletion --> Complete: both OK result and matching encrypted receipt
+    AwaitingCompletion --> Failed: non-OK result, mismatched receipt, or timeout
     Aborted --> [*]
     Failed --> [*]
     Complete --> [*]
 ```
 
-In `relay` mode, firmware awaits space in the WebSocket event channel before acknowledging an accepted USB chunk. This propagates backpressure through the firmware queue and host ACK window. The ACK means the chunk was accepted and queued for WebSocket transmission; it does not mean browser IndexedDB persistence or final SHA-256 verification has completed.
+The relay result and browser receipt may arrive in either order; the host requires both before success. Firmware cannot inspect the encrypted close totals/hash. Its OK means the declared public chunk count was accepted and close was queued; the browser additionally checks exact manifest/close lengths, streamed size/count, and SHA-256. Receipt verification does not confirm that the user saved the file. See [architecture](ARCHITECTURE.md#file-transfer-path-and-backpressure) for queue ownership and persistence boundaries.
 
-In the legacy `simulation` mode, firmware performed USB validation, ACK, result, and progress accounting while dropping bytes. Secure v2 requires a browser receipt and disables this mode.
+### Disabled legacy transfer formats
 
-Historical v1 component locations (the files now implement v2):
-
-- Host protocol, hashing, window, retry, and timeout logic: `apps/host-agent/src/file_transfer.rs`
-- Host request dispatch and feedback routing: `apps/host-agent/src/dispatch.rs`
-- Firmware state machine and ACK/result/abort encoding: `firmware/src/usb/ctrl/relay.rs`
-- Firmware parsing/relay: `firmware/src/usb/ctrl/relay.rs`
-- Firmware WebSocket event conversion: `firmware/src/usb/ctrl/relay/events.rs`
-- Frontend event model and binary decoder: `apps/frontend/src/transfer/protocol.rs`
-- Frontend validation/state/hash: `apps/frontend/src/transfer/store.rs`
-- Frontend IndexedDB and download: `apps/frontend/src/transfer/storage.rs`, `apps/frontend/ui/idb.js`
+V1 plaintext `FILE_OPEN`, `FILE_CHUNK`, and `FILE_CLOSE` are unsupported. Plaintext start/default tags 27/28 and WebSocket binary kind 1 remain reserved and disabled. Current firmware requires v2 envelopes; the frontend rejects plaintext manifests/chunks and the host rejects plaintext start/default requests. There is no downgrade or simulation/drop mode. ACK/result/abort layouts remain active as specified above; historical plaintext formats are available in Git history.
 
 ## Filesystem protocol v1 over TLV
 
