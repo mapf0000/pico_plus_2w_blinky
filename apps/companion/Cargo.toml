@@ -16,6 +16,8 @@ btleplug = "0.13.4"
 uuid = "1.23.0"
 ble-protocol = { path = "../../crates/ble-protocol" }
 
+script-protocol = { path = "../../crates/script-protocol" }
+
 [features]
 # Development-only native screenshot capture; not enabled in normal builds.
 screenshot = ["eframe/__screenshot"]

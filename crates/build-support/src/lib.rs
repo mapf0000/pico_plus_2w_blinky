@@ -1,36 +1,19 @@
 //! Build-support helpers invoked from the workspace `build.rs`.
 //!
-//! Responsibilities (kept small and focused):
-//! - Install the linker script (`memory.x`) into `OUT_DIR` and add it to the
-//!   link search path for the firmware target.
-//! - Ensure the Web UI (Yew) is built with Trunk to an isolated release
-//!   directory under `OUT_DIR` when sources change, then copy a few
-//!   stable-named assets and generate `frontend_static.rs` with `include_*`
-//!   statements. Development output in `apps/frontend/dist/` is never embedded.
-//! - Avoid leaking embedded-only flags into the wasm build by scrubbing
-//!   environment variables when spawning Trunk.
-//! - Provide simple size guards via env variables.
+//! Installs the linker script and builds keyboard presets and the CDC agent image.
 
 use anyhow::{Context, Result, bail};
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-};
-use which::which;
+use std::{env, fs, path::PathBuf};
 
 /// Entry point called from the workspace `build.rs`.
 ///
 /// Steps:
 /// 1) Emit `rerun-if-*` hints for relevant env and files.
 /// 2) Copy `memory.x` into `OUT_DIR` and expose it to the linker.
-/// 3) Rebuild the Web UI with Trunk if sources changed, then embed assets.
+/// 3) Generate typed keyboard presets and embed the internal CDC agent image.
 pub fn run() -> Result<()> {
-    // Re-run on env var changes (size guards + MSC label)
+    // Re-run on env var changes (identity and internal image label)
     cargo::rerun_if_env(&[
-        env_consts::WARN_BYTES,
-        env_consts::MAX_BYTES,
-        env_consts::PYTHON_WARN_BYTES,
-        env_consts::PYTHON_MAX_BYTES,
         env_consts::MSC_LABEL,
         env_consts::FIRMWARE_BUILD,
         env_consts::USB_SERIAL,
@@ -66,9 +49,6 @@ pub fn run() -> Result<()> {
     // 1) Linker script
     linker::install_memory_x(&cfg)?;
 
-    // 2) Frontend pipeline (always required; auto-staleness detection)
-    frontend::register_reruns(&cfg);
-    frontend::prepare(&cfg)?;
     msc_image::register_reruns(&cfg);
     msc_image::prepare(&cfg)?;
 
@@ -86,28 +66,14 @@ struct Config {
     manifest_dir: PathBuf,
     /// Workspace root (repo root).
     repo_root: PathBuf,
-    /// Path to the frontend crate.
-    frontend_dir: PathBuf,
-    /// Path to the dedicated RustPython Worker crate.
-    python_worker_dir: PathBuf,
     /// Active profile (e.g., `debug` or `release`).
     profile: String,
     /// Active compilation target triple.
     target: String,
-    /// Soft size threshold for the built WebAssembly (emits a warning).
-    warn_bytes: u64,
-    /// Hard size limit for the WebAssembly (fails the build when exceeded).
-    max_bytes: Option<u64>,
-    python_warn_bytes: u64,
-    python_max_bytes: u64,
 }
 
 /// Environment variable names used by the build.
 mod env_consts {
-    pub const WARN_BYTES: &str = "PICO_WASM_WARN_BYTES";
-    pub const MAX_BYTES: &str = "PICO_WASM_MAX_BYTES";
-    pub const PYTHON_WARN_BYTES: &str = "PICO_PYTHON_WASM_WARN_BYTES";
-    pub const PYTHON_MAX_BYTES: &str = "PICO_PYTHON_WASM_MAX_BYTES";
     pub const MSC_LABEL: &str = "PICO_MSC_LABEL";
     pub const FIRMWARE_BUILD: &str = "PICO_FIRMWARE_BUILD";
     pub const USB_SERIAL: &str = "PICO_USB_SERIAL";
@@ -121,46 +87,16 @@ impl Config {
             .parent()
             .context("workspace root not found (expected firmware crate at firmware/)")?
             .to_path_buf();
-        let frontend_dir = repo_root.join("apps/frontend");
-        let python_worker_dir = repo_root.join("apps/python-worker");
         let profile = env::var("PROFILE").unwrap_or_default();
         let target = env::var("TARGET").unwrap_or_default();
-
-        let warn_bytes = env::var(env_consts::WARN_BYTES)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1_200_000);
-        let max_bytes = env::var(env_consts::MAX_BYTES)
-            .ok()
-            .and_then(|s| s.parse().ok());
-        let python_warn_bytes = env::var(env_consts::PYTHON_WARN_BYTES)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3_500_000);
-        let python_max_bytes = env::var(env_consts::PYTHON_MAX_BYTES)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(4_750_000);
 
         Ok(Self {
             out_dir,
             manifest_dir,
             repo_root,
-            frontend_dir,
-            python_worker_dir,
             profile,
             target,
-            warn_bytes,
-            max_bytes,
-            python_warn_bytes,
-            python_max_bytes,
         })
-    }
-
-    #[allow(dead_code)]
-    /// True when building a release for an embedded `thumb*` target.
-    fn is_embedded_release(&self) -> bool {
-        self.profile == "release" && self.target.starts_with("thumb")
     }
 }
 
@@ -212,8 +148,6 @@ mod linker {
         Ok(())
     }
 }
-
-mod frontend;
 
 mod msc_image;
 

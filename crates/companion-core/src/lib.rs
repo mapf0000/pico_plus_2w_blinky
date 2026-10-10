@@ -1,9 +1,7 @@
 //! Native companion state and bounded transport seam, independent of egui and BLE APIs.
 //!
-//! The typed requests here are internal messages, not a new wire protocol. The
-//! mock uses the production script envelope and KBD1 validator. The native BLE
-//! adapter validates a separate read-only service; authenticated control and
-//! command transport framing remain deferred.
+//! Client requests are internal messages. BLE uses the shared bounded fragment
+//! protocol, while keyboard effects retain the production script envelope/KBD1.
 
 mod client;
 pub mod keyboard;
@@ -95,6 +93,8 @@ pub struct Capabilities {
     pub firmware: String,
     pub layouts: Vec<String>,
     pub status: Status,
+    /// Extra budget for BLE fragmentation; mock transports need none.
+    pub upload_timeout: Duration,
 }
 
 impl Capabilities {
@@ -170,7 +170,7 @@ pub struct Snapshot {
     pub devices: Vec<Device>,
     pub selected: Option<Device>,
     pub capabilities: Option<Capabilities>,
-    /// Mock authorization only. This is never evidence of authenticated BLE pairing.
+    /// Granted by this connection after transport authentication.
     pub control_acquired: bool,
     pub pending: bool,
     pub job: Job,
@@ -206,6 +206,7 @@ pub enum Action {
     Connect(String),
     Acquire,
     Release,
+    SetUsbEnabled(bool),
     SendText {
         text: String,
         layout: String,
@@ -227,6 +228,7 @@ pub enum Operation {
     Connect(Device),
     Acquire,
     Release,
+    SetUsbEnabled(bool),
     Status,
     Run(Vec<u8>),
     Cancel(Vec<u8>),

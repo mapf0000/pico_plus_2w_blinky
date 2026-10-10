@@ -10,13 +10,13 @@ use eframe::egui;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Native Pico companion feasibility app (mock or read-only Bluetooth)"
+    about = "Native Pico companion feasibility app (mock or Bluetooth control)"
 )]
 struct Args {
     /// Use an in-memory device.
-    #[arg(long, required_unless_present = "ble", conflicts_with = "ble")]
+    #[arg(long, conflicts_with = "ble")]
     mock: bool,
-    /// Discover and read a Pico running opt-in BLE firmware. No control writes.
+    /// Connect to a Pico over Bluetooth.
     #[arg(long)]
     ble: bool,
     /// normal, empty, permission-denied, busy, usb-unavailable, incompatible,
@@ -29,7 +29,8 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    args.ble = !args.mock;
     let mode = if args.ble {
         backend::Mode::Ble
     } else {

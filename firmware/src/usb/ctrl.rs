@@ -7,12 +7,16 @@ use embassy_usb::driver::{Driver, EndpointError};
 use heapless::{String, Vec};
 use portable_atomic::Ordering;
 
-use crate::http::transfer;
-use crate::http::util::escape_json_str;
+use crate::usb::events as transfer;
+use crate::usb::events::escape_json_str;
 
 #[allow(
     clippy::large_enum_variant,
     reason = "the bounded no_std command channel intentionally owns payloads and paths without heap indirection"
+)]
+#[allow(
+    dead_code,
+    reason = "USB bulk relay operations retained for a future native receiver"
 )]
 pub enum CtrlCommand {
     RequestStatus,
@@ -45,7 +49,7 @@ use relay::{
 };
 pub use view::{
     CTRL_CHAN, CTRL_READY, TransferRelayMode, TransferViewState, set_transfer_relay_mode,
-    transfer_relay_mode, transfer_view_snapshot,
+    transfer_view_snapshot,
 };
 
 /// Reject new operations during bootstrap rather than queueing stale commands for handoff.
@@ -701,7 +705,6 @@ where
                 snapshot.version.as_str(),
                 snapshot.hostname.as_str()
             );
-            let _ = transfer::queue_text(crate::capabilities::hello_json());
         }
         TAG_HOST_OS => {
             crate::capabilities::record_host_os(payload);

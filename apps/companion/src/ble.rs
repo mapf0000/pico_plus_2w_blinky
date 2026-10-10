@@ -1,6 +1,6 @@
-//! CoreBluetooth/BlueZ/WinRT worker. Only discovery, connect and GATT reads exist.
+//! Bounded CoreBluetooth/BlueZ/WinRT control worker.
 use btleplug::{
-    api::{Central, CharPropFlags, Manager as _, Peripheral as _, ScanFilter},
+    api::{Central, CharPropFlags, Manager as _, Peripheral as _, ScanFilter, WriteType},
     platform::{Adapter, Manager, Peripheral},
 };
 use companion_core::{
@@ -18,8 +18,12 @@ const CLEANUP_TIMEOUT: Duration = Duration::from_millis(750);
 const SCAN_TIME: Duration = Duration::from_secs(2);
 const SERVICE: Uuid = Uuid::from_u128(ble_protocol::SERVICE_UUID);
 const INFO: Uuid = Uuid::from_u128(ble_protocol::INFO_UUID);
+const PAIR: Uuid = Uuid::from_u128(ble_protocol::PAIR_UUID);
+const COMMAND: Uuid = Uuid::from_u128(ble_protocol::COMMAND_UUID);
+const RESULT: Uuid = Uuid::from_u128(ble_protocol::RESULT_UUID);
 const STATUS: Uuid = Uuid::from_u128(ble_protocol::STATUS_UUID);
 
+#[derive(Clone)]
 struct Command {
     generation: u64,
     request: Request,
@@ -29,6 +33,7 @@ pub struct BleTransport {
     commands: mpsc::Sender<Command>,
     events: mpsc::Receiver<Event>,
     reset: watch::Sender<u64>,
+    cancel: watch::Sender<Option<Command>>,
     stop: Option<oneshot::Sender<()>>,
     worker: JoinHandle<()>,
 }
@@ -42,12 +47,14 @@ impl BleTransport {
         let (commands, rx) = mpsc::channel(4);
         let (tx, events) = mpsc::channel(16);
         let (reset, reset_rx) = watch::channel(0);
+        let (cancel, cancel_rx) = watch::channel(None);
         let (stop, stop_rx) = oneshot::channel();
-        let worker = tokio::spawn(run(radio, rx, tx, reset_rx, stop_rx));
+        let worker = tokio::spawn(run(radio, rx, tx, reset_rx, cancel_rx, stop_rx));
         Self {
             commands,
             events,
             reset,
+            cancel,
             stop: Some(stop),
             worker,
         }
@@ -63,6 +70,13 @@ impl BleTransport {
 
 impl Transport for BleTransport {
     fn submit(&mut self, request: Request, _: Duration) -> Result<(), Failure> {
+        if matches!(request.operation, Operation::Cancel(_)) {
+            self.cancel.send_replace(Some(Command {
+                generation: *self.reset.borrow(),
+                request,
+            }));
+            return Ok(());
+        }
         self.commands
             .try_send(Command {
                 generation: *self.reset.borrow(),
@@ -90,18 +104,23 @@ struct Radio {
     devices: Vec<Device>,
     connected: Option<Peripheral>,
     scanning: bool,
+    token: u16,
+    active: Option<(script_protocol::EffectId, u16)>,
 }
 
 trait RadioIo {
     fn cleanup(&mut self) -> impl std::future::Future<Output = ()> + Send;
     fn request(
         &mut self,
-        operation: Operation,
+        request: Request,
+        events: &mpsc::Sender<Event>,
     ) -> impl std::future::Future<Output = Result<Reply, Failure>> + Send;
 }
 
 impl RadioIo for Radio {
     async fn cleanup(&mut self) {
+        self.active = None;
+        self.token = 0;
         if let Some(peripheral) = self.connected.take() {
             let _ = tokio::time::timeout(CLEANUP_TIMEOUT, peripheral.disconnect()).await;
         }
@@ -113,8 +132,13 @@ impl RadioIo for Radio {
         }
     }
 
-    async fn request(&mut self, operation: Operation) -> Result<Reply, Failure> {
-        match operation {
+    async fn request(
+        &mut self,
+        request: Request,
+        events: &mpsc::Sender<Event>,
+    ) -> Result<Reply, Failure> {
+        let tag = request.tag;
+        match request.operation {
             Operation::Scan => {
                 self.devices.clear();
                 if self.adapter.is_none() {
@@ -197,10 +221,14 @@ impl RadioIo for Radio {
                 let info = ble_protocol::Info::decode(&bytes).map_err(protocol_failure)?;
                 let status = read_status(&peripheral).await?;
                 Ok(Reply::Connected(Capabilities {
-                    read_only: true,
-                    script_version: 0,
+                    read_only: false,
+                    script_version: script_protocol::VERSION,
+                    upload_timeout: Duration::from_secs(60),
                     firmware: info.build_label().into(),
-                    layouts: vec![],
+                    layouts: companion_core::layouts()
+                        .iter()
+                        .map(|layout| (*layout).into())
+                        .collect(),
                     status,
                 }))
             }
@@ -211,10 +239,166 @@ impl RadioIo for Radio {
                 }
                 Ok(Reply::Status(read_status(peripheral).await?))
             }
-            // No characteristic writes, subscriptions, control leases or keyboard effects.
-            _ => Err(Failure::ReadOnly),
+            Operation::Acquire => {
+                let peripheral = self.connected.as_ref().ok_or(Failure::LinkLost)?;
+                // An ATT authentication error triggers the OS pairing dialog.
+                peripheral
+                    .read(&characteristic(peripheral, PAIR)?)
+                    .await
+                    .map_err(failure)?;
+                let code = self.control(ble_protocol::ACQUIRE).await?;
+                if code == ble_protocol::Code::Acquired {
+                    Ok(Reply::Acquired)
+                } else {
+                    Err(code_failure(code))
+                }
+            }
+            Operation::Release => {
+                let code = self.control(ble_protocol::RELEASE).await?;
+                if code == ble_protocol::Code::Released {
+                    Ok(Reply::Released)
+                } else {
+                    Err(code_failure(code))
+                }
+            }
+            Operation::SetUsbEnabled(enabled) => {
+                let code = self
+                    .control(if enabled {
+                        ble_protocol::USB_ON
+                    } else {
+                        ble_protocol::USB_OFF
+                    })
+                    .await?;
+                if code != ble_protocol::Code::UsbChanged {
+                    return Err(code_failure(code));
+                }
+                Ok(Reply::Status(
+                    read_status(self.connected.as_ref().ok_or(Failure::LinkLost)?).await?,
+                ))
+            }
+            Operation::Run(frame) => {
+                let script_protocol::Message::Run { id, .. } =
+                    script_protocol::decode(&frame).map_err(|_| Failure::InvalidData)?
+                else {
+                    return Err(Failure::InvalidData);
+                };
+                let token = self.next_token()?;
+                self.active = Some((id, token));
+                self.upload(ble_protocol::KIND_SCRIPT, token, &frame)
+                    .await?;
+                let first = self.wait_result(token, None, false).await?;
+                if first == ble_protocol::Code::Accepted {
+                    events
+                        .try_send(Event::Reply {
+                            tag,
+                            reply: Reply::Accepted(id),
+                        })
+                        .map_err(|_| Failure::QueueFull)?;
+                    let code = self.wait_result(token, None, true).await?;
+                    self.active = None;
+                    finished(id, code)
+                } else {
+                    self.active = None;
+                    finished(id, first)
+                }
+            }
+            Operation::Cancel(frame) => {
+                let script_protocol::Message::Cancel { id } =
+                    script_protocol::decode(&frame).map_err(|_| Failure::InvalidData)?
+                else {
+                    return Err(Failure::InvalidData);
+                };
+                let Some((expected, run_token)) = self.active else {
+                    // Priority cancellation may arrive before its queued Run starts.
+                    // The actor discards that Run; no device command was admitted.
+                    return Ok(Reply::Finished {
+                        id,
+                        outcome: companion_core::Outcome::Cancelled,
+                    });
+                };
+                if id != expected {
+                    return Err(Failure::InvalidData);
+                }
+                let token = self.next_token()?;
+                self.upload(ble_protocol::KIND_SCRIPT, token, &frame)
+                    .await?;
+                let code = self.wait_result(run_token, Some(token), true).await?;
+                self.active = None;
+                finished(id, code)
+            }
         }
     }
+}
+
+impl Radio {
+    fn next_token(&mut self) -> Result<u16, Failure> {
+        self.token = self.token.checked_add(1).ok_or(Failure::IdExhausted)?;
+        Ok(self.token)
+    }
+    async fn upload(&self, kind: u8, token: u16, bytes: &[u8]) -> Result<(), Failure> {
+        let peripheral = self.connected.as_ref().ok_or(Failure::LinkLost)?;
+        let characteristic = peripheral
+            .characteristics()
+            .into_iter()
+            .find(|c| {
+                c.service_uuid == SERVICE
+                    && c.uuid == COMMAND
+                    && c.properties.contains(CharPropFlags::WRITE)
+            })
+            .ok_or(Failure::Incompatible)?;
+        for offset in (0..bytes.len()).step_by(ble_protocol::PAYLOAD_LEN) {
+            let (frame, length) =
+                ble_protocol::fragment(kind, token, bytes, offset).map_err(protocol_failure)?;
+            peripheral
+                .write(&characteristic, &frame[..length], WriteType::WithResponse)
+                .await
+                .map_err(failure)?;
+        }
+        Ok(())
+    }
+    async fn wait_result(
+        &self,
+        token: u16,
+        alternate: Option<u16>,
+        terminal: bool,
+    ) -> Result<ble_protocol::Code, Failure> {
+        let peripheral = self.connected.as_ref().ok_or(Failure::LinkLost)?;
+        let characteristic = characteristic(peripheral, RESULT)?;
+        loop {
+            let bytes = peripheral.read(&characteristic).await.map_err(failure)?;
+            let value = ble_protocol::ResultValue::decode(&bytes).map_err(protocol_failure)?;
+            if (value.token == token || alternate == Some(value.token))
+                && (!terminal || value.code != ble_protocol::Code::Accepted)
+            {
+                return Ok(value.code);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    async fn control(&mut self, opcode: u8) -> Result<ble_protocol::Code, Failure> {
+        let token = self.next_token()?;
+        self.upload(ble_protocol::KIND_CONTROL, token, &[opcode])
+            .await?;
+        self.wait_result(token, None, false).await
+    }
+}
+fn code_failure(code: ble_protocol::Code) -> Failure {
+    match code {
+        ble_protocol::Code::Busy => Failure::Busy,
+        ble_protocol::Code::UsbUnavailable => Failure::UsbUnavailable,
+        _ => Failure::NotReady,
+    }
+}
+fn finished(id: script_protocol::EffectId, code: ble_protocol::Code) -> Result<Reply, Failure> {
+    use ble_protocol::Code;
+    let outcome = match code {
+        Code::Completed => companion_core::Outcome::Completed,
+        Code::Cancelled => companion_core::Outcome::Cancelled,
+        Code::Rejected => companion_core::Outcome::Rejected,
+        Code::UsbUnavailable => companion_core::Outcome::UsbUnavailable,
+        _ => return Err(code_failure(code)),
+    };
+    Ok(Reply::Finished { id, outcome })
 }
 
 fn characteristic(
@@ -268,24 +452,48 @@ async fn run(
     mut commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<Event>,
     mut reset: watch::Receiver<u64>,
+    mut cancel: watch::Receiver<Option<Command>>,
     mut stop: oneshot::Receiver<()>,
 ) {
+    let mut urgent = None;
+    let mut cancelled_tag = None;
     loop {
-        let command = tokio::select! {
-            biased;
-            _ = &mut stop => break,
-            changed = reset.changed() => {
-                if changed.is_err() { break; }
-                reset.borrow_and_update();
-                radio.cleanup().await;
-                continue;
+        let command = if let Some(command) = urgent.take() {
+            command
+        } else {
+            tokio::select! {
+                biased;
+                _ = &mut stop => break,
+                changed = reset.changed() => {
+                    if changed.is_err() { break; }
+                    reset.borrow_and_update();
+                    radio.cleanup().await;
+                    continue;
+                }
+                changed = cancel.changed() => {
+                    if changed.is_err() { break; }
+                    urgent = cancel.borrow_and_update().clone(); continue;
+                }
+                command = commands.recv() => match command { Some(command) => command, None => break },
             }
-            command = commands.recv() => match command { Some(command) => command, None => break },
         };
         if command.generation != *reset.borrow() {
             continue;
         }
         let tag = command.request.tag;
+        if matches!(command.request.operation, Operation::Cancel(_)) {
+            cancelled_tag = Some(tag);
+        } else if matches!(command.request.operation, Operation::Run(_))
+            && cancelled_tag == Some(tag)
+        {
+            // An urgent Cancel can overtake an unstarted Run in the normal queue.
+            continue;
+        }
+        let timeout = match &command.request.operation {
+            Operation::Acquire => Duration::from_secs(90),
+            Operation::Run(_) => Duration::from_secs(300),
+            _ => IO_TIMEOUT,
+        };
         let result = tokio::select! {
             biased;
             _ = &mut stop => break,
@@ -295,13 +503,22 @@ async fn run(
                 radio.cleanup().await;
                 continue;
             }
-            result = tokio::time::timeout(IO_TIMEOUT, radio.request(command.request.operation)) =>
+            changed = cancel.changed() => {
+                if changed.is_err() { break; }
+                urgent = cancel.borrow_and_update().clone(); continue;
+            }
+            result = tokio::time::timeout(timeout, radio.request(command.request,&events)) =>
                 result.unwrap_or(Err(Failure::Timeout)),
         };
         let reply = match result {
             Ok(reply) => reply,
             Err(error) => {
-                radio.cleanup().await;
+                if !matches!(
+                    error,
+                    Failure::Busy | Failure::UsbUnavailable | Failure::NotReady
+                ) {
+                    radio.cleanup().await;
+                }
                 Reply::Error(error)
             }
         };
@@ -326,8 +543,12 @@ mod tests {
         async fn cleanup(&mut self) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
-        async fn request(&mut self, operation: Operation) -> Result<Reply, Failure> {
-            match operation {
+        async fn request(
+            &mut self,
+            request: Request,
+            _: &mpsc::Sender<Event>,
+        ) -> Result<Reply, Failure> {
+            match request.operation {
                 Operation::Scan => std::future::pending().await,
                 Operation::Status => Ok(Reply::Status(Status::default())),
                 _ => Err(Failure::ReadOnly),
@@ -407,5 +628,155 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cleanups.load(Ordering::Relaxed), 1);
+    }
+    #[tokio::test]
+    async fn cancel_interrupts_a_stalled_upload_without_resetting_the_connection() {
+        struct UploadRadio(Arc<AtomicUsize>);
+        impl RadioIo for UploadRadio {
+            async fn cleanup(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+            async fn request(
+                &mut self,
+                request: Request,
+                _: &mpsc::Sender<Event>,
+            ) -> Result<Reply, Failure> {
+                match request.operation {
+                    Operation::Run(_) => std::future::pending().await,
+                    Operation::Cancel(_) => Ok(Reply::Finished {
+                        id: script_protocol::EffectId {
+                            request_id: 1,
+                            process_id: 1,
+                            effect_id: 1,
+                        },
+                        outcome: companion_core::Outcome::Cancelled,
+                    }),
+                    _ => Err(Failure::InvalidData),
+                }
+            }
+        }
+        let cleanups = Arc::new(AtomicUsize::new(0));
+        let mut transport = BleTransport::spawn(UploadRadio(cleanups.clone()));
+        let tag = Tag {
+            epoch: 1,
+            request: 1,
+        };
+        transport
+            .submit(
+                Request {
+                    tag,
+                    operation: Operation::Run(vec![]),
+                },
+                Duration::ZERO,
+            )
+            .unwrap();
+        tokio::task::yield_now().await;
+        transport
+            .submit(
+                Request {
+                    tag,
+                    operation: Operation::Cancel(vec![]),
+                },
+                Duration::ZERO,
+            )
+            .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(1), transport.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event,Event::Reply { tag:other,reply:Reply::Finished { outcome:companion_core::Outcome::Cancelled,.. }} if other == tag)
+        );
+        assert_eq!(cleanups.load(Ordering::Relaxed), 0);
+        transport.shutdown().await;
+    }
+    #[tokio::test]
+    async fn cancel_before_queued_run_starts_discards_the_run() {
+        struct QueuedRadio(Arc<AtomicUsize>);
+        impl RadioIo for QueuedRadio {
+            async fn cleanup(&mut self) {}
+            async fn request(
+                &mut self,
+                request: Request,
+                _: &mpsc::Sender<Event>,
+            ) -> Result<Reply, Failure> {
+                match request.operation {
+                    Operation::Run(_) => {
+                        self.0.fetch_add(1, Ordering::Relaxed);
+                        Err(Failure::InvalidData)
+                    }
+                    Operation::Cancel(_) => Ok(Reply::Finished {
+                        id: script_protocol::EffectId {
+                            request_id: 1,
+                            process_id: 1,
+                            effect_id: 1,
+                        },
+                        outcome: companion_core::Outcome::Cancelled,
+                    }),
+                    Operation::Status => Ok(Reply::Status(Status::default())),
+                    _ => Err(Failure::InvalidData),
+                }
+            }
+        }
+        let started = Arc::new(AtomicUsize::new(0));
+        let mut transport = BleTransport::spawn(QueuedRadio(started.clone()));
+        let tag = Tag {
+            epoch: 1,
+            request: 1,
+        };
+        // No yield: both requests are queued before the actor runs.
+        transport
+            .submit(
+                Request {
+                    tag,
+                    operation: Operation::Run(vec![]),
+                },
+                Duration::ZERO,
+            )
+            .unwrap();
+        transport
+            .submit(
+                Request {
+                    tag,
+                    operation: Operation::Cancel(vec![]),
+                },
+                Duration::ZERO,
+            )
+            .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(1), transport.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event,
+            Event::Reply {
+                reply: Reply::Finished {
+                    outcome: companion_core::Outcome::Cancelled,
+                    ..
+                },
+                ..
+            }
+        ));
+        // A following read proves the queue has been drained through the skipped Run.
+        let next = Tag {
+            epoch: 1,
+            request: 2,
+        };
+        transport
+            .submit(
+                Request {
+                    tag: next,
+                    operation: Operation::Status,
+                },
+                Duration::ZERO,
+            )
+            .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(1), transport.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event,Event::Reply { tag:other,reply:Reply::Status(_) } if other == next));
+        assert_eq!(started.load(Ordering::Relaxed), 0);
+        transport.shutdown().await;
     }
 }

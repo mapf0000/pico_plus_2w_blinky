@@ -1,3 +1,28 @@
+# Current Bluetooth security boundary
+
+The control PC and physically operated Pico are trusted; the USB target may be
+hostile. BLE discovery/status/result disclose only fixed public diagnostics.
+Control requires authenticated encrypted pairing plus numeric comparison
+confirmed on the Pico. Confirmation is refused before the current code is
+rendered and expires after 30 seconds. Just Works does not authorize commands.
+No persistent bonds are written; reconnect requires physical confirmation.
+TrouBLE logging is disabled because its upstream security diagnostics include
+pairing codes and bond material. Application diagnostics omit keys/text/bytecode.
+
+Only control acquisition/release, USB enable/disable and bounded keyboard effects
+are exposed over BLE. No shell, credentials, file contents or filesystem browsing
+is routed to BLE. Disconnect cancels this connection's effects, and old completion
+IDs cannot update a new connection. Local hardware jobs remain independent.
+One connection can occupy the radio and public information is readable without
+pairing; denial of service is an accepted prototype limitation.
+
+The WLAN/AP/browser frontend and Python Worker have been removed. The following
+sections retain the previous USB bulk-crypto design as a historical reference.
+Browser/Wi-Fi authorization descriptions are not current functionality. The
+host-agent bulk protocol is preserved, but firmware refuses delivery without a
+receiver and does not acknowledge file chunks. Bluetooth bulk transfer requires
+a separate authenticated receiver and backpressure design.
+
 # Threat model
 
 This document defines the project's security boundary and the limits of its current protections. Wire formats are specified in [PROTOCOL.md](PROTOCOL.md); the encryption lifecycle is described in [ARCHITECTURE.md](ARCHITECTURE.md#file-transfer-path-and-backpressure).

@@ -72,6 +72,7 @@ pub struct MockTransport {
     events: VecDeque<Scheduled>,
     connected: bool,
     acquired: bool,
+    usb_enabled: bool,
     active: Option<Active>,
 }
 
@@ -82,6 +83,7 @@ impl MockTransport {
             events: VecDeque::new(),
             connected: false,
             acquired: false,
+            usb_enabled: true,
             active: None,
         }
     }
@@ -93,9 +95,9 @@ impl MockTransport {
 
     fn status(&self) -> Status {
         Status {
-            usb_enabled: true,
+            usb_enabled: self.usb_enabled,
             uptime_secs: None,
-            usb_ready: self.scenario != Scenario::UsbUnavailable,
+            usb_ready: self.usb_enabled && self.scenario != Scenario::UsbUnavailable,
             host_agent_present: true,
         }
     }
@@ -212,6 +214,7 @@ impl Transport for MockTransport {
                     tag,
                     now,
                     Reply::Connected(Capabilities {
+                        upload_timeout: Duration::ZERO,
                         read_only: false,
                         script_version: if self.scenario == Scenario::Incompatible {
                             script_protocol::VERSION + 1
@@ -236,6 +239,12 @@ impl Transport for MockTransport {
                 self.reply(tag, now, Reply::Released)
             }
             Operation::Status if self.connected => {
+                self.reply(tag, now, Reply::Status(self.status()))
+            }
+            Operation::SetUsbEnabled(enabled)
+                if self.connected && self.acquired && self.active.is_none() =>
+            {
+                self.usb_enabled = enabled;
                 self.reply(tag, now, Reply::Status(self.status()))
             }
             Operation::Run(frame) => self.run(tag, &frame, now),

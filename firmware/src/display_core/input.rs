@@ -12,15 +12,6 @@ pub enum Button {
 
 impl Button {
     pub const ALL: [Self; 4] = [Self::A, Self::B, Self::X, Self::Y];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::A => "A",
-            Self::B => "B",
-            Self::X => "X",
-            Self::Y => "Y",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -158,7 +149,6 @@ pub struct Navigation {
 #[derive(Default)]
 pub struct Routing {
     pub page: ButtonMask,
-    pub script: ButtonMask,
     pub stop: bool,
     pub cycle_led: bool,
 }
@@ -199,24 +189,15 @@ impl Navigation {
         let releases = buttons.releases();
         let stop = releases.contains(Button::Y) && job_reserved;
         let mut page = releases;
-        let mut script = releases;
         if self.menu_open || gesture_consumed {
             page = ButtonMask::default();
-        }
-        for button in Button::ALL {
-            if payloads || self.menu_open || (gesture_consumed && button != Button::Y) {
-                script.remove(button);
-            }
         }
         if stop {
             // Stop wins over Run even when both releases arrive in one sample.
             page.remove(Button::X);
-            script.remove(Button::X);
-            script.remove(Button::Y);
         }
         Routing {
             page,
-            script,
             stop,
             cycle_led: releases.contains(Button::Y) && !stop && !payloads,
         }

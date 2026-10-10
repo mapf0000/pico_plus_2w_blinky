@@ -16,30 +16,16 @@ const WATCHDOG_FEED_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stage {
     Boot = 0,
-    HttpIndex = 1,
-    HttpJavascript = 2,
-    HttpStylesheet = 3,
-    HttpWasm = 4,
-    HttpIndexedDb = 5,
-    HttpHealth = 6,
-    WebSocketUpgrade = 7,
-    WebSocketHello = 8,
-    WebSocketActive = 9,
+    BluetoothAdvertising = 10,
+    BluetoothConnected = 11,
 }
 
 impl Stage {
     fn from_raw(value: u32) -> Option<Self> {
         Some(match value {
             0 => Self::Boot,
-            1 => Self::HttpIndex,
-            2 => Self::HttpJavascript,
-            3 => Self::HttpStylesheet,
-            4 => Self::HttpWasm,
-            5 => Self::HttpIndexedDb,
-            6 => Self::HttpHealth,
-            7 => Self::WebSocketUpgrade,
-            8 => Self::WebSocketHello,
-            9 => Self::WebSocketActive,
+            10 => Self::BluetoothAdvertising,
+            11 => Self::BluetoothConnected,
             _ => return None,
         })
     }
@@ -47,15 +33,8 @@ impl Stage {
     fn label(self) -> &'static str {
         match self {
             Self::Boot => "boot",
-            Self::HttpIndex => "http:index",
-            Self::HttpJavascript => "http:javascript",
-            Self::HttpStylesheet => "http:stylesheet",
-            Self::HttpWasm => "http:wasm",
-            Self::HttpIndexedDb => "http:indexed-db",
-            Self::HttpHealth => "http:health",
-            Self::WebSocketUpgrade => "websocket:upgrade",
-            Self::WebSocketHello => "websocket:hello",
-            Self::WebSocketActive => "websocket:active",
+            Self::BluetoothAdvertising => "ble:advertising",
+            Self::BluetoothConnected => "ble:connected",
         }
     }
 }

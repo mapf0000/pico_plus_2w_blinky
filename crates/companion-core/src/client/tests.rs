@@ -253,6 +253,7 @@ fn rejects_unbounded_metadata_and_mismatched_reply_kinds() {
         Event::Reply {
             tag,
             reply: Reply::Connected(Capabilities {
+                upload_timeout: Duration::ZERO,
                 read_only: false,
                 firmware: "mock".into(),
                 script_version: 1,
@@ -372,4 +373,27 @@ fn read_only_session_rejects_control_but_polls_status_and_disconnects_on_failure
     );
     assert!(client.snapshot().capabilities.is_none());
     assert!(!client.snapshot().pending);
+}
+
+#[test]
+fn usb_controls_require_control_and_block_keyboard_until_ready() {
+    let (mut client, now) = connected(Scenario::Normal);
+    client.dispatch(Action::SetUsbEnabled(false), now);
+    assert_eq!(client.snapshot().last_error, Some(Failure::NotReady));
+    let (mut client, now) = ready();
+    client.dispatch(Action::SetUsbEnabled(false), now);
+    client.tick(now + LATENCY);
+    assert!(
+        !client
+            .snapshot()
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .status
+            .usb_enabled
+    );
+    assert!(!client.snapshot().can_send());
+    client.dispatch(Action::SetUsbEnabled(true), now + LATENCY);
+    client.tick(now + LATENCY * 2);
+    assert!(client.snapshot().can_send());
 }

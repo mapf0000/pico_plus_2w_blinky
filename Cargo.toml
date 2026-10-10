@@ -1,9 +1,7 @@
 [workspace]
 members = [
   "apps/companion",
-  "apps/frontend",
   "apps/host-agent",
-  "apps/python-worker",
   "crates/build-support",
   "crates/companion-core",
   "crates/ble-protocol",
@@ -15,14 +13,9 @@ members = [
   "crates/transfer-protocol",
   "firmware",
   "tools/device-test",
-  "tools/mock-pico",
 ]
 default-members = ["firmware"]
 resolver = "2"
-
-[profile.release.package.frontend]
-opt-level = "z"
-codegen-units = 1
 
 [profile.release.package.host-agent]
 strip = true
@@ -33,13 +26,3 @@ codegen-units = 1
 strip = true
 opt-level = "z"
 codegen-units = 1
-
-[profile.release.package.python-worker]
-opt-level = "z"
-codegen-units = 1
-
-# RustPython 0.6 unoptimized frame evaluation hits the native test stack guard
-# during codec bootstrap. Optimize the VM while retaining debug assertions,
-# stack guards, and the default test stack and Python recursion limits.
-[profile.test.package.rustpython-vm]
-opt-level = 1

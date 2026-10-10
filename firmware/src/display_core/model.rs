@@ -19,13 +19,7 @@ pub enum PageId {
 }
 
 impl PageId {
-    pub const ALL: [Self; 5] = [
-        Self::Payloads,
-        Self::Transfer,
-        Self::Agent,
-        Self::System,
-        Self::Logs,
-    ];
+    pub const ALL: [Self; 4] = [Self::Payloads, Self::Agent, Self::System, Self::Logs];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -308,7 +302,7 @@ pub struct TransferModel {
 }
 
 impl TransferModel {
-    fn update(&mut self, snapshot: TransferSnapshot, now_ms: u64) -> bool {
+    pub(crate) fn update(&mut self, snapshot: TransferSnapshot, now_ms: u64) -> bool {
         if snapshot == self.snapshot {
             return false;
         }
@@ -394,6 +388,7 @@ pub struct Snapshot {
 
 #[derive(Default)]
 pub struct SystemSnapshot {
+    pub pairing_code: Option<u32>,
     pub uptime_secs: u64,
     pub cpu_mhz: u32,
     pub temperature_c: Option<f32>,

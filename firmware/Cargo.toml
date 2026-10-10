@@ -19,14 +19,6 @@ embassy-executor = { version = "0.10.0", optional = true, features = [
     "executor-interrupt",
     "defmt",
 ] }
-embassy-net = { version = "0.9.1", optional = true, features = [
-  "defmt",
-  "proto-ipv4",
-  "medium-ethernet",
-  "dhcpv4",          # because you're calling Config::dhcpv4(...)
-  "tcp", "udp",      # if you’ll open sockets
-  "dns"              # if you’ll resolve hostnames
-] }
 embassy-rp = { version = "0.10.0", optional = true, features = [
     "defmt",
     "unstable-pac",
@@ -57,13 +49,11 @@ embedded-graphics = "0.8.2"
 
 cyw43 = { version = "0.7.0", optional = true, features = [
     "defmt",
-    "firmware-logs",
+    "firmware-logs", "bluetooth",
 ] }
 cyw43-pio = { version = "0.10.0", optional = true, features = [
     "defmt",
 ] }
-leasehund = { version = "0.6.0", optional = true }
-picoserve = { version = "0.20.1", features = ["embassy", "ws"] }
 firmware-exec = { path = "../crates/firmware-exec" }
 bytecode-constants = { path = "../crates/bytecode-constants" }
 transfer-protocol = { path = "../crates/transfer-protocol" }
@@ -72,18 +62,18 @@ script-protocol = { path = "../crates/script-protocol" }
 
 embassy-sync-ble = { package = "embassy-sync", version = "0.7.2", optional = true }
 ble-protocol = { path = "../crates/ble-protocol", optional = true }
-trouble-host = { version = "=0.6.0", optional = true, default-features = false, features = ["peripheral", "gatt", "derive", "default-packet-pool", "default-packet-pool-mtu-27", "default-packet-pool-size-8", "defmt"] }
+# Disable TrouBLE logging: upstream security diagnostics include passkeys/bond keys.
+trouble-host = { version = "=0.6.0", optional = true, default-features = false, features = ["peripheral", "gatt", "derive", "default-packet-pool", "default-packet-pool-mtu-128", "default-packet-pool-size-8", "security"] }
 
 [features]
 psram = []
-# Read-only feasibility service. WLAN remains enabled.
-ble = ["firmware", "cyw43/bluetooth", "dep:trouble-host", "dep:ble-protocol", "dep:embassy-sync-ble"]
+# Compatibility alias: Bluetooth is always part of firmware.
+ble = ["firmware"]
 default = ["firmware", "psram"]
 firmware = [
   "cortex-m",
   "cortex-m-rt",
   "embassy-executor",
-  "embassy-net",
   "embassy-rp",
   "embassy-usb-logger",
   "defmt",
@@ -91,7 +81,7 @@ firmware = [
   "panic-probe",
   "cyw43",
   "cyw43-pio",
-  "leasehund",
+  "dep:trouble-host", "dep:ble-protocol", "dep:embassy-sync-ble",
 ]
 ## Enable USB to start automatically at boot (useful for debug runs)
 usb_autostart = []

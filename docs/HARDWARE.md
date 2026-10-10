@@ -11,7 +11,7 @@ The primary and currently wired target is:
 - **Flash:** 16 MiB external QSPI/XIP flash
 - **PSRAM:** 8 MiB APS6404L-class external PSRAM
 - **On-chip SRAM:** 520 KiB exposed as 512 KiB striped RAM plus two 4 KiB direct-mapped banks
-- **Wireless:** onboard CYW43439-class Wi-Fi/Bluetooth device, used for Wi-Fi AP mode
+- **Wireless:** onboard CYW43439-class Wi-Fi/Bluetooth device, used for Bluetooth LE control
 - **Display board:** Pimoroni Pico Display 2.8, ST7789, 320×240 logical orientation
 
 The Cargo target is `thumbv8m.main-none-eabihf`. Embassy is configured with the `rp235xb` feature, which matches current B-silicon boards.
@@ -25,7 +25,7 @@ Primary implementation locations:
 - Linker memory map: `firmware/memory.x`
 - Display driver and input: `firmware/src/display/`
 - USB composition: `firmware/src/usb/task.rs`
-- Wi-Fi/DHCP: `firmware/src/main.rs`, `firmware/src/dhcp.rs`
+- Bluetooth: `firmware/src/main.rs`, `firmware/src/ble.rs`
 
 ## Pin map
 
@@ -68,7 +68,7 @@ The linker divides the range `0x10000000..0x11000000` as follows:
 
 | Region | Start | End exclusive | Size | Purpose |
 | --- | ---: | ---: | ---: | --- |
-| `FLASH` | `0x10000000` | `0x10BFE000` | 12280 KiB | Boot metadata, executable firmware, embedded frontend, generated payloads, read-only data |
+| `FLASH` | `0x10000000` | `0x10BFE000` | 12280 KiB | Boot metadata, executable firmware, generated payloads, read-only data |
 | `MSC` | `0x10BFE000` | `0x10FFE000` | 4096 KiB | Internal 4 MiB FAT agent image in legacy `.msc_image` |
 | `PERSIST` | `0x10FFE000` | `0x11000000` | 8 KiB | Two alternating 4 KiB device-configuration slots |
 
@@ -116,16 +116,12 @@ byte. No persistent configuration erase was performed.
 
 Total on-chip SRAM represented by the linker map is 520 KiB. Most normal data, stacks, static buffers, and Embassy state use `RAM`; the direct banks are available for explicitly placed sections but are not broadly allocated by current code.
 
-Large fixed allocations to review before changing memory use include:
-
-- Three HTTP asset workers and two WebSocket acceptors. Only the newest WebSocket is the active logical session; the singleton transfer pump remains the only batching owner.
-- HTTP RX/TX/request buffers and SRAM fallbacks.
-- USB descriptor, logger, class, and control buffers.
-- TLV decoder payload buffer of 2048 bytes.
-- Display SPI staging buffer and render state.
-- Network stack resources for 16 sockets.
-
-For the latest dated flash/static SRAM measurements, see the release snapshot in the XIP flash section above. Static use excludes runtime stacks; the Python VM and its heap run in the browser. The one-slot HID command channel owns a bounded 4,096-byte browser effect or a preset reference. Keep transfer batching in its singleton task with one PSRAM batch slot: embedding large buffers in pooled async task futures multiplies static SRAM consumption. Review future sizes and task-pool multiplicity as well as linker totals when changing memory use.
+Large fixed allocations include the CYW43 state, BLE pool/security state, one
+4,125-byte receiver, one 4,096-byte HID command, USB descriptors/logger/control
+buffers, 2,048-byte TLV decoder and bounded display frames/SPI tile staging.
+Static SRAM excludes runtime stacks. No HTTP worker or socket pool remains.
+Current linked measurements are in DEVICE_TESTING.md; keep both task-frame
+sizes and linker totals in review when changing capacities.
 
 The display System page shows the configured CPU clock in MHz and static
 striped SRAM use from the linker boundaries (`_ram_start`, `_ram_end`, and
@@ -166,14 +162,9 @@ The display release inspected on 2026-10-08 reserved about 8.3 KiB for frame pre
 
 The default `psram` feature probes the external memory through QMI CS1 using an APS6404L configuration. The reported board capacity is 8 MiB.
 
-The PSRAM pool reserves address ranges for the network and transfer data planes:
-
-- Three disjoint 8 KiB HTTP receive and 32 KiB transmit buffers.
-- Two disjoint 8 KiB WebSocket receive and 32 KiB transmit buffers.
-- One 16,402-byte encrypted-chunk batch buffer.
-- Five 4 KiB SRAM receive/transmit fallback slots, plus five 4 KiB request buffers.
-
-In the default `psram` build, detection or capacity failure makes HTTP and WebSocket workers continue with their SRAM buffers while the transfer pump sends individual chunks. A build compiled without the `psram` feature reserves one SRAM batch slot instead. The rest of PSRAM is not a general allocator; code cannot assume `Vec`/heap allocation becomes available merely because the feature is enabled.
+PSRAM is initialized and detected for diagnostics. No HTTP/WebSocket buffers,
+transfer batch pool or heap allocator are created. Bluetooth uses fixed SRAM
+resources. Removing PSRAM support does not change BLE protocol capacity.
 
 ## Composite USB device
 
@@ -216,7 +207,7 @@ Safe, no-Wi-Fi automated coverage for enumeration, CDC framing, encrypted-transf
 rejection, and restricted production host-agent handshake/keepalive behavior is
 provided by `scripts/device-test`. See [DEVICE_TESTING.md](DEVICE_TESTING.md).
 
-USB starts automatically during boot in the current implementation. `USB_UNREGISTER` detaches the entire composite device; re-registration rebuilds all classes and descriptors. Changing identity while USB is enabled is rejected because descriptors are fixed for the active session.
+USB starts automatically during boot in the current implementation. Disabling USB detaches the entire composite device; re-registration rebuilds all classes and descriptors. Descriptors are fixed for the active USB session; existing persisted identity is loaded at startup. Remote identity editing is not currently exposed.
 
 Implementation:
 
@@ -227,57 +218,23 @@ Implementation:
 - Internal agent image: `firmware/src/usb/agent_image.rs`
 - Internal FAT image generator: `crates/build-support/src/msc_image.rs`
 
-## Wi-Fi access point and local network
+## Bluetooth and build prerequisites
 
-Current compile-time configuration:
+Bluetooth is part of every firmware build; `ble` is a compatibility feature alias.
+No AP, DHCP, HTTP/WebSocket or network task runs. The CYW43 combined base image,
+NVRAM and Bluetooth patch are still loaded using the unchanged board pins/RM2
+divider. One peripheral connection advertises the project service as Pico BLE.
+TrouBLE 0.6 / CYW43 0.7 share bt-hci 0.8. The packet pool has eight 128-byte
+packets and three L2CAP channels (signalling, ATT, SMP).
 
-| Property | Value |
-| --- | --- |
-| SSID | `PicoEndpoint` |
-| WPA mode | WPA2 |
-| Password | `pico12345` |
-| Channel | 6 |
-| Device/gateway address | `192.168.4.1/24` |
-| DHCP pool | `192.168.4.100`–`192.168.4.200` |
-| DHCP lease capacity | 16 clients |
-| Advertised router/DNS | `192.168.4.1` |
-| HTTP port | 80 |
-| UI | `http://192.168.4.1/` |
-| Health check | `http://192.168.4.1/health` |
-| WebSocket | `ws://192.168.4.1:81/ws` |
+Pairing requires numeric comparison and Pico X confirmation after rendering the
+code. Y rejects; timeout is 30 seconds. No persistent bonds are stored. Reconnect
+pairs again; forget stale OS bonds if necessary. A failed display cannot approve
+pairing. Read-only diagnostics remain available without pairing.
 
-The device does not provide an upstream internet route or DNS forwarding. The DNS address is supplied to satisfy client network configuration. Some operating systems may warn that the Pico network has no internet access.
-
-The password is compiled into firmware and present in source. Treat this AP as a local control network, not a strong security boundary. Changing SSID/password/channel currently requires a firmware edit in `firmware/src/main.rs` and rebuild.
-
-The CYW43 path uses:
-
-- Firmware, CLM, NVRAM, and Bluetooth firmware blobs under `firmware/cyw43-firmware/`.
-- PIO0 state machine 0 and DMA channel 0.
-- `RM2_CLOCK_DIVIDER`, which is important for the RM2-based Pico Plus 2 W.
-- Power management disabled while operating as an access point.
-
-## Build prerequisites
-
-From the repository root:
-
-```sh
-rustup target add thumbv8m.main-none-eabihf
-rustup target add wasm32-unknown-unknown
-cargo install trunk
-```
-
-Install `picotool` for USB flashing. On macOS:
-
-```sh
-brew install picotool
-```
-
-The firmware build requires Trunk because it embeds the current frontend. To package a real macOS host-agent binary into the internal agent image before flashing, use:
-
-```sh
-scripts/fw-deploy-with-agent
-```
+Use stable Rust, `thumbv8m.main-none-eabihf` and `picotool` for flashing. Firmware
+builds generate the CDC image/presets only; no Trunk, WASM target, wasm-bindgen or
+Python toolchain is required. Memory map and persistent USB identity are unchanged.
 
 ## Flashing paths
 
@@ -330,12 +287,12 @@ Normal ELF flashing writes the sections present in the ELF. The persistent-confi
 | `picotool` cannot find the board | Try a data-capable cable/port; enter physical BOOTSEL; run `picotool info`; then flash again. |
 | Flash succeeds but no CDC appears | Wait through re-enumeration; inspect both CDC devices; use `--no-wait` to separate flash from serial diagnosis; verify the USB task starts in early logs/RTT. |
 | Host agent selects the logger port | Pass `--port`, or let active probing evaluate all USB CDC candidates; remove stale cached selection by reconnecting/restarting after the failed dispatch. |
-| UI is unreachable | Join `PicoEndpoint`, verify the client has `192.168.4.x`, open `/health`, then inspect CYW43/AP/DHCP logs. |
-| UI loads but WebSocket reconnects | Open port 81 `/ws` through the served page host, check `HELLO`, confirm both WebSocket acceptors started, and inspect firmware logs. A newer page receives session ownership and closes the previous page with code 4001. |
+| Pico is not discovered | Enable Bluetooth, grant OS permission and scan again; inspect BLE advertising logs. |
+| Pairing fails | Compare the code and confirm with Pico X within 30 seconds; forget stale OS bonds and retry. |
 | Display is blank | Confirm the Pico Display 2.8 is seated correctly; verify GP16–GP20; inspect ST7789 initialization logs. Buttons/LED should remain functional on display init failure. |
 | PSRAM is not detected | Verify this is the Pico Plus 2 W variant and internal GPIO47/QMI CS1 wiring; firmware should fall back to SRAM and log the condition. |
 | CDC installer is unavailable | Package the Apple Silicon agent, provision `PICO_USB_SERIAL`, and rebuild; confirm the artifact target path. |
-| USB identity change does not appear | Detach/re-register USB or power-cycle so descriptors are rebuilt; config changes are rejected while USB is enabled. |
+| USB identity change does not appear | Detach/re-register USB or power-cycle so descriptors are rebuilt; remote identity editing is currently unavailable. |
 | Persistent config appears corrupt | Firmware should choose the other valid CRC-checked slot or defaults. Avoid erasing flash until both slots and linker boundaries have been checked. |
 
 ## Hardware smoke-test checklist
@@ -358,14 +315,13 @@ Use this checklist for changes to startup, pins, memory, network, USB, transfer,
 - [ ] Backlight remains enabled.
 - [ ] System page CPU clock, static SRAM, temperature, flash, PSRAM, and uptime values are credible.
 
-### Wi-Fi and HTTP
+### Bluetooth
 
-- [ ] `PicoEndpoint` appears on channel 6 and accepts the configured WPA2 password.
-- [ ] A client receives an address within `192.168.4.100`–`192.168.4.200`.
-- [ ] `http://192.168.4.1/health` returns `ok`.
-- [ ] The embedded UI, JavaScript, WebAssembly, CSS, and IndexedDB helper load without 404/integrity errors.
-- [ ] Port 81 `/ws` opens and the first application message is a compatible `HELLO`.
-- [ ] Disconnect/reconnect restores status/config and does not leave stale pending actions.
+- [ ] Companion scan/connect/status/reconnect smoke passes.
+- [ ] Numeric comparison is visible; X confirms and Y/timeout rejects.
+- [ ] Unauthenticated and Just Works control attempts are rejected.
+- [ ] USB on/off, text execution, delayed cancellation and Y Stop work.
+- [ ] Disconnect during upload/execution releases keys without replay.
 
 ### Composite USB
 
@@ -377,16 +333,11 @@ Use this checklist for changes to startup, pins, memory, network, USB, transfer,
 - [ ] USB detach/re-register causes clean re-enumeration.
 - [ ] Persisted manufacturer/product values survive a power cycle and appear after re-enumeration.
 
-### Host agent and transfers
+### Host agent
 
-- [ ] Host-agent `HELLO` presence/version/hostname becomes visible and `STATUS.host_os` matches the host; after stopping the agent and waiting 25 seconds, a fresh/reconnected `HELLO` reports it absent.
-- [ ] Keepalive traffic survives at least several intervals without reconnect churn.
-- [ ] Filesystem browsing handles home, root, pagination, hidden entries, cancellation, and permission errors.
-- [ ] Unattended negotiation establishes an encrypted session without exposing bootstrap or session secrets in structured logs.
-- [ ] A small encrypted transfer completes with the correct name, size, authenticated SHA-256 receipt, and downloaded bytes.
-- [ ] A multi-window transfer exercises backpressure and completes without out-of-order errors.
-- [ ] Browser disconnect during transfer aborts cleanly and does not deadlock the USB sender.
-- [ ] Plaintext transfer RPCs/tags and simulation mode are rejected without terminating the host reconnect loop.
+- [ ] Status presence becomes visible and expires after stopping the agent for 25 seconds.
+- [ ] CDC framing/keepalive and bootstrap checks pass.
+- [ ] Unsupported bulk opens abort because no native receiver exists; no false ACK.
 
 ### Keyboard safety
 
@@ -436,26 +387,10 @@ the final persistent configuration slots. This is a dated build result, not a
 size guarantee for subsequent firmware changes.
 
 
-## Optional BLE radio spike
+## Historical read-only BLE measurement
 
-Build `--features ble` to load the checked-in `43439A0_btfw.bin` alongside WLAN
-firmware using `cyw43::new_with_bluetooth`. The existing PIO/SPI wiring, RM2
-clock divider, CLM data, AP settings, power management and network tasks remain.
-No additional RP pins, flash slots or persistent bond storage are used. Ordinary
-firmware builds do not start BLE. `ble usb_autostart` enables boot-time USB logging
-for an explicitly requested device smoke test.
-
-TrouBLE 0.6 matches CYW43 0.7's bt-hci 0.8 traits. Its peripheral stack reserves
-one connection, two L2CAP channels and eight 27-byte pool packets in SRAM; GATT
-has 11 attributes and no subscriptions. Information/status values are 20/12
-bytes, fitting default ATT MTU 23. BLE task state is statically allocated through
-Embassy/StaticCell, without firmware heap allocation. Fatal HCI failure stops
-BLE without restarting or disabling WLAN. Recovery is a board reboot.
-
-The 2026-10-10 linked comparison used 251,036 bytes of static SRAM without BLE
-and 263,552 with `ble` (+12,516). Allocated flash section bytes, including the
-unchanged 4 MiB internal image, were 9,754,796 and 9,862,860 (+108,064).
-Executable/rodata sections stayed below the internal image at `0x10BFE000`;
-no section overlaps the persistent slots at `0x10FFE000`. These figures describe
-those builds, not peak stack usage, radio performance or future size guarantees.
-See [device test evidence](DEVICE_TESTING.md#read-only-ble-spike) for board checks.
+Before WLAN removal, the 2026-10-10 release used 251,036 bytes of static SRAM
+without BLE and 263,552 with read-only BLE (+12,516). Allocated flash section
+bytes including the four-MiB internal image were 9,754,796 and 9,862,860.
+These are historical baselines. Current Bluetooth-only linked sizes and actual
+board validation are recorded in [DEVICE_TESTING.md](DEVICE_TESTING.md).

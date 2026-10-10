@@ -7,35 +7,38 @@ This file applies to the entire repository. It is the working guide for automate
 This Rust workspace produces three cooperating pieces:
 
 - RP2350B firmware for the Pimoroni Pico Plus 2 W.
-- A Yew/WebAssembly frontend that is built by Trunk and embedded in the firmware.
-- A host-side serial agent that handles commands, filesystem browsing, credentials, and host-to-browser file transfers.
+- A native Rust/egui companion controlling the board over Bluetooth.
+- A host-side serial agent that handles commands, filesystem browsing, credentials, and USB bulk-transfer protocol handling (native receiver deferred).
 
-The primary hardware has 16 MiB QSPI flash, 8 MiB PSRAM, and 520 KiB SRAM. Firmware runs without a standard library and uses Embassy async tasks. The device creates the `PicoEndpoint` Wi-Fi access point, serves its UI at `http://192.168.4.1/`, and communicates with the host agent over USB CDC.
-
-The main data paths are:
+The primary hardware has 16 MiB flash, 8 MiB PSRAM and 520 KiB SRAM. Firmware
+uses `no_std` and Embassy. WLAN, HTTP/WebSocket, frontend assets and the Python
+Worker are removed. Bluetooth is mandatory in firmware; no browser tools are
+needed for any build.
 
 ```text
-Browser (Yew) <-- WebSocket :81/ws --> Firmware <-- USB CDC TLV --> Host agent
-                                      |
-                                      +-- USB HID keyboard
-                                      +-- internal flash host-agent image (CDC source)
+Native egui companion <-- authenticated BLE GATT --> Firmware <-- USB CDC --> Host agent
+                                                        +-- USB HID keyboard
+                                                        +-- internal CDC agent image
 ```
 
-For keyboard automation, a real RustPython generator runs in a dedicated browser Worker. Yielded keyboard effects are lowered to bounded KBD1, transported with correlated IDs, strictly validated, and executed as USB HID reports. Hardware Payloads are typed Rust presets compiled at build time through the same keyboard core. Both producers share one non-preempting execution service with job-scoped cancellation and device-wide Y Stop.
+The companion lowers bounded text to KBD1 using shared keyboard machinery.
+Hardware presets share the same non-preempting executor, scoped cancellation and
+physical Y Stop. BLE authentication requires physical numeric comparison. No
+persistent bonds or native Python/file-transfer workflow exists yet.
 
 Detailed references:
 
 - `docs/ARCHITECTURE.md`: component ownership, startup, lifecycles, and data flow.
-- `docs/PROTOCOL.md`: canonical USB TLV, WebSocket, transfer, and filesystem formats.
-- `docs/HARDWARE.md`: board wiring, memory map, USB/Wi-Fi configuration, flashing, and recovery.
+- `docs/PROTOCOL.md`: canonical BLE GATT and preserved USB TLV/transfer/filesystem formats.
+- `docs/HARDWARE.md`: board wiring, memory map, USB/Bluetooth configuration, flashing, and recovery.
 
 ## Non-negotiable constraints
 
 - Keep firmware compatible with `no_std`. Do not introduce `std`, unbounded host collections, blocking I/O, or heap assumptions into firmware code.
-- Treat all firmware capacities as part of the design. Check `heapless` capacities, channel depths, WebSocket limits, TLV limits, flash layout, stack usage, and PSRAM/SRAM placement when increasing payloads or concurrency.
-- Keep target-specific flags isolated. The root `.cargo/config.toml` scopes linker flags to `thumbv8m.main-none-eabihf`; the frontend config selects `wasm32-unknown-unknown`; the firmware config selects the Cortex-M target. Do not add a root default target.
-- Preserve protocol compatibility across firmware, frontend, and host agent. Protocol changes are never complete when only one endpoint compiles.
-- Preserve backpressure in the file-transfer path. Firmware deliberately waits for browser queue capacity before acknowledging USB chunks.
+- Treat all firmware capacities as part of the design. Check `heapless` capacities, channel depths, BLE packet/fragment limits, TLV limits, flash layout, stack usage, and PSRAM/SRAM placement when increasing payloads or concurrency.
+- Keep target-specific flags isolated. The root `.cargo/config.toml` scopes linker flags to `thumbv8m.main-none-eabihf`; the firmware config selects the Cortex-M target. Do not add a root default target.
+- Preserve protocol compatibility across firmware, companion, and host agent. Protocol changes are never complete when only one endpoint compiles.
+- Preserve backpressure in the file-transfer path. Firmware must never acknowledge chunks without a native receiver; the current unavailable relay rejects delivery.
 - Do not hand-edit generated build output. Change its source or generator instead.
 - Do not flash hardware as part of routine validation unless the task explicitly calls for device testing and hardware is available.
 - Never log passwords, database credentials, transferred file contents, or other secrets. Credential environment variables exist for tests/headless use only.
@@ -44,31 +47,18 @@ Detailed references:
 
 ### Firmware: `firmware/`
 
-- `src/main.rs`: board initialization, Wi-Fi AP, network stack, task startup, and pin assignments.
-- `src/http/`: HTTP/WebSocket server, RPC routes, and embedded frontend serving.
+- `src/main.rs`: board initialization, CYW43 Bluetooth, task startup, and pin assignments.
+- `src/ble.rs`, `src/ble_control.rs`: GATT, pairing, bounded upload, session-scoped HID completion.
 - `src/usb/`: USB HID, CDC control/relay protocol, internal agent image, and USB supervision.
 - `src/display/`: on-device pages, including standalone Payloads, input, rendering, and status views.
 - `src/display_core/`: hardware-independent button routing, page models, bounded row scenes, and incremental rendering. `src/display/` owns GPIO/SPI/ADC and service adapters.
 - `src/device_config.rs`: persistent flash-backed configuration. Its constants must agree with `memory.x`.
-- `src/psram_pool.rs`: external-memory allocation for HTTP buffers.
+- `src/psram_pool.rs`: board-specific PSRAM initialization for diagnostics.
 - `memory.x`: 16 MiB flash layout, including two persistent 4 KiB configuration slots.
 - `build.rs`: delegates the build pipeline to `crates/build-support`.
 - `cyw43-firmware/`: checked-in Wi-Fi/Bluetooth firmware blobs required by the embedded build.
 
 The package is named `pico_rust`. Default features are `firmware` and `psram`; the selected Embassy RP feature is `rp235xb`.
-
-### Frontend: `apps/frontend/`
-
-- `src/app.rs`: top-level Yew state, connection lifecycle, and section routing.
-- `src/api.rs`: the single WebSocket connection, RPC correlation, reconnect behavior, and event routing.
-- `src/ui/`: page and component rendering.
-- `src/transfer/`: transfer protocol parsing, model/store, IndexedDB staging, verification, and download.
-- `src/filesystem.rs`: host filesystem page decoding and browser state.
-- `src/python.rs`: dedicated RustPython Worker supervision, effects, timeouts, and reconnect behavior.
-- `ui/style.css` and `ui/idb.js`: static UI assets copied by Trunk.
-- `Trunk.toml`: development proxy and watched paths.
-
-The crate is always built for `wasm32-unknown-unknown`. It uses browser APIs and single-threaded Yew state; avoid blocking work in callbacks.
 
 ### Host agent: `apps/host-agent/`
 
@@ -94,7 +84,7 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 The package is `pico-companion`. Choose `--mock` or `--ble`; BLE supports
 read-only status against firmware built with `--features ble`. No BLE control
 writes, authenticated pairing, or USB access are implemented. Native builds must remain independent of firmware asset
-generation and browser tooling. Keep device work out of UI callbacks, bound
+generation and browser tooling. Require pairing before control. Keep device work out of UI callbacks, bound
 queues/diagnostics, and scope commands/results to a connection incarnation.
 
 ### Shared crates: `crates/`
@@ -102,9 +92,10 @@ queues/diagnostics, and scope commands/results to a connection incarnation.
 - `ble-protocol`: fixed-size, `no_std` read-only BLE information/status codecs and UUIDs.
 - `keyboard-core`: portable, language-neutral layouts, key parsing, lowering, and KBD1 encoding. It is `no_std` by default.
 - `firmware-exec`: strict, two-pass `no_std` KBD1 validator/executor.
-- `script-protocol`: versioned correlated browser-to-firmware effect envelopes.
+- `script-protocol`: versioned correlated companion-to-firmware effect envelopes.
+- `ble-protocol`: `no_std` information/status/result values and MTU-23 command fragmentation.
 - `bytecode-constants`: cross-target bytecode limits.
-- `build-support`: firmware build-time frontend/Worker compilation, compressed asset embedding, typed keyboard-preset generation, linker setup, and internal FAT agent-image generation.
+- `build-support`: typed keyboard-preset generation, linker setup, and internal FAT agent-image generation.
 
 ### Scripts and configuration
 
@@ -112,18 +103,15 @@ queues/diagnostics, and scope commands/results to a connection incarnation.
 - `scripts/build-host-agent`: release-builds a host agent and copies it to `apps/host-agent/artifacts/<target>/`.
 - `scripts/fw-deploy-with-agent`: builds the local host agent, packages it, then builds/flashes firmware.
 - `.cargo/config.toml`: target-scoped runner/linker flags and Cargo aliases.
-- `flake.nix`: a partial Nix environment with Rust embedded support and `picotool`; Trunk and the wasm target may still need to be installed.
+- `flake.nix`: a Nix environment with Rust embedded support and `picotool`.
 
 ## Generated and ignored files
 
 Do not commit or manually modify these outputs unless a task explicitly changes the artifact policy:
 
 - `target/`
-- `apps/frontend/dist/`
 - `apps/host-agent/artifacts/`
-- generated `frontend_static.rs`, compressed Python Worker assets, and `host-agent.img` under Cargo `OUT_DIR`
-
-The top-level `frontend/dist/` directory is a separate tracked snapshot; do not confuse it with Trunk's ignored `apps/frontend/dist/` output or refresh it incidentally.
+- generated keyboard presets and `host-agent.img` under Cargo `OUT_DIR`
 
 `Cargo.lock` is intentionally tracked for this application workspace. Include lockfile changes when dependency resolution genuinely changes, and avoid unrelated lockfile churn.
 
@@ -133,11 +121,9 @@ From the repository root:
 
 ```sh
 rustup target add thumbv8m.main-none-eabihf
-rustup target add wasm32-unknown-unknown
-cargo install trunk
 ```
 
-Install `picotool` only for flashing. On macOS, `brew install picotool` is the usual route. Frontend browser tests also require `wasm-bindgen-test-runner` and a compatible WebDriver/browser setup.
+Install `picotool` only for flashing. On macOS, `brew install picotool` is the usual route.
 
 There is no pinned `rust-toolchain.toml`; use a current stable Rust toolchain capable of the workspace's Rust 2024 crates.
 
@@ -167,24 +153,16 @@ Build and package the local host agent before flashing:
 scripts/fw-deploy-with-agent
 ```
 
-Firmware compilation runs `firmware/build.rs`. It may invoke Trunk, build/wasm-bindgen/gzip the RustPython Worker, construct the 4 MiB FAT16 host-agent image, and embed all results. A firmware build therefore needs the frontend, wasm-bindgen CLI, and tooling inputs even when the Rust change is firmware-only.
+Firmware compilation runs `firmware/build.rs` to install the linker script,
+generate keyboard presets and embed the internal four-MiB FAT16 host-agent image.
+It does not invoke Trunk, wasm-bindgen or RustPython.
 
-### Frontend
-
-Development server:
-
-```sh
-cd apps/frontend
-trunk serve
-```
-
-The development server proxies `/ws` to `ws://192.168.4.1:81/ws`; a powered device on the Pico access point is needed for live RPC behavior.
-
-Release bundle:
+### Native companion
 
 ```sh
-cd apps/frontend
-trunk build --release
+cargo run -p pico-companion
+cargo run -p pico-companion -- --mock
+cargo run -p pico-companion -- --ble --self-test
 ```
 
 ### Host agent
@@ -236,39 +214,17 @@ cargo clippy -p host-agent --all-targets -- -D warnings
 
 On macOS, the test command includes the PTY-based e2e tests. Add unit tests beside protocol/config logic and extend e2e coverage when behavior crosses the daemon/serial boundary.
 
-For secure file-transfer changes, also run `cargo test -p transfer-crypto -p transfer-protocol` and the affected frontend/embedded checks below. Connected-browser, hostile-input, and hardware acceptance coverage is tracked in `docs/DEVICE_TESTING.md`; unit tests and wasm compilation do not replace those checks.
+For secure file-transfer changes, also run `cargo test -p transfer-crypto -p transfer-protocol` and the affected embedded checks below. BLE, hostile-input, and hardware acceptance coverage is tracked in `docs/DEVICE_TESTING.md`; unit tests and embedded compilation do not replace those checks.
 
-### RustPython, layout, or bytecode changes
-
-Run the full layout matrix:
+### Keyboard layout or bytecode changes
 
 ```sh
 cargo test -p keyboard-core --features "std layout_win_en_gb layout_win_pt_br layout_win_de_de layout_mac_en_gb layout_mac_pt_br layout_mac_de_de"
-cargo test -p python-worker
+cargo test -p firmware-exec -p build-support -p script-protocol
 ```
 
-Worker tests also support browser execution on the actual wasm release target:
-
-```sh
-cargo test -p python-worker --release --target wasm32-unknown-unknown
-```
-
-This requires a compatible WebDriver/browser; set `GECKODRIVER` or
-`CHROMEDRIVER` to its executable when it is not on `PATH`. Native tests optimize
-only `rustpython-vm` to keep RustPython 0.6 codec bootstrap within the default
-test-thread stack, with debug assertions and stack guards enabled.
-
-Also compile affected Worker/executor code for its real target. If bytecode format or limits change, update and test `keyboard-core`, `firmware-exec`, `bytecode-constants`, `script-protocol`, frontend encoding, and firmware decoding.
-
-### Frontend changes
-
-At minimum, compile the wasm tests:
-
-```sh
-cargo test -p frontend --target wasm32-unknown-unknown --no-run
-```
-
-The integration tests are configured with `run_in_browser`; execute them with the repository's available browser/WebDriver setup when behavior changes. Also run `trunk build --release` for asset, HTML, CSS, or build-pipeline changes.
+Compile the real embedded target. Changes to bytecode format/limits require
+matching companion, keyboard-core, firmware-exec and script-protocol updates.
 
 ### Firmware changes
 
@@ -293,7 +249,7 @@ Use `cargo build` instead of `cargo check` when validating linker layout, genera
 
 ### Broad or cross-cutting changes
 
-Run formatting, every affected targeted suite above, and an embedded release build. Prefer targeted Clippy commands because a single host-target workspace invocation is not valid for all `no_std`, wasm, and embedded members.
+Run formatting, every affected targeted suite above, and an embedded release build. Prefer targeted Clippy commands because a single host-target workspace invocation is not valid for all `no_std` and embedded members.
 
 ## Protocol change checklist
 
@@ -303,9 +259,9 @@ When changing a tag, field, limit, status, event, or binary envelope:
 
 1. Update the host-agent encoder/decoder and dispatch/transport tag allowlists.
 2. Update firmware constants, parsers, command routing, relay state, and capacity assertions.
-3. Update frontend WebSocket event routing, transfer/filesystem decoders, and state models.
+3. Update companion BLE encoding/decoding and state models when a new receiver is added.
 4. Preserve explicit protocol versions or introduce a deliberate version bump and compatibility behavior.
-5. Check the 2048-byte TLV maximum, the one-byte WebSocket binary kind prefix, `TRANSFER_BINARY_MAX`, path/name bounds, and queue capacities.
+5. Check the 2048-byte TLV maximum, the existing script kind prefix, BLE MTU/fragment limits, `TRANSFER_BINARY_MAX`, path/name bounds, and queue capacities.
 6. Add malformed, boundary, round-trip, ordering, retry, and cancellation tests as relevant.
 7. Verify that disconnects, duplicate opens, backpressure, aborts, and timeouts still terminate cleanly.
 
@@ -316,21 +272,22 @@ Do not silently reuse an existing tag or reinterpret a payload without versionin
 - Prefer fixed-capacity `heapless` types and checked capacity handling. Avoid `unwrap`/`expect` for external input or capacity growth; reserve them for statically proven invariants and explain the invariant.
 - Keep async tasks non-blocking. Use Embassy channels, signals, timers, and mutexes appropriate to the executor context.
 - Global task state usually needs `StaticCell`, `ConstStaticCell`, an Embassy mutex/channel, or atomics with documented ordering. Avoid unsynchronized `static mut`.
-- Validate all USB, HTTP, WebSocket, flash, and configuration inputs before use. Parse little-endian fields explicitly and reject truncation, excess lengths, invalid UTF-8, and trailing data where the protocol requires exact frames.
-- Keep user-facing status synchronized across the display and Web UI when adding device state.
+- Validate all USB, BLE, flash, and configuration inputs before use. Parse little-endian fields explicitly and reject truncation, excess lengths, invalid UTF-8, and trailing data where the protocol requires exact frames.
+- Keep user-facing status synchronized across the display and companion when adding device state.
 - Changes to `memory.x`, `FLASH_CAPACITY`, persistent slots, PSRAM initialization, HTTP buffer sizes, task pools, or channel depths require an embedded release build and a memory/size review.
 - Pin assignments and CYW43 configuration in `main.rs` are hardware-specific. Do not generalize or change them without explicit hardware scope.
 - Use existing `log`/defmt pathways and keep high-frequency paths from flooding logs.
 
-## Frontend implementation guidance
+## Bluetooth implementation guidance
 
-- Keep WebSocket ownership centralized in `api.rs`; do not open per-component sockets.
-- Keep pure protocol/state logic separate from Yew rendering so it remains testable.
-- Correlate RPC responses by request ID, cancel pending work on disconnect, and preserve reconnect behavior.
-- Treat all device/host data as untrusted. Validate JSON variants, binary kinds, lengths, versions, CRC32, SHA-256, chunk ordering, and filesystem pagination.
-- Revoke browser object URLs and release IndexedDB/download state on completion, failure, retry, or component teardown.
-- Update `ui/style.css` with responsive and accessibility states when adding UI: labels, keyboard behavior, disabled/busy states, focus visibility, empty/error/loading states, and narrow layouts.
-- Keep WebAssembly size in mind. Firmware build thresholds are controlled by `PICO_WASM_WARN_BYTES` (default 1,200,000) and optional `PICO_WASM_MAX_BYTES`.
+- One connection, one outstanding request/effect, one bounded receiver.
+- Commands require authenticated encryption and physical confirmation of the current displayed code.
+- Keep TrouBLE diagnostic logging disabled: upstream security logs include key material.
+- Use writes with response fitting default ATT MTU 23; never assume negotiated MTU.
+- Tokens are nonzero, monotonic and never reused in a connection. Incarnations must not wrap.
+- Cancel/reset bypass ordinary host queues; firmware completion publication cannot block HID cleanup.
+- Preserve strict script validation, local job independence and physical Y Stop.
+- Pairing currently does not persist bonds; record real macOS pairing tests separately from mocks.
 
 ## Host-agent implementation guidance
 
@@ -341,22 +298,21 @@ Do not silently reuse an existing tag or reinterpret a payload without versionin
 - Keep platform-specific dialogs and PTY/file-descriptor code behind `cfg` gates. Ensure portable code still compiles on Linux and Windows when changing common modules.
 - Test framing resynchronization and fragmented serial reads when transport logic changes.
 
-## RustPython and keyboard-effect guidance
+## Keyboard-effect guidance
 
-- Keep `keyboard-core` `no_std` by default and preserve its opt-in layout features.
-- RustPython runs only in the dedicated Worker with stdlib/import/host/JS bridges disabled. Every external action must be a yielded, bounded effect.
-- Preserve the 32 KiB source, 1,024-line, 500 ms step, 1,024-character text, 4,096-byte KBD1, and one-outstanding-effect limits unless all endpoints and docs change together.
-- Hard cancellation is `Worker.terminate()`; do not rely on RustPython signal interruption on wasm.
-- Hardware presets contain no interpreter. Preserve one-job admission through key-release cleanup, scoped browser cancellation, independent local completion, and generation-owned browser results when changing the shared HID service. Run `cargo test -p firmware-exec -p build-support` for preset/executor changes.
-- Add process `send`/`throw`, keyboard lowering, strict firmware validation, correlation, disconnect, and stale-result tests at the narrowest layer.
+Keep keyboard-core `no_std` by default and layout features opt-in. Preserve the
+1,024-character text, 4,096-byte KBD1 and one-outstanding-effect limits unless all
+endpoints/docs change together. Hardware presets contain no interpreter.
+Reservation lasts through key-release cleanup and result publication. Disconnect
+cancels only its companion incarnation; old results cannot update a new connection.
+A future Python interpreter requires an explicit supervised-process/isolation design.
 
 ## Build-system and dependency guidance
 
 - Keep `firmware/build.rs` thin; put reusable build logic in `crates/build-support`.
-- When adding build inputs, update rerun/fingerprint tracking so Cargo and Trunk rebuild when they should without rebuilding on every invocation.
-- Scrub or scope embedded target variables when spawning wasm builds. Embedded `RUSTFLAGS` must never leak into Trunk.
+- When adding build inputs, update rerun/fingerprint tracking so Cargo rebuilds when they should without rebuilding on every invocation.
 - Avoid new dependencies in firmware unless they support `no_std` and their memory/code-size impact is justified. Prefer workspace sharing for constants and pure protocol logic when it truly prevents drift across targets.
-- Do not run broad dependency updates for an unrelated change. Review `Cargo.lock` and embedded/wasm compatibility when dependencies do change.
+- Do not run broad dependency updates for an unrelated change. Review `Cargo.lock` and embedded/native compatibility when dependencies do change.
 - Keep dual licensing (`MIT OR Apache-2.0`) intact for new reusable crates and substantial copied code.
 
 ## Documentation and handoff
@@ -368,7 +324,7 @@ Before handoff:
 1. Inspect `git diff` and `git status`; do not overwrite or restore unrelated user changes.
 2. Confirm generated files and local logs are not accidentally staged.
 3. Run the applicable validation matrix and report the exact commands and results.
-4. Call out hardware/browser/platform tests that were not possible.
+4. Call out hardware/platform tests that were not possible.
 5. Summarize protocol, memory, security, or compatibility implications for cross-cutting changes.
 
 Prefer small, reviewable commits with imperative subjects. Do not create commits, push branches, or flash devices unless explicitly requested.

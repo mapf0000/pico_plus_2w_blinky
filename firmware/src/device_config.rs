@@ -57,46 +57,6 @@ pub async fn get() -> DeviceConfig {
     }
 }
 
-pub async fn set_partial(
-    manufacturer: Option<&str>,
-    product: Option<&str>,
-) -> Result<(), SetError> {
-    let mut guard = CONFIG.lock().await;
-    let mut current = match &*guard {
-        DeviceConfigSlot::Ready(cfg) => cfg.clone(),
-        DeviceConfigSlot::Uninit => DeviceConfig::defaults(),
-    };
-    if let Some(m) = manufacturer {
-        if m.len() > MANUFACTURER_MAX {
-            return Err(SetError::TooLongManufacturer);
-        }
-        if !is_ascii_printable(m) {
-            return Err(SetError::InvalidChars);
-        }
-        current.usb_manufacturer.clear();
-        let _ = current.usb_manufacturer.push_str(m);
-    }
-    if let Some(p) = product {
-        if p.len() > PRODUCT_MAX {
-            return Err(SetError::TooLongProduct);
-        }
-        if !is_ascii_printable(p) {
-            return Err(SetError::InvalidChars);
-        }
-        current.usb_product.clear();
-        let _ = current.usb_product.push_str(p);
-    }
-    *guard = DeviceConfigSlot::Ready(current);
-    Ok(())
-}
-
-#[derive(Debug, Copy, Clone)]
-pub enum SetError {
-    TooLongManufacturer,
-    TooLongProduct,
-    InvalidChars,
-}
-
 // Persistence hooks (stubbed for now; can be wired to flash later)
 pub async fn init() {
     // Initialize defaults; real values loaded when flash driver is set.
@@ -115,10 +75,6 @@ pub async fn set_flash_driver(driver: FlashDrv) {
     }
 }
 
-pub async fn save() -> Result<(), ()> {
-    persist_to_flash().await
-}
-
 // ------- Persistence implementation -------
 
 // Note: previously used a "Header" struct for persistence; the implementation
@@ -135,21 +91,6 @@ fn crc32_ieee(mut crc: u32, data: &[u8]) -> u32 {
         crc = (crc >> 8) ^ x;
     }
     crc ^ 0xFFFF_FFFF
-}
-
-fn encode_payload(cfg: &DeviceConfig, out: &mut [u8]) -> usize {
-    let m = cfg.usb_manufacturer.as_str().as_bytes();
-    let p = cfg.usb_product.as_str().as_bytes();
-    let mut i = 0;
-    out[i] = m.len() as u8;
-    i += 1;
-    out[i..i + m.len()].copy_from_slice(m);
-    i += m.len();
-    out[i] = p.len() as u8;
-    i += 1;
-    out[i..i + p.len()].copy_from_slice(p);
-    i += p.len();
-    i
 }
 
 fn decode_payload(buf: &[u8]) -> Option<DeviceConfig> {
@@ -266,62 +207,4 @@ async fn load_from_flash() -> Result<Option<DeviceConfig>, ()> {
         (None, None) => None,
     };
     Ok(chosen)
-}
-
-async fn persist_to_flash() -> Result<(), ()> {
-    // Determine next seq and next slot
-    let cur = get().await;
-    let slot_a = read_slot(0).await?;
-    let slot_b = read_slot(1).await?;
-    let (target_idx, next_seq) = match (slot_a.as_ref(), slot_b.as_ref()) {
-        (Some((sa, _)), Some((sb, _))) => {
-            if seq_is_newer(*sa, *sb) {
-                (1usize, sa.wrapping_add(1))
-            } else {
-                (0usize, sb.wrapping_add(1))
-            }
-        }
-        (Some((sa, _)), None) => (1usize, sa.wrapping_add(1)),
-        (None, Some((sb, _))) => (0usize, sb.wrapping_add(1)),
-        (None, None) => (0usize, 0),
-    };
-
-    let mut payload = [0u8; 1 + MANUFACTURER_MAX + 1 + PRODUCT_MAX];
-    let plen = encode_payload(&cur, &mut payload);
-    let crc = crc32_ieee(0, &payload[..plen]);
-    // Build header: magic(4), version(1), pad(3), seq(4), len(2), crc32(4)
-    let mut header = [0u8; 16 + 2]; // first 16 bytes + last 2 bytes of crc later aligned
-    header[0..4].copy_from_slice(&MAGIC.to_le_bytes());
-    header[4] = VERSION;
-    header[5] = 0;
-    header[6] = 0;
-    header[7] = 0;
-    header[8..12].copy_from_slice(&next_seq.to_le_bytes());
-    header[12..14].copy_from_slice(&(plen as u16).to_le_bytes());
-    let crc_le = crc.to_le_bytes();
-    header[14..16].copy_from_slice(&crc_le[0..2]);
-    let mut tail = [0u8; 2];
-    tail.copy_from_slice(&crc_le[2..4]);
-
-    let slot_off = PERSIST_OFFSET + target_idx * SLOT_SIZE;
-    // Erase target slot
-    with_flash(|f| f.blocking_erase(slot_off as u32, (slot_off + SLOT_SIZE) as u32))
-        .await
-        .map_err(|_| ())?
-        .map_err(|_| ())?;
-    // Program header first 16 bytes
-    with_flash(|f| f.blocking_write(slot_off as u32, &header[..16]))
-        .await
-        .map_err(|_| ())?
-        .map_err(|_| ())?;
-    // Program rest: last 2 bytes of header (crc), then payload
-    with_flash(|f| f.blocking_write((slot_off as u32) + 16, &tail))
-        .await
-        .map_err(|_| ())?
-        .map_err(|_| ())?;
-    with_flash(|f| f.blocking_write((slot_off as u32) + 18, &payload[..plen]))
-        .await
-        .map_err(|_| ())?
-        .map_err(|_| ())?;
-    Ok(())
 }

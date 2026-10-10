@@ -7,7 +7,6 @@ use crate::{
     },
     log_buffer,
 };
-use core::fmt::Write as _;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
 use embassy_rp::{
@@ -22,7 +21,7 @@ use embassy_rp::{
 };
 use embassy_time::{Duration, Instant, Ticker};
 use embedded_graphics::prelude::Dimensions;
-use heapless::{String, Vec};
+use heapless::Vec;
 
 mod backend;
 mod diagnostics;
@@ -185,6 +184,9 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
     loop {
         ticker.next().await;
         dirty |= inputs.poll(&mut controller, &mut diagnostics, display.is_some());
+        let pairing = crate::ble_control::pairing_code();
+        dirty |= metrics.snapshot.pairing_code != pairing;
+        metrics.snapshot.pairing_code = pairing;
         let now_ms = Instant::now().as_millis();
         if let Some(display) = display.as_mut() {
             let page = controller.page();
@@ -231,7 +233,12 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
                     result.as_ref().copied().unwrap_or(false),
                 );
                 match result {
-                    Ok(_) => renderer.commit(frame),
+                    Ok(_) => {
+                        renderer.commit(frame);
+                        if let Some(code) = metrics.snapshot.pairing_code {
+                            crate::ble_control::mark_displayed(code);
+                        }
+                    }
                     Err(error) => {
                         renderer.invalidate();
                         log::warn!("display draw failed: {:?}", error);
@@ -265,6 +272,24 @@ impl Inputs {
         let events = self
             .debounce
             .sample(core::array::from_fn(|index| self.buttons[index].is_low()));
+        if crate::ble_control::pairing_code().is_some() {
+            controller.navigation = crate::display_core::input::Navigation::new(
+                PageId::ALL
+                    .iter()
+                    .position(|page| *page == PageId::System)
+                    .unwrap_or_default(),
+            );
+            if events[Button::Y].just_pressed {
+                crate::usb::hid::stop_device();
+                crate::ble_control::DECISION.signal(false);
+            } else if display_available
+                && crate::ble_control::pairing_displayed()
+                && events[Button::X].just_pressed
+            {
+                crate::ble_control::DECISION.signal(true);
+            }
+            return true;
+        }
         let snapshot = services::snapshot(sampled_at.as_millis());
         let reserved = snapshot.keyboard.reserved() || crate::usb::bootstrap::active();
         let mut dirty = controller.update(snapshot, services::take_completion());
@@ -273,11 +298,6 @@ impl Inputs {
         if routing.stop {
             crate::usb::hid::stop_device();
             diagnostics.stop(Instant::now().duration_since(sampled_at).as_micros());
-        }
-        for button in Button::ALL {
-            if routing.script.contains(button) {
-                publish_script_button(button.name());
-            }
         }
         if routing.cycle_led {
             self.color_idx = (self.color_idx + 1) % LED_COLORS.len();
@@ -295,14 +315,4 @@ impl Inputs {
         }
         dirty
     }
-}
-
-fn publish_script_button(button: &str) {
-    let mut event: String<{ crate::http::transfer::TRANSFER_TEXT_MAX }> = String::new();
-    let _ = write!(
-        event,
-        "{{\"event_type\":\"script/event\",\"version\":1,\"event\":{{\"kind\":\"button\",\"button\":\"{}\",\"edge\":\"released\"}}}}",
-        button
-    );
-    let _ = crate::http::transfer::queue_text(event);
 }

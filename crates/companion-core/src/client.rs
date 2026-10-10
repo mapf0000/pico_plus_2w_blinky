@@ -12,6 +12,7 @@ enum Kind {
     Acquire,
     Release,
     Status,
+    Usb,
     Effect(script_protocol::EffectId),
 }
 
@@ -107,10 +108,34 @@ impl<T: Transport> Client<T> {
                 self.reject(Failure::ReadOnly);
             }
             Action::Acquire if self.connected_compatible() && !self.snapshot.control_acquired => {
-                self.issue(Operation::Acquire, Kind::Acquire, now, REQUEST_TIMEOUT);
+                self.issue(
+                    Operation::Acquire,
+                    Kind::Acquire,
+                    now,
+                    if self
+                        .snapshot
+                        .capabilities
+                        .as_ref()
+                        .is_some_and(|c| c.upload_timeout != Duration::ZERO)
+                    {
+                        Duration::from_secs(90)
+                    } else {
+                        REQUEST_TIMEOUT
+                    },
+                );
             }
             Action::Release if self.snapshot.control_acquired && !self.snapshot.job.active() => {
                 self.issue(Operation::Release, Kind::Release, now, REQUEST_TIMEOUT);
+            }
+            Action::SetUsbEnabled(enabled)
+                if self.snapshot.control_acquired && !self.snapshot.job.active() =>
+            {
+                self.issue(
+                    Operation::SetUsbEnabled(enabled),
+                    Kind::Usb,
+                    now,
+                    REQUEST_TIMEOUT,
+                );
             }
             Action::SendText {
                 text,
@@ -166,7 +191,13 @@ impl<T: Transport> Client<T> {
                     },
                     Kind::Effect(id),
                     now,
-                    Duration::from_millis(effect.estimated_duration_ms) + REQUEST_TIMEOUT,
+                    Duration::from_millis(effect.estimated_duration_ms)
+                        + REQUEST_TIMEOUT
+                        + self
+                            .snapshot
+                            .capabilities
+                            .as_ref()
+                            .map_or(Duration::ZERO, |caps| caps.upload_timeout),
                 );
             }
             _ => self.reject(Failure::NotReady),
@@ -350,13 +381,13 @@ impl<T: Transport> Client<T> {
             }
             (Kind::Acquire, Reply::Acquired) => {
                 self.snapshot.control_acquired = true;
-                self.note("Mock control acquired; pairing is simulated");
+                self.note("Control acquired");
             }
             (Kind::Release, Reply::Released) => {
                 self.snapshot.control_acquired = false;
                 self.note("Control released");
             }
-            (Kind::Status, Reply::Status(status)) => {
+            (Kind::Status | Kind::Usb, Reply::Status(status)) => {
                 if let Some(caps) = self.snapshot.capabilities.as_mut() {
                     caps.status = status;
                 }
@@ -365,21 +396,29 @@ impl<T: Transport> Client<T> {
                 if self.snapshot.job != Job::Cancelling {
                     self.snapshot.job = Job::Running;
                 }
-                self.note("Effect admitted by the mock executor");
+                self.note("Effect admitted by the device");
                 return;
             }
             (Kind::Effect(expected), Reply::Finished { id, outcome }) if id == expected => {
                 self.snapshot.job = Job::Finished(outcome);
                 self.note(match outcome {
-                    Outcome::Completed => "Effect completed (simulated)",
-                    Outcome::Cancelled => "Effect cancelled (simulated)",
+                    Outcome::Completed => "Effect completed",
+                    Outcome::Cancelled => "Effect cancelled",
                     Outcome::Rejected => "Effect rejected",
                     Outcome::UsbUnavailable => "USB keyboard is unavailable",
                     Outcome::Disconnected => "Effect ended on disconnect",
                 });
             }
             (_, Reply::Error(error)) => {
-                if matches!(kind, Kind::Scan | Kind::Connect | Kind::Status) {
+                if matches!(kind, Kind::Scan | Kind::Connect | Kind::Status)
+                    || !matches!(
+                        error,
+                        Failure::Busy
+                            | Failure::UsbUnavailable
+                            | Failure::NotReady
+                            | Failure::ReadOnly
+                    )
+                {
                     self.disconnect(Some(error));
                     return;
                 }

@@ -1,6 +1,6 @@
-# USB device test suite
+# Device validation
 
-`scripts/device-test` runs the hardware checks that are safe without joining the Pico Wi-Fi network. The suite is opt-in and is not part of normal `cargo test` because it requires exclusive access to one physical board.
+`scripts/device-test` runs hardware USB checks that do not send keyboard effects. The suite is opt-in and is not part of normal `cargo test` because it requires exclusive access to one physical board.
 
 Measured throughput results, conclusions, and the remaining experiment backlog are recorded in [`THROUGHPUT_EXPERIMENTS.md`](THROUGHPUT_EXPERIMENTS.md).
 
@@ -212,7 +212,7 @@ Device timeouts and USB ZLPs do not guarantee serial EOF, so a waiting shell may
 need Terminal Control-C. Keep this limitation visible when evaluating recovery.
 
 
-## Read-only BLE spike
+## Historical read-only BLE spike
 
 2026-10-10, Apple Silicon macOS and Pimoroni Pico Plus 2 W/RP2350B:
 
@@ -238,7 +238,7 @@ need Terminal Control-C. Keep this limitation visible when evaluating recovery.
   no keyboard/host command was sent.
 - A direct HTTP probe from the Mac timed out because it was not connected to the
   Pico AP. User deferred second-device HTTP/WebSocket coexistence checks and
-  stated these should not gate further BLE work; WLAN remains enabled for now.
+  stated these should not gate further BLE work; WLAN was enabled at that historical milestone and has since been removed.
   AP startup alone does not establish HTTP/WebSocket or transfer performance.
 
 Automated/build validation for this milestone:
@@ -268,3 +268,80 @@ off/on and denied-permission recovery, long reconnect/soak and RTT percentile
 measurements. Authenticated pairing, control ownership, real HID, abort/upload
 and Y Stop scenarios belong to subsequent command/pairing milestones. Read-only
 BLE success does not validate those security or execution paths.
+
+
+## Bluetooth-only control milestone — 2026-10-10
+
+User scope changed to remove WLAN and implement Bluetooth. Removed AP/network,
+HTTP/WebSocket, Yew assets, RustPython Worker, Trunk build pipeline and obsolete
+WebSocket test tooling. USB wire tags and flash reservations are unchanged.
+Bluetooth v2 is a deliberate break from the read-only v1 service.
+
+Built default firmware and verify-flashed with:
+
+```sh
+picotool load -u -v -x -t elf target/thumbv8m.main-none-eabihf/release/pico_rust
+```
+
+Verification and reboot passed. ELF load segments exclude both persistent slots.
+The four-MiB image remains at `0x10BFE000`; application load ends at `0x100A1D78`.
+Linked allocated flash sections total 4,857,200 bytes (including internal image).
+Static striped SRAM ends at 92,508 bytes, leaving 431,780 before runtime stacks.
+The preceding read-only WLAN+BLE build used 9,862,860 flash section bytes and
+263,552 static SRAM: reductions of 5,005,660 and 171,044 bytes respectively.
+The stripped native release is 7,858,720 bytes (7.49 MiB); baseline was 7,825,264.
+These are linked sizes, not peak runtime memory or measured idle CPU/RAM.
+
+Real macOS/Pico BLE self-test passed: discovery, protocol-v2 info, three advancing
+status reads, disconnect and reconnect. Latest status read was 104 ms, with USB
+enabled/ready. This test sends no control writes or HID effects.
+
+User-confirmed hardware acceptance: pairing/control acquisition, actual demo
+text output into the USB target editor, and cancellation during the initial
+delay. The updated native window was launched. Pair rejection/timeout, USB
+controls, upload cancellation, physical Y Stop, local contention and detach/
+re-pair edge cases remain to be exercised. No persistent bonding; each
+connection requires pairing. Trouble host logging is disabled because upstream
+security diagnostics include pairing codes/bond material.
+
+Automated checks passed: 44 native/protocol/executor/build-support/script tests,
+31 portable firmware tests, 30 host-agent tests (including macOS PTY), nine
+transfer tests, four layout tests and five device-tool tests. Targeted Clippy,
+formatting, mock self-test and both release builds passed. Commands:
+
+```sh
+cargo fmt --all -- --check
+cargo test -p companion-core -p pico-companion -p ble-protocol -p firmware-exec -p build-support -p script-protocol
+cargo clippy -p pico-companion -p companion-core -p ble-protocol --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo build -p pico-companion --release
+cargo test -p pico_rust --lib --no-default-features
+cargo clippy -p pico_rust --lib --tests --no-default-features -- -D warnings
+cargo test -p keyboard-core --features "std layout_win_en_gb layout_win_pt_br layout_win_de_de layout_mac_en_gb layout_mac_pt_br layout_mac_de_de"
+cargo test -p host-agent -p transfer-crypto -p transfer-protocol
+cargo test -p device-test
+cargo clippy -p device-test --all-targets -- -D warnings
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+```
+
+Coverage includes maximum 4,125-byte reassembly at default ATT MTU, malformed
+headers, gaps/replays, partial-upload replacement, priority cancellation during
+stalled I/O, old connection reset, USB gating, full keyboard lowering, strict
+executor lifecycle and pairing-screen text. Hardware confirmation is not replaced
+by these tests. Linux/Windows Bluetooth, forgotten bonds, long soak, physical
+key-release/USB detach and near-limit radio uploads remain unverified.
+
+Acceptance sequence: connect, acquire control, compare codes, confirm Pico X,
+type demo text into a disposable editor after initial delay, cancel a delayed
+job, exercise Pico Y Stop, release/reconnect with no replay, and reject pairing.
+Then test USB on/off, partial upload cancellation, local-preset contention and
+USB detach during execution. Bulk transfer/native Python remain deferred.
+
+`scripts/device-test --host-interval-ms 1000` passed on the installed
+Bluetooth-only firmware: 11/11 raw CDC cases, host-agent handshake and two
+keepalives. Encrypted open without a receiver aborted correctly; no HID or host
+file access occurred.
+
+Final review added a regression test for Cancel arriving before a queued Run
+starts. The actor discards that Run; it cannot execute after the UI reports
+cancellation. Native/core suites and targeted Clippy passed again after the fix.

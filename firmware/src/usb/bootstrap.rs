@@ -30,16 +30,6 @@ pub enum Phase {
 }
 
 impl Phase {
-    pub fn wire(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Armed => "armed",
-            Self::Downloading => "downloading",
-            Self::Verified => "verified",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
     pub fn text(self) -> &'static str {
         match self {
             Self::Idle => "idle",
@@ -150,9 +140,7 @@ pub fn cancel() -> bool {
     cancelled
 }
 
-fn publish_status() {
-    let _ = crate::http::transfer::queue_text(crate::capabilities::hello_json());
-}
+fn publish_status() {}
 
 pub fn keyboard_failed(handle: JobHandle) {
     let matches = STATE.lock(|s| s.borrow().owner == Some(handle));

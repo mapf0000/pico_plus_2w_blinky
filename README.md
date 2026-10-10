@@ -1,103 +1,92 @@
-# pico_rust — Firmware + Web UI
+# pico_rust — Bluetooth companion and Pico firmware
 
-This workspace contains three cooperating components:
-- RP235x firmware for Raspberry Pi Pico 2 / 2 W (Cortex‑M33)
-- A Yew Web UI compiled to WebAssembly and embedded into the firmware HTTP server
-- A host-side serial agent for commands, filesystem browsing, credentials, and file transfer
+A native Rust/egui companion controls the Pimoroni Pico Plus 2 W over Bluetooth
+Low Energy. The Pico executes keyboard effects on its USB-connected computer.
+The companion PC and USB target can be different computers.
 
-The firmware build is wired so a single `cargo run -p pico_rust --release` builds the firmware and Web UI, flashes the board, and opens a serial log. Use `scripts/fw-deploy-with-agent` to package the local host agent as well. Contributors and automated agents should also read [AGENTS.md](AGENTS.md) for architecture constraints, cross-target workflows, and the validation matrix.
-
-## Documentation
-
-- [System architecture](docs/ARCHITECTURE.md): components, startup, lifecycle, data flow, backpressure, and RustPython execution.
-- [Protocol reference](docs/PROTOCOL.md): USB TLV, WebSocket RPC/HELLO, transfer/filesystem layouts, versions, errors, and compatibility.
-- [Threat model](docs/THREAT_MODEL.md): hostile source PC, trusted Pico/Wi-Fi clients, encryption guarantees, accepted limitations, and receiver hardening priorities.
-- [Hardware and recovery](docs/HARDWARE.md): supported board, pin and memory maps, USB/Wi-Fi configuration, flashing, BOOTSEL, and smoke tests.
-- [Python scripting](docs/SCRIPTING.md): current API, examples, process lifecycle, exceptions, limits, and Worker implementation.
-- [USB device testing](docs/DEVICE_TESTING.md): safe hardware checks, commands, and connected-browser coverage gaps.
-- [Throughput experiments](docs/THROUGHPUT_EXPERIMENTS.md): measured USB results, rejected optimizations, and remaining experiments.
-
-## Overview
-- Primary hardware target: Pimoroni Pico Plus 2 W (RP2350B) with 16 MiB QSPI flash, 8 MiB PSRAM, and 520 KiB SRAM.
-- Default target is the host triple; firmware builds use `thumbv8m.main-none-eabihf`.
-- The frontend crate (`apps/frontend/`) always targets `wasm32-unknown-unknown` and is built by Trunk from `firmware/build.rs`.
-- A custom runner (`scripts/pico-run`) uses `picotool` to flash the ELF and then tails the USB CDC log.
-- The built frontend files are embedded at compile time and served by the firmware under `/` and `/ui/*`.
-
-### Memory configuration
-- `firmware/memory.x` reserves 16 MiB of flash, splitting the final 8 KiB into a persistent configuration area.
-- `firmware/src/device_config.rs` mirrors that layout via `FLASH_CAPACITY` (`16 * 1024 * 1024` bytes) and persists two 4 KiB slots.
-- The `psram` feature is enabled by default so HTTP/WebSocket TCP windows and the singleton transfer-batch slot allocate from the 8 MiB external RAM exposed by Embassy.
-
-## Prerequisites
-- Rust targets
-  - `rustup target add thumbv8m.main-none-eabihf`
-  - `rustup target add wasm32-unknown-unknown`
-- Trunk for building the Web UI
-  - `cargo install trunk`
-- wasm-bindgen CLI for the separately built RustPython Worker
-  - `cargo install wasm-bindgen-cli --version 0.2.129 --locked`
-  - The CLI version must match the workspace's `wasm-bindgen` dependency.
-- Picotool for flashing
-  - macOS: `brew install picotool` (or build from source: https://github.com/raspberrypi/picotool)
-
-## Workspace Layout
-- Firmware crate: `firmware/` (package: `pico_rust`)
-  - Entry point: `firmware/src/main.rs`
-  - HTTP server + embedded UI: `firmware/src/http/` (includes generated `frontend_static.rs`)
-  - Linker script: `firmware/memory.x`
-  - Build script: `firmware/build.rs` (delegates to `crates/build-support`)
-- Frontend crate: `apps/frontend/`
-  - Trunk config: `apps/frontend/Trunk.toml`
-  - Forces `wasm32-unknown-unknown` via `apps/frontend/.cargo/config.toml`
-- RustPython Worker: `apps/python-worker/`
-- Language-neutral keyboard lowering: `crates/keyboard-core/`
-- Strict firmware KBD1 executor: `crates/firmware-exec/`
-- Build helper crate: `crates/build-support/`
-  - `crates/build-support/src/lib.rs` orchestrates linker script setup and the Trunk pipeline
-- Custom runner: `scripts/pico-run`
-
-## Build: One‑shot
-- Flash + run with logs, while also packaging the local host-agent into the internal CDC artifact image:
-  - From repo root: `scripts/fw-deploy-with-agent`
-- Flash + run with logs:
-  - From repo root: `cargo run -p pico_rust --release --target thumbv8m.main-none-eabihf`
-  - Or: `cd firmware && cargo run --release`
-- Notes:
-  - `scripts/fw-deploy-with-agent` first builds `host-agent` for the local machine's host target and copies it into `apps/host-agent/artifacts/<target>/`, then runs the normal firmware deploy command.
-  - Set `HOST_AGENT_TARGET=<triple>` to override the detected host target if needed.
-  - The runner uses `picotool load -u -x` and waits for a USB serial device (120s default). Use `--timeout=<secs>` or `--no-wait` after the ELF to change behavior.
-  - If logs don’t appear immediately, the device may not have brought up USB CDC yet. The runner prints hints; you can also access the device over Wi‑Fi at `http://192.168.4.1/` and use the UI to trigger features.
-
-## Build: Separate pieces
-- Firmware only:
-  - `cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf`
-  - Or: `cd firmware && cargo build --release`
-- Frontend only (dev server):
-  - `cd apps/frontend && trunk serve` (proxies API calls per `Trunk.toml`)
-  - Without hardware, run `scripts/mock-pico`, then use
-    `cd apps/frontend && trunk serve --config Trunk.mock.toml --open` in another terminal.
-    The mock bridges the UI to a real host-agent process over a PTY;
-    `scripts/mock-pico --no-host-agent` simulates firmware with no agent present.
-- Frontend only (release build):
-  - `cd apps/frontend && trunk build --release` (outputs to `apps/frontend/dist/`)
-
-## Native companion prototype
-
-An experimental Rust/egui companion is available alongside the WLAN UI. Its
-prototype supports read-only BLE discovery/status and a mock keyboard lifecycle.
-Pico keyboard control over BLE is still deferred. Launch it from the root:
+WLAN, HTTP/WebSocket, Yew/WASM and the browser Python Worker have been removed.
+Firmware builds require no browser tooling. Bluetooth is enabled by default;
+`--features ble` remains a compatibility alias.
 
 ```sh
-cargo run -p pico-companion -- --ble
+cargo run -p pico-companion
+# deterministic development mode, no hardware access
 cargo run -p pico-companion -- --mock
+cargo run -p pico-companion -- --mock --self-test
 ```
 
-BLE mode needs firmware built with `--features ble`. The WLAN UI stays enabled.
-In mock mode, connect to the simulated device, acquire mock control, and try the keyboard
-effect and cancellation controls. For a headless lifecycle check, add
-`--self-test`. See [companion commands and scenarios](apps/companion/README.md)
-and [the native/BLE implementation plan](NATIVE_COMPANION_BLE_PLAN.md).
+Scan, select the Pico, connect, then choose **Pair and acquire control**.
+Compare the six-digit code on the PC and Pico and press **X** on the Pico to
+confirm; **Y** rejects. Confirmation expires after 30 seconds. Pairing requires
+a working Pico display and authenticated encryption. Connections are not bonded:
+reconnect requires pairing again. If the OS retained an old bond, forget it and
+retry. Discovery and live status are readable before pairing.
+
+Select the input layout used by the USB target. Set an initial delay, send text,
+and focus a disposable editor on that target. Cancel stops the current effect;
+Pico **Y** provides device-wide Stop. Disconnect cancels this companion's job.
+Pending effects are never replayed after reconnect. USB enable/disable controls
+require acquired control and an idle keyboard executor.
+
+The companion currently supports status, control acquisition/release, USB
+on/off and bounded text effects. Python, filesystem browsing, credentials and
+Bluetooth file transfer are not implemented. The host-agent USB protocol and
+local display presets remain. Browser-dependent bulk requests fail closed:
+chunks cannot be acknowledged without a receiver.
+
+## Build and validation
+
+Use current stable Rust and install the embedded target:
+
+```sh
+rustup target add thumbv8m.main-none-eabihf
+cargo build -p pico-companion --release
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+```
+
+Install `picotool` only for flashing (`brew install picotool` on macOS).
+An explicitly requested deployment can use `scripts/fw-deploy-with-agent` to
+package the local agent, flash, and stream CDC logs, or:
+
+```sh
+cargo run -p pico_rust --release --target thumbv8m.main-none-eabihf
+```
+
+Never use bare workspace `cargo test`: the default member is embedded firmware.
+
+```sh
+cargo fmt --all -- --check
+cargo test -p companion-core -p pico-companion -p ble-protocol
+cargo clippy -p pico-companion -p companion-core -p ble-protocol --all-targets -- -D warnings
+cargo test -p pico_rust --lib --no-default-features
+cargo clippy -p pico_rust --lib --tests --no-default-features -- -D warnings
+cargo test -p firmware-exec -p build-support -p script-protocol
+cargo test -p host-agent -p transfer-crypto -p transfer-protocol
+```
+
+`cargo run -p pico-companion -- --ble --self-test` checks real discovery,
+information, live status and reconnect without sending keyboard effects.
+Authenticated pairing and HID checks still require physical interaction.
+
+## Repository and documentation
+
+- `apps/companion`: native egui app, bounded Tokio backend and btleplug adapter.
+- `crates/companion-core`: client state, correlation, deadlines and keyboard lowering.
+- `crates/ble-protocol`: shared `no_std` BLE values and fragmentation.
+- `firmware`: RP2350B Embassy firmware, Bluetooth, display, USB HID/CDC.
+- `apps/host-agent`: portable serial agent and internal CDC bootstrap artifact.
+- `crates/keyboard-core`, `firmware-exec`, `script-protocol`: shared keyboard machinery.
+- `crates/build-support`: linker setup, typed presets and internal agent image.
+
+See [the milestone plan](NATIVE_COMPANION_BLE_PLAN.md),
+[companion commands](apps/companion/README.md), [architecture](docs/ARCHITECTURE.md),
+[protocol](docs/PROTOCOL.md), [hardware](docs/HARDWARE.md),
+[device checks](docs/DEVICE_TESTING.md), [security boundary](docs/THREAT_MODEL.md),
+and [contributor guidance](AGENTS.md).
+
+The board retains 16 MiB flash, 8 MiB PSRAM and 520 KiB SRAM. PSRAM is initialized
+for diagnostics; Bluetooth uses fixed SRAM buffers. The internal 4 MiB agent
+image and two 4 KiB persistent USB-identity slots retain their flash addresses.
 
 ## Hardware keyboard payloads
 
@@ -150,7 +139,7 @@ the CDC install footer reports recent agent activity and changes to
 Zero/multiple matching Picos are refused. Y cancels the device
 transfer. Use Terminal Control-C if its receiver remains waiting. After the
 installer has arrived, its watchdog bounds stalled downloads to 120 seconds.
-Display and Web UI status distinguish transfer verification from an agent
+Display status distinguish transfer verification from an agent
 handshake. Terminal may print `>` continuation prompts and `dd` job messages;
 these are expected shell output during a successful install. Intel macOS is
 unsupported by the current artifact. An optional
@@ -165,15 +154,12 @@ ellipsis with the sidebar open. Menu gestures consume both A and X releases,
 so closing the sidebar cannot also run the selected preset. Completion and the
 agent-handshake timeout continue while other pages are visible.
 
-Y stops the active keyboard job from any display page, including browser effects.
+Y stops the active keyboard job from any display page, including companion effects.
 Jobs never preempt each other: a second Run returns busy. Cancellation is terminal,
 with bounded key-release cleanup and no automatic restart after USB reconnect.
 Payloads/menu controls and the Stop press are consumed locally rather than also
 being delivered to a Python button-event handler. With no active job, Y retains
 its LED-color behavior outside Payloads.
-
-The Transfer page refreshes connection and transfer status automatically. Progress
-is coalesced to 10 Hz; connection changes and terminal states update immediately.
 
 ## Host agent packaging
 - One-command local flow:
@@ -196,90 +182,7 @@ is coalesced to 10 Hz; connection changes and terminal states update immediately
   - Responds to `TAG_DB_CREDENTIALS_REQUEST` with a native dialog (masked password).
   - For headless runs/tests, set `HOST_AGENT_DB_USER` and `HOST_AGENT_DB_PASSWORD`.
 
-## Secure file transfer
-
-- The USB-connected source PC is considered hostile; the Pico and receiving Wi-Fi clients are trusted. Encryption protects file contents from passive USB observers, but cannot hide source files or agent keys from that PC or make its files trustworthy. See the [threat model](docs/THREAT_MODEL.md).
-- Start the host agent and open the Web UI. The browser automatically negotiates an encrypted file-transfer session.
-- After the UI reports an encrypted session, select or enter a host file path and queue it.
-- The host streams the file through bounded plaintext buffers, encrypts each record before USB transfer, and waits for an authenticated browser hash receipt.
-- The Pico display reports transfer progress but intentionally cannot start a transfer without an active encrypted session. Plaintext transfer commands and legacy simulation/drop mode are disabled.
-- `--send-file <path>` records a default candidate but does not bypass browser session negotiation.
-- Unattended negotiation does not authenticate the browser: every client that can access the Pico Web UI can establish a session and request host files.
-- Security guarantees and accepted limitations are in the [threat model](docs/THREAT_MODEL.md); session/data flow is in [architecture](docs/ARCHITECTURE.md#file-transfer-path-and-backpressure), and wire formats are in [protocol](docs/PROTOCOL.md#secure-file-transfer-protocol-v2).
-
-## Source filesystem browser
-- With the browser WebSocket connected and the host-agent running, the Web UI can browse the source computer's filesystem through the Pico.
-- The browser starts in the host user's home directory and supports root/home/up navigation, breadcrumbs, hidden files, metadata, and paginated listings.
-- Select a regular file to populate the manual transfer path or queue it directly.
-
-## Testing
-- Format the workspace: `cargo fmt --all -- --check`
-- Host-agent unit and platform tests: `cargo test -p host-agent`
-  - On macOS this includes the pseudo-terminal end-to-end suite; those tests are skipped on other platforms.
-- Keyboard lowering tests with every layout enabled:
-  - `cargo test -p keyboard-core --features "std layout_win_en_gb layout_win_pt_br layout_win_de_de layout_mac_en_gb layout_mac_pt_br layout_mac_de_de"`
-- RustPython generator/process tests: `cargo test -p python-worker`
-- Compile frontend wasm tests: `cargo test -p frontend --target wasm32-unknown-unknown --no-run`
-  - The integration suite is configured to run in a browser and needs `wasm-bindgen-test-runner` plus a compatible browser/WebDriver setup for execution.
-- Check the embedded target: `cargo check -p pico_rust --release --target thumbv8m.main-none-eabihf`
-
-Avoid bare `cargo test` at the workspace root: the default member is the embedded firmware and its build script also prepares frontend and generated assets. See [AGENTS.md](AGENTS.md#validation-matrix) for change-specific validation.
-
-## Cargo/Target Configuration
-- Root config: `.cargo/config.toml`
-  - No default target; host builds/tests use the host triple.
-  - Embedded‑only flags are scoped under `[target.thumbv8m.main-none-eabihf]`:
-    - `-C link-arg=--nmagic`, `-Tlink.x`, `-Tdefmt.x`
-    - `-C target-cpu=cortex-m33`
-- Custom runner: `runner = "./scripts/pico-run"`
-- DEFMT log level: `[env] DEFMT_LOG = "debug"`
-- Firmware config: `firmware/.cargo/config.toml`
-  - `[build].target = "thumbv8m.main-none-eabihf"` keeps firmware builds on the MCU target.
-- Frontend config: `apps/frontend/.cargo/config.toml`
-  - Forces `wasm32-unknown-unknown` so UI builds are isolated from the firmware target.
-
-## Build Script Behavior
-- `firmware/build.rs` calls into the `build-support` crate to:
-  1) Copy `firmware/memory.x` to `OUT_DIR` and add it to the linker search path.
-  2) Fingerprint `apps/frontend/` and `apps/python-worker/` sources.
-  3) If needed, invoke `trunk build --release` with a separate `CARGO_TARGET_DIR` inside `OUT_DIR`.
-     - The Trunk subprocess environment is scrubbed so embedded `RUSTFLAGS` do not leak into the wasm build.
-     - The build forces `CARGO_BUILD_TARGET=wasm32-unknown-unknown`.
-     - Release assets are written to an isolated directory inside `OUT_DIR`; firmware builds never reuse the development output in `apps/frontend/dist/`.
-  4) Build the real RustPython Worker, run wasm-bindgen, gzip the Worker WASM deterministically, and copy the Worker driver/glue into `OUT_DIR`.
-  5) Normalize asset paths, gzip all HTML/CSS/JavaScript/WASM assets deterministically, and generate `frontend_static.rs` containing compressed `include_bytes!` declarations. HTTP responses retain their media types and include `Content-Encoding: gzip`; decompression happens in the browser.
-  6) Apply frontend and compressed-Worker size gates.
-
-### Environment knobs (optional)
-- `PICO_WASM_WARN_BYTES` (default: `1200000`)
-  - Emits a Cargo warning if `app.wasm` exceeds this many bytes.
-- `PICO_WASM_MAX_BYTES` (unset by default)
-  - Fails the build if `app.wasm` exceeds this many bytes.
-- `PICO_PYTHON_WASM_WARN_BYTES` (default: `3500000`)
-  - Warns when the stored gzip-compressed RustPython Worker exceeds this size.
-- `PICO_PYTHON_WASM_MAX_BYTES` (default: `4750000`)
-  - Fails the firmware build when the stored compressed Worker exceeds this size.
-
-## Firmware Features
-- Default features include `firmware` which pulls in Embassy RP, defmt, panic‑probe, CYW43 Wi‑Fi, DHCP, and the HTTP server.
-- RP235x silicon selection is set to `rp235xb` (Pico 2 / 2 W shipping silicon). If you have A‑silicon, switch the `embassy-rp` feature to `rp235xa` in `firmware/Cargo.toml`.
-
-## Troubleshooting
-- “mach‑o section specifier requires a segment and section”
-  - This happens if embedded crates compile for the host target. Run `cargo run -p pico_rust --release --target thumbv8m.main-none-eabihf` or build from `firmware/` where the target is set.
-- Wasm build errors mentioning `--nmagic` or `-Tlink.x`
-  - Those flags are for the MCU linker only. The Trunk subprocess environment is scrubbed to avoid leaking them; ensure you are building via `cargo run` (which runs `firmware/build.rs`) or run `trunk build` inside `apps/frontend/`.
-- Trunk not installed / firmware frontend bundle missing
-  - Install Trunk (`cargo install trunk`). A firmware build can reuse its own current release bundle from `OUT_DIR`, but it will not use `apps/frontend/dist/` because that directory may contain unoptimized `trunk serve` output.
-- Picotool cannot find the device
-  - Enter BOOTSEL mode (hold BOOTSEL while plugging in), or ensure the board is connected via USB. The runner uses `picotool load -u` to auto‑discover.
-
-## Git Hygiene
-- `target/` is ignored globally.
-- `apps/frontend/dist/` is ignored local Trunk output for development or standalone release builds. Firmware builds use their isolated release output under Cargo's `OUT_DIR`.
 
 ## License
-Licensed under either of
-- Apache License, Version 2.0, or
-- MIT license
-at your option.
+
+MIT OR Apache-2.0.

@@ -115,7 +115,7 @@ impl CompanionApp {
                         if self.mode.is_mock() {
                             "Compatible (mock)"
                         } else {
-                            "BLE status v1"
+                            "BLE control v2"
                         }
                     } else {
                         "Incompatible"
@@ -123,22 +123,14 @@ impl CompanionApp {
                     ui.end_row();
                     ui.label("USB keyboard");
                     ui.label(if caps.status.usb_ready {
-                        if self.mode.is_mock() {
-                            "Ready (simulated)"
-                        } else {
-                            "Ready"
-                        }
+                        "Ready"
                     } else {
                         "Unavailable"
                     });
                     ui.end_row();
                     ui.label("Host agent");
                     ui.label(if caps.status.host_agent_present {
-                        if self.mode.is_mock() {
-                            "Present (simulated)"
-                        } else {
-                            "Present"
-                        }
+                        "Present"
                     } else {
                         "Absent"
                     });
@@ -153,7 +145,7 @@ impl CompanionApp {
                     }
                     ui.label("Control");
                     ui.label(if self.snapshot.control_acquired {
-                        "Acquired (simulated)"
+                        "Acquired"
                     } else {
                         if caps.read_only {
                             "Read-only service"
@@ -173,16 +165,13 @@ impl CompanionApp {
         } else {
             ui.label("Connect to read capabilities and USB status.");
         }
-        if !self.mode.is_mock() {
-            return;
-        }
         ui.horizontal_wrapped(|ui| {
             let can_acquire = self.snapshot.connection == Connection::Connected
                 && self.snapshot.compatible()
                 && !self.snapshot.control_acquired
                 && !self.snapshot.pending;
             if ui
-                .add_enabled(can_acquire, egui::Button::new("Acquire mock control"))
+                .add_enabled(can_acquire, egui::Button::new("Pair and acquire control"))
                 .clicked()
             {
                 self.send(Action::Acquire);
@@ -198,13 +187,32 @@ impl CompanionApp {
             {
                 self.send(Action::Release);
             }
+            let enabled = self
+                .snapshot
+                .capabilities
+                .as_ref()
+                .is_some_and(|c| c.status.usb_enabled);
+            if ui
+                .add_enabled(
+                    self.snapshot.control_acquired
+                        && !self.snapshot.pending
+                        && !self.snapshot.job.active(),
+                    egui::Button::new(if enabled { "Disable USB" } else { "Enable USB" }),
+                )
+                .clicked()
+            {
+                self.send(Action::SetUsbEnabled(!enabled));
+            }
         });
+        if !self.mode.is_mock() {
+            ui.small("Compare the pairing code on the Pico and PC. Press X on the Pico to confirm; Y rejects.");
+        }
     }
 
     fn keyboard(&mut self, ui: &mut egui::Ui) {
         ui.heading("Keyboard demonstration");
         ui.label(
-            "Effects use the production KBD1 encoder and validator. All execution is simulated.",
+            if self.mode.is_mock() { "Execution is simulated." } else { "Types on the computer attached to the Pico USB port. Use an initial delay to focus the target window. Pico Y stops execution." },
         );
         ui.horizontal_wrapped(|ui| {
             ui.label("Target input layout");
@@ -257,7 +265,7 @@ impl CompanionApp {
             if ui
                 .add_enabled(
                     self.snapshot.can_send() && layout_supported && validation.is_ok(),
-                    egui::Button::new("Send mock effect"),
+                    egui::Button::new("Send text"),
                 )
                 .clicked()
             {
@@ -286,10 +294,10 @@ impl CompanionApp {
         ui.label(match self.snapshot.job {
             Job::Idle => "No effect submitted",
             Job::Sending => "Submitting effect…",
-            Job::Running => "Effect running (simulated)",
+            Job::Running => "Effect running",
             Job::Cancelling => "Cancelling current effect…",
-            Job::Finished(Outcome::Completed) => "Effect completed (simulated)",
-            Job::Finished(Outcome::Cancelled) => "Effect cancelled (simulated)",
+            Job::Finished(Outcome::Completed) => "Effect completed",
+            Job::Finished(Outcome::Cancelled) => "Effect cancelled",
             Job::Finished(Outcome::Rejected) => "Effect rejected",
             Job::Finished(Outcome::UsbUnavailable) => "USB unavailable",
             Job::Finished(Outcome::Disconnected) => {
@@ -315,8 +323,15 @@ impl eframe::App for CompanionApp {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Pico Companion");
                 match self.mode {
-                    Mode::Mock(scenario) => { ui.label(format!("Mock mode · {} scenario · no Bluetooth or USB access", scenario.name())); }
-                    Mode::Ble => { ui.label("Bluetooth · read-only device status"); }
+                    Mode::Mock(scenario) => {
+                        ui.label(format!(
+                            "Mock mode · {} scenario · no Bluetooth or USB access",
+                            scenario.name()
+                        ));
+                    }
+                    Mode::Ble => {
+                        ui.label("Bluetooth · Pico control");
+                    }
                 }
                 if let Some(error) = self.enqueue_error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
@@ -329,8 +344,7 @@ impl eframe::App for CompanionApp {
                 ui.separator();
                 self.status(ui);
                 ui.separator();
-                if self.mode.is_mock() { self.keyboard(ui); }
-                else { ui.label("Keyboard control will follow authenticated pairing and shared control ownership."); }
+                self.keyboard(ui);
                 ui.separator();
                 ui.heading("Diagnostics");
                 ui.small(format!(

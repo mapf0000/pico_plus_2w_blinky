@@ -4,7 +4,7 @@ use core::sync::atomic::Ordering;
 
 use crate::{
     display_core::{Controller, Preset, model::*},
-    http::transfer,
+    usb::events as transfer,
     usb::{
         ctrl::{self, CTRL_READY, CtrlCommand, TransferRelayMode, TransferViewState},
         hid::{self, HidResultStatus, Owner, SubmitError},

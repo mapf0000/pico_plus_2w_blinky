@@ -11,14 +11,12 @@ use embassy_sync::{
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use embassy_usb::class::hid::HidWriter as UsbHidWriter;
 use firmware_exec::jobs::{Controller, JobHandle};
-use heapless::{String, Vec};
-
-use crate::http::transfer::{self, TRANSFER_TEXT_MAX};
+use heapless::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner {
     Local,
-    Browser {
+    Companion {
         session: u32,
         request_id: u64,
         process_id: u64,
@@ -28,16 +26,16 @@ pub enum Owner {
 
 #[allow(
     clippy::large_enum_variant,
-    reason = "one bounded 4096-byte browser effect; local presets remain in flash"
+    reason = "one bounded 4096-byte companion effect; local presets remain in flash"
 )]
 enum Program {
-    Browser(Vec<u8, MAX_BYTECODE>),
+    Companion(Vec<u8, MAX_BYTECODE>),
     Preset(&'static [u8]),
 }
 impl Program {
     fn bytes(&self) -> &[u8] {
         match self {
-            Self::Browser(bytes) => bytes,
+            Self::Companion(bytes) => bytes,
             Self::Preset(bytes) => bytes,
         }
     }
@@ -54,12 +52,12 @@ static CANCEL_WAKE: Signal<ThreadModeRawMutex, ()> = Signal::new();
 static LINK_EPOCH: AtomicU32 = AtomicU32::new(0);
 static LINK_DOWN: Signal<ThreadModeRawMutex, ()> = Signal::new();
 #[derive(Debug)]
-struct BrowserCompletion {
+struct CompanionCompletion {
     handle: JobHandle,
     session: u32,
     result: HidResult,
 }
-static COMPLETIONS: Channel<ThreadModeRawMutex, BrowserCompletion, 1> = Channel::new();
+static COMPLETIONS: Channel<ThreadModeRawMutex, CompanionCompletion, 1> = Channel::new();
 pub static LOCAL_RESULT: Signal<ThreadModeRawMutex, LocalResult> = Signal::new();
 pub static USB_READY: AtomicBool = AtomicBool::new(false);
 
@@ -107,7 +105,7 @@ fn submit(owner: Owner, program: Program) -> Result<JobHandle, SubmitError> {
         Ok(handle)
     })
 }
-pub fn submit_browser(
+pub fn submit_companion(
     session: u32,
     id: script_protocol::EffectId,
     program: Vec<u8, MAX_BYTECODE>,
@@ -116,13 +114,13 @@ pub fn submit_browser(
         return Err(SubmitError::Busy);
     }
     submit(
-        Owner::Browser {
+        Owner::Companion {
             session,
             request_id: id.request_id,
             process_id: id.process_id,
             effect_id: id.effect_id,
         },
-        Program::Browser(program),
+        Program::Companion(program),
     )
 }
 pub fn submit_preset(program: &'static [u8]) -> Result<JobHandle, SubmitError> {
@@ -148,13 +146,13 @@ fn cancel_matching(matches: impl FnOnce(Owner) -> bool) {
         CANCEL_WAKE.signal(());
     }
 }
-pub fn cancel_browser(session: u32, process_id: u64, effect_id: u64) {
+pub fn cancel_companion(session: u32, process_id: u64, effect_id: u64) {
     cancel_matching(
-        |owner| matches!(owner, Owner::Browser { session: s, process_id: p, effect_id: e, .. } if s == session && p == process_id && e == effect_id),
+        |owner| matches!(owner, Owner::Companion { session: s, process_id: p, effect_id: e, .. } if s == session && p == process_id && e == effect_id),
     );
 }
-pub fn cancel_browser_session(session: u32) {
-    cancel_matching(|owner| matches!(owner, Owner::Browser { session: s, .. } if s == session));
+pub fn cancel_companion_session(session: u32) {
+    cancel_matching(|owner| matches!(owner, Owner::Companion { session: s, .. } if s == session));
 }
 async fn cancelled(handle: JobHandle) {
     loop {
@@ -196,25 +194,9 @@ fn link_down() {
     LINK_DOWN.signal(());
 }
 
-pub fn result_event(result: HidResult) -> String<TRANSFER_TEXT_MAX> {
-    use core::fmt::Write;
-    let status = match result.status {
-        HidResultStatus::Completed => "completed",
-        HidResultStatus::Rejected => "rejected",
-        HidResultStatus::Cancelled => "cancelled",
-        HidResultStatus::UsbUnavailable => "usb_unavailable",
-    };
-    let mut event = String::new();
-    let _ = write!(
-        event,
-        "{{\"event_type\":\"script/effect_result\",\"version\":1,\"request_id\":\"{:016x}\",\"process_id\":\"{:016x}\",\"effect_id\":\"{:016x}\",\"status\":\"{}\"}}",
-        result.request_id, result.process_id, result.effect_id, status
-    );
-    event
-}
-fn browser_result(owner: Owner, status: HidResultStatus) -> Option<(u32, HidResult)> {
+fn companion_result(owner: Owner, status: HidResultStatus) -> Option<(u32, HidResult)> {
     match owner {
-        Owner::Browser {
+        Owner::Companion {
             session,
             request_id,
             process_id,
@@ -237,11 +219,11 @@ fn complete(handle: JobHandle, status: HidResultStatus) {
     }
     let job = JOBS.lock(|cell| cell.borrow_mut().claim_result(handle));
     if let Some(job) = job {
-        if let Some((session, result)) = browser_result(job.owner, status) {
+        if let Some((session, result)) = companion_result(job.owner, status) {
             // One reservation remains held until the router consumes this result.
             // claim_result succeeds once, so the one-slot channel cannot be full.
             COMPLETIONS
-                .try_send(BrowserCompletion {
+                .try_send(CompanionCompletion {
                     handle,
                     session,
                     result,
@@ -260,14 +242,12 @@ fn complete(handle: JobHandle, status: HidResultStatus) {
     }
 }
 
-/// Survives USB task shutdown and backpressures browser delivery without loss.
+/// Survives USB task shutdown and publishes the connection-scoped completion before releasing admission.
 #[embassy_executor::task]
 pub async fn completion_task() -> ! {
     loop {
         let completion = COMPLETIONS.receive().await;
-        let _ =
-            transfer::send_text_for_generation(completion.session, result_event(completion.result))
-                .await;
+        crate::ble_control::deliver(completion.session, completion.result).await;
         JOBS.lock(|cell| {
             cell.borrow_mut().finish(completion.handle);
         });

@@ -117,7 +117,7 @@ where
     Ok(())
 }
 
-/// Execute bytecode streamed from the frontend.
+/// Execute validated bytecode from a remote companion or hardware preset.
 /// Safe-guards: caps max ops to avoid malicious or corrupt inputs.
 pub async fn exec_bytecode<'d, D>(
     w: &mut UsbHidWriter<'d, D, 8>,

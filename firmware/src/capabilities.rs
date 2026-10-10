@@ -1,5 +1,4 @@
 use core::cell::RefCell;
-use core::fmt::Write as _;
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -7,13 +6,7 @@ use embassy_time::Instant;
 use heapless::String;
 use portable_atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::http::util::escape_json_str;
-
-pub const HELLO_VERSION: u16 = 1;
-pub const WEBSOCKET_PROTOCOL_VERSION: u16 = 3;
-pub const TRANSFER_PROTOCOL_VERSION: u16 = transfer_protocol::TRANSFER_PROTOCOL_VERSION;
 pub const FILESYSTEM_PROTOCOL_VERSION: u16 = 1;
-pub const HELLO_TEXT_MAX: usize = 1024;
 
 const AGENT_STATUS_MAGIC: &[u8] = b"PICOAGENT\0";
 const HOST_AGENT_STALE_AFTER_MS: u64 = 25_000;
@@ -39,7 +32,6 @@ impl HostAgentState {
 
 #[derive(Clone)]
 pub struct HostAgentSnapshot {
-    pub present: bool,
     pub version: String<HOST_AGENT_VERSION_MAX>,
     pub hostname: String<HOSTNAME_MAX>,
     pub host_os: String<HOST_OS_MAX>,
@@ -127,74 +119,12 @@ pub fn host_agent_present() -> bool {
 }
 
 pub fn host_agent_snapshot() -> HostAgentSnapshot {
-    let present = host_agent_present();
     HOST_AGENT_STATE.lock(|cell| {
         let state = cell.borrow();
         HostAgentSnapshot {
-            present,
             version: state.version.clone(),
             hostname: state.hostname.clone(),
             host_os: state.host_os.clone(),
         }
     })
-}
-
-pub fn hello_json() -> String<HELLO_TEXT_MAX> {
-    let host = host_agent_snapshot();
-    let version = if host.version.is_empty() {
-        let mut value: String<68> = String::new();
-        let _ = value.push_str("null");
-        value
-    } else {
-        let escaped = escape_json_str(host.version.as_str());
-        let mut value: String<68> = String::new();
-        let _ = write!(value, "\"{}\"", escaped.as_str());
-        value
-    };
-    let hostname = if host.hostname.is_empty() {
-        let mut value: String<196> = String::new();
-        let _ = value.push_str("null");
-        value
-    } else {
-        let escaped = escape_json_str(host.hostname.as_str());
-        let mut value: String<196> = String::new();
-        let _ = write!(value, "\"{}\"", escaped.as_str());
-        value
-    };
-    let privileged = if host.present && !host.version.is_empty() {
-        "[\"host_execute\",\"db_credentials\",\"host_filesystem\"]"
-    } else {
-        "[]"
-    };
-
-    let mut hello = String::new();
-    let _ = write!(
-        hello,
-        concat!(
-            "{{\"event_type\":\"hello\",\"version\":{},",
-            "\"firmware\":{{\"version\":\"{}\",\"build\":\"{}\"}},",
-            "\"protocols\":{{\"websocket\":{},\"transfer\":{},\"filesystem\":{}}},",
-            "\"host_agent\":{{\"present\":{},\"version\":{},\"hostname\":{}}},",
-            "\"cdc_bootstrap\":{{\"version\":1,\"available\":{},\"busy\":{},\"state\":\"{}\"}},",
-            "\"keyboard\":{{\"layouts\":[\"win_en-US\",\"win_en-GB\",\"win_pt-BR\",\"win_de-DE\",\"mac_en-GB\",\"mac_pt-BR\",\"mac_de-DE\"],",
-            "\"features\":[\"hid_keyboard\",\"script_effect_v1\"]}},",
-            "\"features\":[\"usb_identity\",\"usb_control\",\"file_transfer\",",
-            "\"filesystem_browser\",\"transfer_download\",\"cdc_bootstrap_v1\"],",
-            "\"privileged_operations\":{} }}"
-        ),
-        HELLO_VERSION,
-        env!("CARGO_PKG_VERSION"),
-        env!("PICO_FIRMWARE_BUILD"),
-        WEBSOCKET_PROTOCOL_VERSION,
-        TRANSFER_PROTOCOL_VERSION,
-        FILESYSTEM_PROTOCOL_VERSION,
-        host.present,
-        version.as_str(),
-        hostname.as_str(),
-        crate::usb::bootstrap::available(),
-        crate::usb::bootstrap::active(),
-        crate::usb::bootstrap::phase().wire(),
-        privileged,
-    );
-    hello
 }

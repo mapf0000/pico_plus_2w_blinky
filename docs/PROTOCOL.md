@@ -1,6 +1,6 @@
 # Protocol reference
 
-This document is the canonical wire-level reference for communication between the browser frontend, Pico firmware, and host agent. It describes the formats implemented by the current source. When this document and code disagree, treat code as authoritative and update this document in the same change.
+This document is the canonical wire-level reference for communication between the native Bluetooth companion, Pico firmware, and host agent. It describes the formats implemented by the current source. When this document and code disagree, treat code as authoritative and update this document in the same change.
 
 Related documents:
 
@@ -10,11 +10,73 @@ Related documents:
 - [Python scripting reference](SCRIPTING.md)
 - [Threat model](THREAT_MODEL.md)
 
+## Bluetooth control v2
+
+Shared definitions: `crates/ble-protocol`. Version 1 was read-only; version 2
+is deliberately incompatible, so old firmware/apps fail negotiation.
+One connection, one outstanding logical request/effect, no automatic retries.
+All integers are little-endian; reserved bytes must be zero.
+
+| UUID (128-bit) | Characteristic | Operation / size |
+| --- | --- | --- |
+| `7069636f-0001-4c32-9b89-5d7a00000001` | Service | project service |
+| suffix `00000002` | Info | public read, 20 bytes |
+| suffix `00000003` | Status | public read, 12 bytes |
+| suffix `00000004` | Pairing gate | read, 1 byte (`1`); rejects with ATT insufficient authentication until numeric comparison is physically confirmed and encryption authenticated |
+| suffix `00000005` | Command | authenticated write with response, 9–20 bytes |
+| suffix `00000006` | Result | public read, 20 bytes |
+
+Info: bytes 0–3 `PBLE`, byte 4 version `2`, byte 5 control flag `2`,
+bytes 6–7 zero, bytes 8–19 printable ASCII build label with zero padding.
+Status: byte 0 version, byte 1 flags (bit 0 USB enabled, bit 1 USB ready,
+bit 2 agent recently present), bytes 2–3 zero, bytes 4–11 uptime seconds `u64`.
+No hostname, credentials, typed text or key material is exposed.
+
+| Command offset | Field |
+| --- | --- |
+| 0 | version `2` |
+| 1 | kind: control `1`, script `2` |
+| 2–3 | nonzero connection-local monotonic `u16` token |
+| 4–5 | `u16` payload offset |
+| 6–7 | `u16` complete logical length (1–4,125) |
+| 8–19 | 1–12 payload bytes; last fragment uses its exact length |
+
+Fragments must be contiguous, with consistent token/kind/total. Reject gaps,
+overlaps, duplicates, reused/older/zero tokens, excess lengths and wrong versions.
+The first fragment of a newer token must have offset zero; it abandons any
+partial upload. Partial uploads expire after five seconds and cannot resume.
+Exhaustion requires reconnect, where a new firmware incarnation scopes ownership.
+ATT acknowledgement confirms a fragment, not HID admission or completion.
+
+Control payload is exactly one opcode: `0` acquire, `1` release, `2` USB on,
+`3` USB off. Authentication precedes acquisition; the lease is scoped to this
+connection. Release/USB off require no reserved HID job. Script payload retains
+the existing 29-byte version-1 `script-protocol` run/cancel header (including its
+leading kind byte `8`), full request/process/effect `u64` IDs and up to 4,096 KBD1
+bytes. No USB tag or script version is reinterpreted. Cancel uses a newer fragment
+token to interrupt upload, then targets the full active IDs if already admitted.
+
+Result: byte 0 version, byte 1 code, bytes 2–3 token, bytes 4–19 zero.
+Codes: idle `0` (token zero only), acquired `1`, released `2`, admitted `3`,
+completed `4`, cancelled `5`, rejected `6`, USB unavailable `7`, busy `8`,
+USB changed `9`. Run completion retains its run token; cancellation of a partial
+upload returns cancelled with the cancel token. The app accepts either for that
+scoped cancel. Terminal state persists until the next logical command; no
+notification subscription or receipt queue is needed. Unknown/malformed results
+fail closed. The client never replays a possibly executed effect.
+
+Pairing is nonbonding authenticated encryption using numeric comparison.
+Pico X confirms a displayed six-digit code; Y rejects. The firmware allows 30
+seconds for physical confirmation, the native app up to 90 seconds for the OS
+pairing flow. Just Works and input-only/passkey-display fallbacks cannot grant
+control. Each connection requires new confirmation. Firmware completion delivery
+checks incarnation and full effect IDs before updating the result slot.
+
 ## Scope and conventions
 
 There are two application transports:
 
-1. A text/binary WebSocket between the browser and firmware at port 81 `/ws`.
+1. Bluetooth GATT between the native companion and firmware (version 2 below).
 2. A TLV byte stream between firmware and the host agent over the USB control CDC-ACM interface.
 
 Unless stated otherwise:
@@ -36,6 +98,12 @@ Types used in layout tables:
 | `bytes[n]` | Exactly `n` uninterpreted bytes |
 | `utf8[n]` | Exactly `n` bytes of UTF-8 text, without a terminator |
 | `rest` | All remaining bytes in the containing frame |
+
+## Legacy USB/bulk version inventory
+
+WebSocket/HELLO entries and browser-specific sections below are historical wire
+reference only: the WLAN endpoint and browser have been removed. USB tags and
+bulk payload formats remain unchanged; native BLE does not relay these workflows.
 
 ## Version inventory
 

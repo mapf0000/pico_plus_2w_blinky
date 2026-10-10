@@ -49,8 +49,6 @@ fn menu_chord_consumes_both_release_orders_and_allows_the_next_run() {
             for _ in 0..2 {
                 let events = debounce.sample(raw);
                 let route = controller.route(events, false);
-                assert!(!route.script.contains(Button::A));
-                assert!(!route.script.contains(Button::X));
                 ran |= controller.handle_input(route.page, &catalog).is_some();
             }
             assert_eq!(ran, expect_run);
@@ -77,25 +75,22 @@ fn stop_is_global_and_suppresses_run_without_swallowing_unrelated_releases() {
         assert!(route.stop);
         assert!(!route.cycle_led);
         assert!(!route.page.contains(Button::X));
-        assert!(!route.script.contains(Button::X));
-        assert!(!route.script.contains(Button::Y));
-        assert_eq!(route.script.contains(Button::A), page != 0);
     }
 }
 
 #[test]
-fn idle_y_and_normal_script_events_preserve_existing_policy() {
+fn idle_y_retains_led_behavior_outside_payloads() {
     let mut controller = Controller::default();
     let mut events = ButtonEvents::default();
     events.0[Button::Y as usize].released = true;
     let route = controller.route(events, false);
-    assert!(route.cycle_led && route.script.contains(Button::Y));
+    assert!(route.cycle_led);
     controller.navigation.menu_open = true;
-    assert!(!controller.route(events, false).script.contains(Button::Y));
+    assert_eq!(controller.route(events, false).page, ButtonMask::default());
     controller.navigation.menu_open = false;
     controller.navigation.selected = Selection(0);
     let route = controller.route(events, false);
-    assert!(!route.cycle_led && !route.script.contains(Button::Y));
+    assert!(!route.cycle_led);
 }
 
 #[test]
@@ -311,11 +306,10 @@ fn handshake_and_cancellation_are_terminal_without_automatic_resubmission() {
 #[test]
 fn transfer_progress_is_coalesced_but_connection_and_terminal_changes_are_immediate() {
     let mut controller = Controller::default();
-    controller.navigation.selected = Selection(1);
     let mut state = snapshot(1_000);
     state.transfer.state = TransferState::Progress;
     state.transfer.id = 1;
-    assert!(controller.update(state, None));
+    assert!(controller.transfer.update(state.transfer, state.now_ms));
     let mut state = snapshot(1_050);
     state.transfer = TransferSnapshot {
         state: TransferState::Progress,
@@ -323,7 +317,7 @@ fn transfer_progress_is_coalesced_but_connection_and_terminal_changes_are_immedi
         received_bytes: 100,
         ..Default::default()
     };
-    assert!(!controller.update(state, None));
+    assert!(!controller.transfer.update(state.transfer, state.now_ms));
     assert_eq!(controller.transfer.snapshot.received_bytes, 0);
     let mut state = snapshot(1_100);
     state.transfer = TransferSnapshot {
@@ -332,7 +326,7 @@ fn transfer_progress_is_coalesced_but_connection_and_terminal_changes_are_immedi
         received_bytes: 200,
         ..Default::default()
     };
-    assert!(controller.update(state, None));
+    assert!(controller.transfer.update(state.transfer, state.now_ms));
     let mut state = snapshot(1_101);
     state.transfer = TransferSnapshot {
         state: TransferState::Finished,
@@ -340,11 +334,11 @@ fn transfer_progress_is_coalesced_but_connection_and_terminal_changes_are_immedi
         received_bytes: 300,
         ..Default::default()
     };
-    assert!(controller.update(state, None));
+    assert!(controller.transfer.update(state.transfer, state.now_ms));
     let mut state = snapshot(1_102);
     state.transfer = controller.transfer.snapshot;
     state.transfer.browser_connected = true;
-    assert!(controller.update(state, None));
+    assert!(controller.transfer.update(state.transfer, state.now_ms));
 }
 
 struct Canvas {
@@ -525,7 +519,12 @@ fn unchanged_scene_draws_nothing_and_selection_only_redraws_two_rows() {
 #[test]
 fn layout_changes_preserve_status_and_style_only_changes_repaint() {
     let mut controller = Controller::default();
-    controller.navigation.selected = Selection(2);
+    controller.navigation.selected = Selection(
+        PageId::ALL
+            .iter()
+            .position(|page| *page == PageId::Agent)
+            .unwrap(),
+    );
     controller.agent.status.set("Sent", Severity::Success);
     let system = SystemSnapshot::default();
     let mut renderer = Renderer::new(DisplayConfig::default());
@@ -901,4 +900,28 @@ fn in_flight_frames_own_text_and_uncommitted_frames_force_retry() {
             .sum::<u32>(),
         320 * 240
     );
+}
+
+#[test]
+fn pairing_scene_shows_six_digits_and_physical_confirmation_without_metrics() {
+    let metrics = SystemSnapshot {
+        pairing_code: Some(42),
+        ..Default::default()
+    };
+    let scene = Scene::build(
+        PageView::System {
+            ssid: "Bluetooth",
+            metrics: &metrics,
+        },
+        Rectangle::new(Point::zero(), Size::new(320, 240)),
+        Palette::default(),
+    );
+    assert!(scene.rows.iter().any(|row| row.text == "Compare: 000042"));
+    assert!(
+        scene
+            .rows
+            .iter()
+            .any(|row| row.text == "X: Confirm, Y: Reject")
+    );
+    assert!(!scene.rows.iter().any(|row| row.text.starts_with("Uptime:")));
 }
