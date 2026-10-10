@@ -93,6 +93,8 @@ impl MockTransport {
 
     fn status(&self) -> Status {
         Status {
+            usb_enabled: true,
+            uptime_secs: None,
             usb_ready: self.scenario != Scenario::UsbUnavailable,
             host_agent_present: true,
         }
@@ -210,6 +212,7 @@ impl Transport for MockTransport {
                     tag,
                     now,
                     Reply::Connected(Capabilities {
+                        read_only: false,
                         script_version: if self.scenario == Scenario::Incompatible {
                             script_protocol::VERSION + 1
                         } else {

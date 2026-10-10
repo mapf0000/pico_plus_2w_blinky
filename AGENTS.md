@@ -87,16 +87,19 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 - `src/app.rs`: native egui rendering and controls.
 - `src/backend.rs`: bounded UI commands, Tokio backend and shutdown.
 - `src/smoke.rs`: deterministic headless mock lifecycle check.
+- `src/ble.rs`: bounded native BLE worker, read-only discovery/status and cleanup.
 - `crates/companion-core`: platform-independent client state, keyboard lowering,
   correlation, deadlines and mock transport.
 
-The package is `pico-companion`. It currently requires `--mock` and does not
-access Bluetooth or USB. Native builds must remain independent of firmware asset
+The package is `pico-companion`. Choose `--mock` or `--ble`; BLE supports
+read-only status against firmware built with `--features ble`. No BLE control
+writes, authenticated pairing, or USB access are implemented. Native builds must remain independent of firmware asset
 generation and browser tooling. Keep device work out of UI callbacks, bound
 queues/diagnostics, and scope commands/results to a connection incarnation.
 
 ### Shared crates: `crates/`
 
+- `ble-protocol`: fixed-size, `no_std` read-only BLE information/status codecs and UUIDs.
 - `keyboard-core`: portable, language-neutral layouts, key parsing, lowering, and KBD1 encoding. It is `no_std` by default.
 - `firmware-exec`: strict, two-pass `no_std` KBD1 validator/executor.
 - `script-protocol`: versioned correlated browser-to-firmware effect envelopes.
@@ -214,8 +217,8 @@ Use targeted checks while iterating. Do not rely on bare `cargo test` at the wor
 ### Native companion changes
 
 ```sh
-cargo test -p companion-core -p pico-companion
-cargo clippy -p pico-companion -p companion-core --all-targets -- -D warnings
+cargo test -p ble-protocol -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol --all-targets -- -D warnings
 cargo run -p pico-companion -- --mock --self-test
 cargo build -p pico-companion --release
 ```

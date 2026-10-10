@@ -37,8 +37,8 @@ The browser never accesses the host filesystem directly. For filesystem and tran
 ### Native companion prototype
 
 Package: `pico-companion`, under `apps/companion/`; client state lives in
-`crates/companion-core`. The prototype currently supports only an explicit mock
-transport and does not communicate with Pico hardware. It runs a native egui
+`crates/companion-core`. Explicit `--mock` and read-only `--ble` transports
+share the same connection/correlation lifecycle. It runs a native egui
 window without a browser or local HTTP server. The existing WLAN frontend and
 firmware services remain the production paths.
 
@@ -54,6 +54,22 @@ Shutdown interrupts pending work and joins the backend thread.
 The mock validates the existing correlated `script-protocol` envelope and KBD1
 through `firmware-exec`. It simulates discovery, status, control and execution;
 it does not implement or validate BLE pairing, packet transport, or USB timing.
+`src/ble.rs` adapts btleplug to that transport seam through a bounded Tokio
+worker (four requests, 16 replies). A watch generation interrupts pending I/O
+and discards queued requests from replaced sessions. I/O deadlines are four
+seconds, cleanup 750 ms per operation; discovery state holds at most 16 devices.
+Native builds remain independent of firmware assets and browser tooling.
+
+Firmware `ble` is opt-in. CYW43's existing runner owns both WLAN and Bluetooth;
+`firmware/src/ble.rs` owns the peripheral-only TrouBLE stack, one connection,
+two L2CAP channels and an eight-packet pool of 27-byte packets. GATT exposes
+information and status reads, with no write characteristic or HID/host routing.
+UUIDs/codecs live in `crates/ble-protocol`; both values fit the default ATT MTU.
+WLAN sessions, command ownership, transfers and USB protocols are unchanged.
+TrouBLE 0.6 uses bt-hci 0.8 like CYW43 0.7; its Embassy sync 0.7 alias is scoped
+inside the BLE module while existing services keep sync 0.8. Fatal BLE host
+errors stop only the BLE task. There is no pairing/bond storage in this spike.
+
 Python remains in the browser Worker. See the
 [companion README](../apps/companion/README.md) and
 [BLE implementation plan](../NATIVE_COMPANION_BLE_PLAN.md).
@@ -421,10 +437,12 @@ The browser never retries a keyboard effect because its outcome may be unknown a
 
 `crates/build-support/src/presets.rs` defines typed Rust keyboard operations and
 lowers them with `keyboard-core` during the firmware build. Generated static KBD1
-and bounded metadata are included by the display service adapter. Launcher paths
-and availability come from the same normalized volume label and target metadata
-that build the internal agent image. The firmware adds no interpreter, heap allocation, or
-second bytecode format. Python remains a browser-resident process.
+and bounded metadata are included by the display service adapter. The catalog
+contains the keyboard test, manual CDC arm, and DE/US CDC installers. Installer
+availability requires the packaged Apple Silicon artifact and a provisioned USB
+serial identity; both automatic installers use the shared receiver command.
+The firmware adds no interpreter, heap allocation, or second bytecode format.
+Python remains a browser-resident process.
 
 Build-time validation requires 1–64 presets with names of 1–96 printable ASCII
 characters. Preset metadata remains in flash; visible-row storage is bounded
@@ -548,7 +566,11 @@ The [threat model](THREAT_MODEL.md) treats the USB-connected PC and host-agent i
 `crates/build-support/src/msc_image.rs` records the macOS executable's allocated
 flash extent and generates size/SHA-256 metadata. The CDC installer shell source
 and short receiver command are maintained in `crates/build-support`; generated
-files remain under `OUT_DIR`. The executable stays in the internal FAT image; USB mass storage is not exposed.
+files remain under `OUT_DIR`. The executable stays in the internal FAT image;
+`firmware/src/usb/agent_image.rs` owns its flash embedding. USB mass storage is
+not exposed. The frontend/Worker asset fingerprint and Cargo rerun inputs
+include `keyboard-core` and `bytecode-constants`, so layout changes rebuild the
+embedded Worker as well as the hardware presets.
 
 `firmware/src/bootstrap_core.rs` owns allocation-free request parsing, ordered
 session validation, and logical extent slicing, with host tests. The existing
@@ -564,3 +586,10 @@ exact reads, digest validation, watchdog cleanup, and serial descriptor closure;
 the agent then opens the same port for its ordinary TLV handshake. Additive
 HELLO installation status is consumed by the frontend through the existing
 central WebSocket connection. Verification and agent detection remain separate.
+
+Agent detection uses the existing 25-second health cache and 10-second keepalive.
+The host agent deliberately deasserts DTR, so DTR cannot reliably identify its
+process closing; endpoint enablement also does not establish application
+ownership. A blocked local install reports recent agent activity, then changes
+to retry guidance after cache expiry. It never automatically queues another
+installation or probes an unowned serial stream.

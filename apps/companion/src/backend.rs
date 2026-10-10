@@ -1,5 +1,5 @@
 use companion_core::{
-    Action, Client, Snapshot,
+    Action, Client, Event, Failure, Request, Snapshot, Transport,
     mock::{MockTransport, Scenario},
 };
 use eframe::egui;
@@ -8,6 +8,43 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot, watch};
+
+#[derive(Clone, Copy)]
+pub enum Mode {
+    Mock(Scenario),
+    Ble,
+}
+
+impl Mode {
+    pub fn is_mock(self) -> bool {
+        matches!(self, Self::Mock(_))
+    }
+}
+
+enum Connector {
+    Mock(MockTransport),
+    Ble(crate::ble::BleTransport),
+}
+impl Transport for Connector {
+    fn submit(&mut self, request: Request, now: Duration) -> Result<(), Failure> {
+        match self {
+            Self::Mock(t) => t.submit(request, now),
+            Self::Ble(t) => t.submit(request, now),
+        }
+    }
+    fn poll(&mut self, now: Duration) -> Option<Event> {
+        match self {
+            Self::Mock(t) => t.poll(now),
+            Self::Ble(t) => t.poll(now),
+        }
+    }
+    fn close(&mut self) {
+        match self {
+            Self::Mock(t) => t.close(),
+            Self::Ble(t) => t.close(),
+        }
+    }
+}
 
 const COMMAND_CAPACITY: usize = 16;
 const URGENT_CAPACITY: usize = 4;
@@ -26,20 +63,24 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn start(scenario: Scenario, repaint: egui::Context) -> io::Result<Self> {
+    pub fn start(mode: Mode, repaint: egui::Context) -> io::Result<Self> {
         let (commands, mut command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (urgent, mut urgent_rx) = mpsc::channel(URGENT_CAPACITY);
         let (snapshots_tx, snapshots) = watch::channel(Snapshot::default());
         let (shutdown, mut shutdown_rx) = oneshot::channel();
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()?;
         let thread = thread::Builder::new()
             .name("companion-backend".into())
             .spawn(move || {
                 runtime.block_on(async move {
                     let start = Instant::now();
-                    let mut client = Client::new(MockTransport::new(scenario));
+                    let connector = match mode {
+                        Mode::Mock(scenario) => Connector::Mock(MockTransport::new(scenario)),
+                        Mode::Ble => Connector::Ble(crate::ble::BleTransport::new()),
+                    };
+                    let mut client = Client::new(connector);
                     let mut ticker = tokio::time::interval(Duration::from_millis(50));
                     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     client.dispatch(Action::Scan, Duration::ZERO);
@@ -67,6 +108,9 @@ impl Backend {
                         }
                     }
                     client.dispatch(Action::Disconnect, start.elapsed());
+                    if let Connector::Ble(transport) = client.into_transport() {
+                        transport.shutdown().await;
+                    }
                 });
             })?;
         Ok(Self {
@@ -101,7 +145,7 @@ impl Drop for Backend {
             let _ = shutdown.send(());
         }
         // The backend contains only non-blocking operations and selects shutdown
-        // before all traffic. Join releases the runtime and simulated session.
+        // before all traffic. BLE cleanup has finite per-operation deadlines.
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -114,7 +158,8 @@ mod tests {
 
     #[test]
     fn shutdown_interrupts_a_pending_connection_and_queued_commands() {
-        let backend = Backend::start(Scenario::Timeout, egui::Context::default()).unwrap();
+        let backend =
+            Backend::start(Mode::Mock(Scenario::Timeout), egui::Context::default()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         while backend.snapshots.borrow().devices.is_empty() {
             assert!(Instant::now() < deadline, "mock scan did not finish");

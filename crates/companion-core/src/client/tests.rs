@@ -253,6 +253,7 @@ fn rejects_unbounded_metadata_and_mismatched_reply_kinds() {
         Event::Reply {
             tag,
             reply: Reply::Connected(Capabilities {
+                read_only: false,
                 firmware: "mock".into(),
                 script_version: 1,
                 layouts: vec!["win_en-US".into()],
@@ -335,4 +336,40 @@ fn lowering_bounds_text_and_bytecode_and_respects_advertised_layouts() {
         Some(Failure::UnsupportedLayout)
     );
     assert!(!client.snapshot().job.active());
+}
+
+#[test]
+fn read_only_session_rejects_control_but_polls_status_and_disconnects_on_failure() {
+    let (mut client, now) = connected(Scenario::Normal);
+    let caps = client.snapshot.capabilities.as_mut().unwrap();
+    caps.read_only = true;
+    caps.layouts.clear();
+    caps.script_version = 0;
+    assert!(caps.valid() && caps.compatible());
+    for action in [Action::Acquire, Action::Release, text(0)] {
+        client.dispatch(action, now);
+        assert_eq!(client.snapshot().last_error, Some(Failure::ReadOnly));
+        assert!(!client.snapshot().pending);
+        assert!(!client.snapshot().can_send());
+    }
+    let later = now + STATUS_INTERVAL;
+    client.tick(later);
+    let tag = client.pending.as_ref().unwrap().tag;
+    assert!(matches!(
+        client.pending.as_ref().unwrap().kind,
+        Kind::Status
+    ));
+    client.receive(
+        Event::Reply {
+            tag,
+            reply: Reply::Error(Failure::LinkLost),
+        },
+        later,
+    );
+    assert_eq!(
+        client.snapshot().connection,
+        Connection::Failed(Failure::LinkLost)
+    );
+    assert!(client.snapshot().capabilities.is_none());
+    assert!(!client.snapshot().pending);
 }

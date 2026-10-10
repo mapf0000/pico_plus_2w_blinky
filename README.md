@@ -85,14 +85,16 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
 ## Native companion prototype
 
 An experimental Rust/egui companion is available alongside the WLAN UI. Its
-first milestone uses an explicit mock device; Bluetooth and Pico control are
-not implemented yet. Launch it from the root:
+prototype supports read-only BLE discovery/status and a mock keyboard lifecycle.
+Pico keyboard control over BLE is still deferred. Launch it from the root:
 
 ```sh
+cargo run -p pico-companion -- --ble
 cargo run -p pico-companion -- --mock
 ```
 
-Connect to the simulated device, acquire mock control, and try the keyboard
+BLE mode needs firmware built with `--features ble`. The WLAN UI stays enabled.
+In mock mode, connect to the simulated device, acquire mock control, and try the keyboard
 effect and cancellation controls. For a headless lifecycle check, add
 `--self-test`. See [companion commands and scenarios](apps/companion/README.md)
 and [the native/BLE implementation plan](NATIVE_COMPANION_BLE_PLAN.md).
@@ -106,8 +108,8 @@ before using it.
 
 USB CDC installation is available on native Apple Silicon macOS. The device
 exposes logger CDC, control CDC, and a HID keyboard; it no longer exposes a USB
-mass-storage drive. Package the agent and provision
-a unique, short USB serial identity when building firmware:
+mass-storage drive. Package the agent and provision a unique, short USB serial
+identity when building firmware:
 
 ```sh
 scripts/build-host-agent
@@ -140,7 +142,8 @@ with the German input source selected. Keyboard hardware classification and
 input language are separate settings. ISO classification has not been validated
 for this preset.
 
-The count excludes Terminal launch and Return. Stop an existing agent before
+The 96-character count excludes Terminal launch and Return; shifted characters
+also require additional HID reports. Stop an existing agent before
 installation and allow up to 25 seconds for cached agent presence to expire;
 the CDC install footer reports recent agent activity and changes to
 **Agent not detected; press X to retry** when that cached presence expires.
@@ -152,8 +155,9 @@ handshake. Terminal may print `>` continuation prompts and `dd` job messages;
 these are expected shell output during a successful install. Intel macOS is
 unsupported by the current artifact. An optional
 `PICO_CDC_INSTALL_DIR` in the Terminal environment selects another installation
-directory. Details and remaining platform checks are in
-[MACOS_CDC_BOOTSTRAP_PLAN.md](MACOS_CDC_BOOTSTRAP_PLAN.md).
+directory. See [CDC identity and flash use](docs/HARDWARE.md#cdc-installer-identity-and-flash-use),
+the [bootstrap protocol](docs/PROTOCOL.md#explicitly-armed-cdc-bootstrap-v1), and
+[validation coverage](docs/DEVICE_TESTING.md#cdc-installation-checks).
 
 The preset list scrolls to keep the selection visible and reserves space for
 layout details and status. Status messages wrap across two rows; long labels use

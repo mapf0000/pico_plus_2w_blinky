@@ -221,9 +221,30 @@ async fn main(spawner: Spawner) {
     let state = STATE.init(cyw43::State::new());
 
     log::info!("cyw43: loading firmware and bringing up chip");
+    #[cfg(not(feature = "ble"))]
     let (net_device, mut control, cyw_runner) = cyw43::new(state, pwr, spi, fw, nvram).await;
+    #[cfg(feature = "ble")]
+    let (net_device, bt_driver, mut control, cyw_runner) = cyw43::new_with_bluetooth(
+        state,
+        pwr,
+        spi,
+        fw,
+        cyw43::aligned_bytes!("../cyw43-firmware/43439A0_btfw.bin"),
+        nvram,
+    )
+    .await;
     log::info!("cyw43: init complete; spawning runner");
     let _ = log_spawn(&spawner, "cyw43_task", cyw43_task(cyw_runner));
+
+    #[cfg(feature = "ble")]
+    {
+        let mut address = [0; 6];
+        RoscRng.fill_bytes(&mut address);
+        // Static random address: two high bits set, random portion not all 0/1.
+        address[5] |= 0xc0;
+        address[0] = (address[0] & 0xfe) | 0x02;
+        let _ = log_spawn(&spawner, "ble_task", ble::task(bt_driver, address));
+    }
 
     log::info!("cyw43: applying CLM/regulatory data");
     control.init(clm).await;
@@ -260,6 +281,8 @@ async fn main(spawner: Spawner) {
 
 // ===== Submodules (kept declared; implementations live in their own files) =====
 
+#[cfg(feature = "ble")]
+mod ble;
 mod capabilities;
 mod device_config;
 mod dhcp;

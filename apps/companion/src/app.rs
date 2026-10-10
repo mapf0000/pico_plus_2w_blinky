@@ -1,7 +1,5 @@
-use crate::backend::Backend;
-use companion_core::{
-    Action, Connection, Job, Outcome, Snapshot, keyboard, layouts, mock::Scenario,
-};
+use crate::backend::{Backend, Mode};
+use companion_core::{Action, Connection, Job, Outcome, Snapshot, keyboard, layouts};
 use eframe::egui;
 
 const DEMO_TEXT: &str = "Hello from Pico!";
@@ -9,7 +7,7 @@ const DEMO_TEXT: &str = "Hello from Pico!";
 pub struct CompanionApp {
     backend: Backend,
     snapshot: Snapshot,
-    scenario: Scenario,
+    mode: Mode,
     selected: Option<String>,
     layout: String,
     text: String,
@@ -18,12 +16,12 @@ pub struct CompanionApp {
 }
 
 impl CompanionApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, scenario: Scenario) -> std::io::Result<Self> {
-        let backend = Backend::start(scenario, cc.egui_ctx.clone())?;
+    pub fn new(cc: &eframe::CreationContext<'_>, mode: Mode) -> std::io::Result<Self> {
+        let backend = Backend::start(mode, cc.egui_ctx.clone())?;
         Ok(Self {
             backend,
             snapshot: Snapshot::default(),
-            scenario,
+            mode,
             selected: None,
             layout: "win_en-US".into(),
             text: DEMO_TEXT.into(),
@@ -47,7 +45,11 @@ impl CompanionApp {
             if ui
                 .add_enabled(
                     !self.snapshot.pending && self.snapshot.connection != Connection::Connected,
-                    egui::Button::new("Scan mock devices"),
+                    egui::Button::new(if self.mode.is_mock() {
+                        "Scan mock devices"
+                    } else {
+                        "Scan Bluetooth"
+                    }),
                 )
                 .clicked()
             {
@@ -81,7 +83,7 @@ impl CompanionApp {
             }
         });
         if self.snapshot.devices.is_empty() && !transitioning {
-            ui.label("No devices found. Scan again or choose another scenario at launch.");
+            ui.label("No devices found. Check the device is advertising and scan again.");
         }
         for device in &self.snapshot.devices {
             let selected = self.selected.as_ref() == Some(&device.id);
@@ -110,30 +112,54 @@ impl CompanionApp {
                     ui.end_row();
                     ui.label("Protocol");
                     ui.label(if caps.compatible() {
-                        "Compatible (mock)"
+                        if self.mode.is_mock() {
+                            "Compatible (mock)"
+                        } else {
+                            "BLE status v1"
+                        }
                     } else {
                         "Incompatible"
                     });
                     ui.end_row();
                     ui.label("USB keyboard");
                     ui.label(if caps.status.usb_ready {
-                        "Ready (simulated)"
+                        if self.mode.is_mock() {
+                            "Ready (simulated)"
+                        } else {
+                            "Ready"
+                        }
                     } else {
                         "Unavailable"
                     });
                     ui.end_row();
                     ui.label("Host agent");
                     ui.label(if caps.status.host_agent_present {
-                        "Present (simulated)"
+                        if self.mode.is_mock() {
+                            "Present (simulated)"
+                        } else {
+                            "Present"
+                        }
                     } else {
                         "Absent"
                     });
                     ui.end_row();
+                    if let Some(uptime) = caps.status.uptime_secs {
+                        ui.label("Device uptime");
+                        ui.label(format!("{uptime} s"));
+                        ui.end_row();
+                        ui.label("USB enabled");
+                        ui.label(if caps.status.usb_enabled { "Yes" } else { "No" });
+                        ui.end_row();
+                    }
                     ui.label("Control");
                     ui.label(if self.snapshot.control_acquired {
                         "Acquired (simulated)"
                     } else {
-                        "Released"
+                        if caps.read_only {
+                            "Read-only service"
+                        } else {
+                            "Released"
+                        }
                     });
                     ui.end_row();
                     ui.label("Last request");
@@ -146,6 +172,9 @@ impl CompanionApp {
                 });
         } else {
             ui.label("Connect to read capabilities and USB status.");
+        }
+        if !self.mode.is_mock() {
+            return;
         }
         ui.horizontal_wrapped(|ui| {
             let can_acquire = self.snapshot.connection == Connection::Connected
@@ -285,10 +314,10 @@ impl eframe::App for CompanionApp {
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Pico Companion");
-                ui.label(format!(
-                    "Mock mode · {} scenario · no Bluetooth or USB access",
-                    self.scenario.name()
-                ));
+                match self.mode {
+                    Mode::Mock(scenario) => { ui.label(format!("Mock mode · {} scenario · no Bluetooth or USB access", scenario.name())); }
+                    Mode::Ble => { ui.label("Bluetooth · read-only device status"); }
+                }
                 if let Some(error) = self.enqueue_error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
@@ -300,7 +329,8 @@ impl eframe::App for CompanionApp {
                 ui.separator();
                 self.status(ui);
                 ui.separator();
-                self.keyboard(ui);
+                if self.mode.is_mock() { self.keyboard(ui); }
+                else { ui.label("Keyboard control will follow authenticated pairing and shared control ownership."); }
                 ui.separator();
                 ui.heading("Diagnostics");
                 ui.small(format!(

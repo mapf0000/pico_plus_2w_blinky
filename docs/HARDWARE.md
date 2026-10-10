@@ -177,14 +177,13 @@ In the default `psram` build, detection or capacity failure makes HTTP and WebSo
 
 ## Composite USB device
 
-Firmware exposes one USB device containing four functions:
+Firmware exposes one USB device containing three functions (five interfaces):
 
 | Function | Purpose | Important behavior |
 | --- | --- | --- |
 | CDC-ACM logger | Human-readable firmware logs | Used by `scripts/pico-run`; log level is Info in the USB logger |
 | CDC-ACM control | Host-agent TLV protocol | Host agent probes candidates to distinguish it from logger/noisy ports |
 | HID boot keyboard | Executes `KBD1` scripts | IN reports, 8-byte keyboard report, 10 ms poll interval |
-| Mass storage | Distributes host-agent binaries | 4 MiB read-only FAT16 volume |
 
 Default USB descriptor values:
 
@@ -194,7 +193,7 @@ Default USB descriptor values:
 | PID | `0x0001` normally; optional boot-varying code can choose `0x0001`/`0x0002` |
 | Manufacturer | Persisted setting; default `Pico 2W` |
 | Product | Persisted setting; default `Logger + Keyboard` |
-| Serial number | None by default |
+| Serial number | None by default; optional validated `PICO_USB_SERIAL` |
 | Descriptor max power | 100 mA |
 | EP0 max packet | 64 bytes |
 
@@ -401,6 +400,7 @@ Use this checklist for changes to startup, pins, memory, network, USB, transfer,
 - [ ] Physical BOOTSEL mode is reachable with the current enclosure/cabling.
 - [ ] `picotool info` recognizes the ROM device.
 - [ ] A known-good release can be reflashed from BOOTSEL and returns to normal boot.
+
 ## CDC installer identity and flash use
 
 `PICO_USB_SERIAL` is an optional build input: provision a unique 2–8 character
@@ -411,11 +411,51 @@ those presets. Logger/control interface order remains unchanged. On the tested
 Mac, serial `P1234567` names logger `…P12345671` and control `…P12345673`; naming
 on other supported macOS versions remains an acceptance check.
 
+These are host-assigned BSD names, not firmware-selected paths. Apple's
+[CDC driver implementation](https://raw.githubusercontent.com/apple-oss-distributions/AppleUSBCDCDriver/main/AppleUSBCDCACM/DataDriver/Classes/AppleUSBCDCACMData.cpp)
+uses a usable serial identity, otherwise the USB location, and appends the data
+interface number. Local macOS 26.6.2 probes retained serial strings through 14
+characters, but 15–17 characters fell back to location-based names despite
+appearing intact in IORegistry. Keep the implemented 2–8-character contract;
+longer identities need a new platform matrix. Manufacturer/product strings do
+not select the serial-device path. A physical reconnect to the same USB port
+preserved the tested names.
+
 The installer reads generated, bounded file extents from the same 4 MiB FAT
-image retained as private CDC artifact storage. Installer source and the small manifest live in ordinary
-flash; no second agent copy, new flash reservation, or persistent writes are
-introduced. Build-time SHA-256 uses the existing host-side `sha2` version;
+image retained as private CDC artifact storage. Installer source and the small
+manifest live in ordinary flash; no second agent copy, new flash reservation, or
+persistent writes are introduced. Build-time SHA-256 uses the existing host-side `sha2` version;
 firmware adds no hashing dependency. New CDC block buffers remain 64 bytes and
 request storage 64 bytes. WebSocket text temporaries grow to 1,024 bytes, while
 transfer queue payloads/depths stay unchanged. Verify the final embedded link
 and memory use whenever changing these bounds.
+
+The CDC-only release reviewed on 2026-10-10 used 251,036 bytes of static SRAM.
+Its image occupied exactly 4 MiB at `0x10BFE000`, and no ELF section overlapped
+the final persistent configuration slots. This is a dated build result, not a
+size guarantee for subsequent firmware changes.
+
+
+## Optional BLE radio spike
+
+Build `--features ble` to load the checked-in `43439A0_btfw.bin` alongside WLAN
+firmware using `cyw43::new_with_bluetooth`. The existing PIO/SPI wiring, RM2
+clock divider, CLM data, AP settings, power management and network tasks remain.
+No additional RP pins, flash slots or persistent bond storage are used. Ordinary
+firmware builds do not start BLE. `ble usb_autostart` enables boot-time USB logging
+for an explicitly requested device smoke test.
+
+TrouBLE 0.6 matches CYW43 0.7's bt-hci 0.8 traits. Its peripheral stack reserves
+one connection, two L2CAP channels and eight 27-byte pool packets in SRAM; GATT
+has 11 attributes and no subscriptions. Information/status values are 20/12
+bytes, fitting default ATT MTU 23. BLE task state is statically allocated through
+Embassy/StaticCell, without firmware heap allocation. Fatal HCI failure stops
+BLE without restarting or disabling WLAN. Recovery is a board reboot.
+
+The 2026-10-10 linked comparison used 251,036 bytes of static SRAM without BLE
+and 263,552 with `ble` (+12,516). Allocated flash section bytes, including the
+unchanged 4 MiB internal image, were 9,754,796 and 9,862,860 (+108,064).
+Executable/rodata sections stayed below the internal image at `0x10BFE000`;
+no section overlaps the persistent slots at `0x10FFE000`. These figures describe
+those builds, not peak stack usage, radio performance or future size guarantees.
+See [device test evidence](DEVICE_TESTING.md#read-only-ble-spike) for board checks.

@@ -1,8 +1,11 @@
 # Native Rust companion and BLE feasibility plan
 
-Status: milestone 1 implemented: native egui shell, bounded client/backend,
-deterministic mock, failure scenarios, KBD1 demonstration and headless lifecycle
-check. The app requires `--mock`; hardware BLE and Pico changes remain planned.
+Status: milestones 1 and 2 implemented in code: native egui/mock lifecycle,
+read-only native BLE discovery/status, shared fixed-size codecs and opt-in
+Pico BLE initialization alongside WLAN. Real-board discovery/status/reconnect
+checks passed. The user deferred WLAN HTTP/WebSocket coexistence checks; these
+are not a gate for further BLE work. Evidence is in `docs/DEVICE_TESTING.md`;
+authenticated control remains planned.
 See [run instructions](apps/companion/README.md).
 
 ## Objective and scope
@@ -267,8 +270,8 @@ HID cancellation service. Include token reuse/stale-token tests.
 
 ### Authentication and physical interaction
 
-The read-only radio spike exposes only a synthetic ping and a minimal device
-snapshot. Before allowing keyboard actions, verify authenticated encrypted LE
+The read-only radio spike exposes only device information and a minimal live
+status snapshot. Repeated status reads supply the round-trip probe. Before allowing keyboard actions, verify authenticated encrypted LE
 Secure Connections with numeric comparison or passkey entry supported by the
 chosen TrouBLE version, CYW43 controller, and macOS Bluetooth stack. Use the
 Pico display/buttons to confirm pairing during a short, explicitly entered
@@ -349,7 +352,7 @@ complete firmware command refactor.
 | --- | --- | --- |
 | 0. Baseline and dependencies | Record current WLAN/HID behavior and linked memory; select matching egui, btleplug, TrouBLE/HCI versions; document macOS permissions/pairing support | Existing targets compile; real board and controller test setup identified |
 | 1. Native shell and mock | `pico-companion` window plus `companion-core`; deterministic device/status/effect mock and `--mock` mode | UI remains responsive through errors, timeouts and reconnect; no firmware/Trunk build required |
-| 2. Read-only radio spike | Opt-in Pico BLE initialization, service discovery and synthetic ping; real native scan/connect/status | AP/HTTP/WS still work while BLE is connected; repeatable real-board connection without control-PC WLAN |
+| 2. Read-only radio spike | Opt-in Pico BLE initialization, service discovery and periodic status-read RTT; real native scan/connect/status | AP/HTTP/WS still work while BLE is connected; repeatable real-board connection without control-PC WLAN |
 | 3. Shared firmware service | Extract dispatcher/session ownership and remote HID completion routing; adapt WLAN first | Existing WLAN wire contract, transfer backpressure and local preset behavior preserved; ownership/routing tests pass |
 | 4. Bounded BLE protocol and pairing | Freeze BLE v1; shared codec/reassembly; receipts, timeout/cancel control path; physically confirmed authenticated pairing | MTU-23 boundary/malformed tests pass; unauthorized control rejected; measured buffer and linked-memory budget acceptable |
 | 5. Keyboard demonstration | BLE control lease, KBD1 submission/completion and cancellation exposed in egui | Real target receives expected text; busy/local-preset/cancel/Y Stop/USB detach/reconnect scenarios behave correctly |
@@ -408,7 +411,7 @@ board and target are available, not routine validation of this plan. During it:
   Pico reboot, Bluetooth off/on, forgotten bonds, app kill and clean exit.
 - Run 20 connect/disconnect cycles and an initial 30-minute AP+BLE soak; record
   errors, reconnect time, watchdog resets and WLAN responsiveness.
-- Measure at least 100 synthetic ping round trips; report p50/p95/max RTT,
+- Measure at least 100 status-read round trips; report p50/p95/max RTT,
   packet size, OS/hardware and radio conditions. Use p95 below 250 ms as an
   initial interactive-control target, not an assumed BLE guarantee.
 - Test a valid near-4 KiB effect at default/small fragments, partial upload

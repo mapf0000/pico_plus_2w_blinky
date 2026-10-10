@@ -1,8 +1,9 @@
 //! Native companion state and bounded transport seam, independent of egui and BLE APIs.
 //!
 //! The typed requests here are internal messages, not a new wire protocol. The
-//! mock uses the production script envelope and KBD1 validator. A future BLE
-//! adapter must negotiate and validate its own transport framing and security.
+//! mock uses the production script envelope and KBD1 validator. The native BLE
+//! adapter validates a separate read-only service; authenticated control and
+//! command transport framing remain deferred.
 
 mod client;
 pub mod keyboard;
@@ -34,6 +35,9 @@ pub enum Failure {
     InvalidText,
     UnsupportedLayout,
     IdExhausted,
+    AdapterUnavailable,
+    BluetoothUnavailable,
+    ReadOnly,
 }
 
 impl Failure {
@@ -50,6 +54,11 @@ impl Failure {
             Self::NotReady => "Connect and acquire control before sending",
             Self::InvalidText => "Text is empty, unsupported, or exceeds keyboard limits",
             Self::UnsupportedLayout => "Layout is not supported by this device",
+            Self::AdapterUnavailable => "No Bluetooth adapter available",
+            Self::BluetoothUnavailable => {
+                "Bluetooth unavailable; enable the adapter and check permissions"
+            }
+            Self::ReadOnly => "This BLE service supports status only",
             Self::IdExhausted => "Session identifiers exhausted; restart the companion",
         }
     }
@@ -74,12 +83,15 @@ fn valid_metadata(value: &str) -> bool {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Status {
     pub usb_ready: bool,
+    pub usb_enabled: bool,
+    pub uptime_secs: Option<u64>,
     pub host_agent_present: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Capabilities {
     pub script_version: u8,
+    pub read_only: bool,
     pub firmware: String,
     pub layouts: Vec<String>,
     pub status: Status,
@@ -88,17 +100,18 @@ pub struct Capabilities {
 impl Capabilities {
     pub fn valid(&self) -> bool {
         valid_metadata(&self.firmware)
-            && !self.layouts.is_empty()
+            && (self.read_only || !self.layouts.is_empty())
             && self.layouts.len() <= 16
             && self.layouts.iter().all(|layout| valid_metadata(layout))
     }
 
     pub fn compatible(&self) -> bool {
-        self.script_version == script_protocol::VERSION
-            && self
-                .layouts
-                .iter()
-                .any(|layout| layouts().contains(&layout.as_str()))
+        self.read_only
+            || (self.script_version == script_protocol::VERSION
+                && self
+                    .layouts
+                    .iter()
+                    .any(|layout| layouts().contains(&layout.as_str())))
     }
 }
 
@@ -183,7 +196,7 @@ impl Snapshot {
             && self
                 .capabilities
                 .as_ref()
-                .is_some_and(|caps| caps.status.usb_ready)
+                .is_some_and(|caps| !caps.read_only && caps.status.usb_ready)
     }
 }
 

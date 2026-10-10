@@ -66,3 +66,21 @@ Future security work should focus on the trusted receivers:
 5. Keep host responses as data. A host status/result must not grant authority to change trusted settings, run browser code, or disclose unrelated browser data.
 
 These are review priorities, not claims that every listed defense is implemented or validated. Host-agent hardening can improve normal behavior but cannot enforce this boundary when the PC can replace the agent. Parser, browser, and hardware validation must be reported separately; a host unit test is not proof of physical USB isolation.
+
+
+## Read-only BLE prototype
+
+The optional `ble` firmware feature advertises a public read-only GATT service.
+Anyone in radio range may connect and read a short firmware build label, device
+uptime, USB enabled/HID-ready flags and recent host-agent presence. It exposes no
+hostname, filesystem, credentials, logs, typed text or host/device control.
+One connection can occupy the service and deny other BLE observers; WLAN remains
+available. Random addresses and local names are discovery hints, not identity or
+authorization. Pairing, bonding and encrypted/authenticated links are not claimed
+for this prototype. Control stays absent until shared firmware session ownership
+and physically confirmed authenticated pairing are implemented and tested.
+
+The native client validates exact versioned GATT values, bounds application-owned
+discovery and queues, scopes work to a connection generation and terminates on
+status failures. OS BLE libraries own their internal discovery caches. Read-only
+BLE success does not establish the security of a later command transport.

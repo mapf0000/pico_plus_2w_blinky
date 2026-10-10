@@ -43,6 +43,10 @@ impl<T: Transport> Client<T> {
         }
     }
 
+    pub fn into_transport(self) -> T {
+        self.transport
+    }
+
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
     }
@@ -92,6 +96,15 @@ impl<T: Transport> Client<T> {
                     now,
                     REQUEST_TIMEOUT,
                 );
+            }
+            Action::Acquire | Action::Release | Action::SendText { .. }
+                if self
+                    .snapshot
+                    .capabilities
+                    .as_ref()
+                    .is_some_and(|caps| caps.read_only) =>
+            {
+                self.reject(Failure::ReadOnly);
             }
             Action::Acquire if self.connected_compatible() && !self.snapshot.control_acquired => {
                 self.issue(Operation::Acquire, Kind::Acquire, now, REQUEST_TIMEOUT);
@@ -319,7 +332,18 @@ impl<T: Transport> Client<T> {
                 self.snapshot.capabilities = Some(caps);
                 self.snapshot.connection = Connection::Connected;
                 self.next_status = now + STATUS_INTERVAL;
-                self.note("Connected; control has not been acquired");
+                self.note(
+                    if self
+                        .snapshot
+                        .capabilities
+                        .as_ref()
+                        .is_some_and(|caps| caps.read_only)
+                    {
+                        "Connected to read-only BLE status service"
+                    } else {
+                        "Connected; control has not been acquired"
+                    },
+                );
                 if !compatible {
                     self.reject(Failure::Incompatible);
                 }
@@ -355,7 +379,7 @@ impl<T: Transport> Client<T> {
                 });
             }
             (_, Reply::Error(error)) => {
-                if matches!(kind, Kind::Scan | Kind::Connect) {
+                if matches!(kind, Kind::Scan | Kind::Connect | Kind::Status) {
                     self.disconnect(Some(error));
                     return;
                 }

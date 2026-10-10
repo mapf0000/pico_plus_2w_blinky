@@ -704,7 +704,8 @@ deliver installer source. Normal TLV tags, versions, the 2,048-byte maximum,
 and transfer backpressure remain unchanged outside bootstrap. Arming requires a
 configured serial identity, a packaged Apple Silicon artifact, a clean TLV
 boundary, an empty control queue, no active relay/benchmark/HID job, no detected
-agent, and a closed control port. Readiness samples DTR at 100 ms intervals.
+agent, and deasserted DTR on the control port. Readiness samples DTR at 100 ms
+intervals; DTR alone does not establish whether an application owns the port.
 
 All requests end with LF; request lines are limited to 64 bytes before LF.
 Requests can span USB packets. One request is outstanding at a time; coalesced
@@ -723,8 +724,10 @@ defined in v1: re-arm and restart instead.
 Responses ending on an exact 64-byte boundary get an explicit ZLP. A ZLP is
 not serial EOF. Firmware streams flash-backed extents through packets no larger
 than 64 bytes; neither a 16 KiB block nor the executable is buffered in SRAM.
-Generated extents are relative to the existing internal 4 MiB FAT agent image and validated
-against it. There is no firmware FAT parser and no duplicate executable.
+Generated extents are relative to the existing internal 4 MiB FAT agent image
+and validated against it. An artifact has 1–8 nonempty extents totaling its
+declared size, which must be 1 byte through 4 MiB; each extent must remain inside
+the image. There is no firmware FAT parser and no duplicate executable.
 
 The arm deadline is 30 seconds, request/write inactivity limit is 5 seconds,
 and firmware session budget is 120 seconds (a pending read is checked every
@@ -744,12 +747,71 @@ event queues still use their 2,049-byte payload capacity and unchanged depths.
 
 The host installer uses native macOS shell/file utilities, feature-detects
 `dd iflag=fullblock`, otherwise reads byte counts, and checks each accumulated
-length and final SHA-256. A private staging directory on the destination
-filesystem provides atomic replacement. Existing destination symlinks and
+length and final SHA-256. Plain `dd bs=N count=1` can succeed with a short input
+block; it is not an exact-byte reader. The fallback uses `bs=1 count=N`, with
+the same length/digest checks and watchdog. Do not pad short reads with
+`conv=sync` or use serial EOF as the executable boundary. Apple's
+[dd argument handling](https://raw.githubusercontent.com/apple-oss-distributions/file_cmds/main/dd/args.c)
+documents the full-block flag in the source.
+
+The 96-character first stage documented in README requires zsh. Its subshell
+contains temporary variables/descriptors, and its array guard opens exactly one
+matching control port. It opens descriptor 3 once, configures that same handle,
+sends `B1`, then executes `/bin/sh` with the CDC stream as stdin. Keep the guard
+and explicit shell path when changing the command. The installer is delivered
+as one complete compound command: the shell parses it before it requests binary
+bytes, and every exit path terminates the shell rather than interpreting binary
+as more source.
+
+A private staging directory on the destination filesystem provides atomic
+replacement. Existing destination symlinks and
 nonregular executable paths are rejected. Its watchdog closes CDC descriptors
 before spawning a timer; interruption reaps the reader and timer and removes
 staging. Serial descriptors are closed with a standalone `exec` before launch.
+Combining these redirections with the agent-launching `exec` left a saved serial
+descriptor inherited on the tested macOS shell; tests audit all descriptors
+0–255, including watchdog children, rather than only stdin and descriptor 3.
 HUP is ignored before forking so detached startup is protected immediately.
 The first stage has no host watchdog before complete installer delivery; use
 Terminal Control-C for that case. SHA-256 provides transfer integrity under the
 existing trusted-device distribution model, not independent device authenticity.
+
+
+## Read-only BLE feasibility service v1
+
+Opt-in firmware feature `ble` adds a peripheral GATT service alongside WLAN.
+It does not change USB TLV or WebSocket contracts. There is no command, control
+lease, notification, file-transfer or keyboard characteristic in this milestone.
+This service is deliberately readable without pairing and exposes only the
+following bounded, public device facts; it is not an authenticated identity.
+
+| Attribute | UUID | Access / value length |
+| --- | --- | --- |
+| Pico service | `7069636f-0001-4c32-9b89-5d7a00000001` | Primary service |
+| Information | `7069636f-0001-4c32-9b89-5d7a00000002` | Read only, 20 bytes |
+| Status | `7069636f-0001-4c32-9b89-5d7a00000003` | Read only, 12 bytes |
+
+The advertisement includes flags and the complete 128-bit service UUID; scan
+response includes the local name `Pico BLE`. UUIDs use Bluetooth little-endian
+byte order on the air. The random address is regenerated each boot, so neither
+name nor address is a permanent or trusted identifier. The shared `no_std`
+`ble-protocol` crate is canonical for UUIDs and value encoding/validation.
+
+Information: bytes 0–3 `PBLE`; byte 4 version `1`; byte 5 read-only flag `1`;
+bytes 6–7 zero; bytes 8–19 a nonempty ASCII graphical build label, truncated
+to 12 bytes and zero padded. Padding must be all zero after the first zero.
+The build label is a display hint, not a complete firmware version or identity.
+
+Status: byte 0 version `1`; byte 1 flags (`0x01` USB enabled, `0x02` USB HID
+ready, `0x04` recent host-agent presence); bytes 2–3 zero; bytes 4–11 device
+uptime in seconds as little-endian `u64`. Unknown flag bits, versions, nonzero
+reserved fields and incorrect lengths are rejected. Host-agent presence uses
+the existing 25-second cache, and does not prove process ownership.
+
+Status is refreshed before processing ATT events, including read-by-type.
+The companion reads it once per second and measures correlated read latency.
+Both values fit a single read response with ATT MTU 23. Native request tags and
+connection incarnations are local correlation state, not fields in these values.
+A status error or timeout terminates the native session; reconnection is explicit
+and cannot replay control. A future authenticated command protocol must use a
+separate versioned contract; never reinterpret these read-only values as commands.

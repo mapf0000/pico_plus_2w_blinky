@@ -130,6 +130,7 @@ The former implementation plan required the following acceptance coverage. Prese
 - Disconnect/reconnect under queue pressure, real USB-to-WebSocket backpressure, browser decryption/hash/persistence failures, and bounded receiver resource use against a hostile source PC.
 
 Use [AGENTS.md](../AGENTS.md#validation-matrix) for reproducible build/test commands and [THREAT_MODEL.md](THREAT_MODEL.md#receiver-defenses-and-review-priorities) for the security review scope. Frontend browser integration tests and Linux/Windows builds were not run in the recorded dependency upgrade; that gap must not be inferred closed from macOS or Worker-only tests. Independent cryptographic review, fuzzing, and sustained connected-browser/hardware tests remain follow-up work.
+
 ## CDC installation checks
 
 Run the host-side installer integration suite on native Apple Silicon macOS:
@@ -155,5 +156,115 @@ and build/package from source, then select the manual-arm action on the board
 and enter the receiver command from README. Verify exact artifact equality and
 a real TLV handshake, then test repeat installation, Y Stop, unplug during
 transfer, and return to normal control service. Check physical Terminal/HID
-behavior separately on US and DE input layouts. Current single-Mac research
-results and remaining acceptance gates are recorded in the root CDC plan.
+behavior separately on US and DE input layouts. See the
+[operator workflow](../README.md#hardware-keyboard-payloads),
+[identity requirements](HARDWARE.md#cdc-installer-identity-and-flash-use), and
+[stream contract](PROTOCOL.md#explicitly-armed-cdc-bootstrap-v1).
+
+For installer, preset, or bootstrap changes, run `scripts/test-cdc-installer`,
+`cargo test -p build-support -p firmware-exec`, the firmware library tests, and
+an embedded release build with the provisioned `PICO_USB_SERIAL`. Use the
+[validation matrix](../AGENTS.md#validation-matrix) for exact target checks;
+include the layout/Worker suites when changing a layout, and browser tests when
+changing frontend status. Verify the linked image boundary and single-copy
+artifact embedding. All generated files remain under Cargo `OUT_DIR`.
+
+### Recorded CDC acceptance (2026-10-10)
+
+The tested host was Apple Silicon macOS 26.6.2 with zsh 5.9 and `/bin/sh` Bash
+3.2.57. These are single-host results, not a supported-platform guarantee.
+
+| Check | Observed result |
+| --- | --- |
+| Maintained PTY installer suite | All eight scenarios passed, including both exact readers, descriptor audit, corruption, manifest/symlink rejection, EOF, and watchdog/interrupt cleanup |
+| Native bootstrap/display, generator/executor, and layout tests | Passed, including malformed/fragmented requests, extent reconstruction, admission, cached-presence retry guidance, and German redirection mapping |
+| Embedded build/Clippy and frontend checks | Passed; frontend wasm tests compiled, Trunk release embedding succeeded, and the additive bootstrap-status test ran in headless Firefox |
+| Manual-arm production installation | All 1,487,440 bytes matched the packaged artifact's size/SHA-256, and the real agent handshook; 2.574 seconds using a programmatically launched receiver, without HID |
+| Physical German CDC install | Terminal received the exact 96-character command; artifact size/SHA-256 and real agent handshake matched; 9.407 seconds from arm to handshake, including launch/typing |
+| Same-port physical reconnect | Provisioned logger/control serial names survived reconnect |
+| CDC-only composite after MSC removal | IORegistry showed CDC control/data interfaces 0/1 and 2/3 plus HID interface 4; no class-8 interface or `PICO_AGENT` mount; serial names unchanged |
+| `scripts/device-test --port /dev/cu.usbmodemP12345673` after removal | All 11 raw protocol checks, restricted production handshake, and two 10-second keepalive round-trips passed after the operator stopped the agent |
+
+The operator also reported successful repeat installation, cancellation, and
+operation after the wait/retry footer and MSC-removal updates. Cancellation
+method/latency and exact footer timing were not recorded. A fresh installation
+was not separately instrumented after MSC removal. Physical process-group SIGINT
+recovery passed on earlier isolated diagnostic firmware before installer
+delivery and during a stalled block; it does not establish production Terminal
+Control-C or Y Stop behavior. Earlier diagnostic fallback-reader downloads also
+matched the real artifact, but did not install or execute it.
+
+Remaining physical acceptance checks:
+
+- Automatic US input-layout delivery and German delivery when macOS classifies
+  the Pico keyboard as ISO; the passing German result used ANSI classification.
+- Production interruption recovery before complete installer delivery and
+  during a binary block, measured Y Stop/Terminal Control-C recovery, and unplug,
+  reconnect, and retry while preserving the existing installed executable.
+- Multiple attached Picos, unrelated serial devices, alternate USB ports/hubs,
+  and other intended macOS versions. Zero/multiple-match refusal has local
+  selector coverage; physical multi-device coverage remains outstanding.
+- Native Intel macOS delivery requires a matching artifact and implementation;
+  the current installer intentionally rejects unsupported architectures.
+
+The first stage has no host watchdog until the complete installer arrives.
+Device timeouts and USB ZLPs do not guarantee serial EOF, so a waiting shell may
+need Terminal Control-C. Keep this limitation visible when evaluating recovery.
+
+
+## Read-only BLE spike
+
+2026-10-10, Apple Silicon macOS and Pimoroni Pico Plus 2 W/RP2350B:
+
+- User explicitly authorized flashing/testing after `picotool info` recognized
+  the RP2350 ROM device. Built `ble usb_autostart`; `picotool load -u -v -x -t elf
+  /tmp/pico-ble-smoke.elf` completed verification and reboot. Persistent flash
+  configuration slots were outside all load segments.
+- USB CDC logger enumerated and reported BLE advertising and `PicoEndpoint` AP
+  startup. The native window was launched; the user confirmed connection.
+- Initial headless discovery timed out before the GUI/OS permission path was
+  exercised. Subsequent headless discovery worked. Initial reconnect exposed
+  CoreBluetooth invalidating old peripheral handles; connection now rediscovers
+  on every attempt instead of reusing a disconnected handle.
+- `cargo run -p pico-companion -- --ble --self-test` passed against the board:
+  discovery, validated information, three periodic status reads with advancing
+  uptime, clean disconnect and reconnect. Read status showed USB enabled/ready
+  and host agent absent. Latest application-level request RTT was 96 ms.
+- `target/release/pico-companion --ble --self-test` passed again with 97 ms latest
+  status-read RTT. These include the backend's 50 ms polling and are individual
+  readings, not a percentile/performance benchmark or actual radio-only latency.
+- `target/release/pico-companion --mock --self-test` passed. The native BLE window
+  was reopened for continued iteration. All BLE application traffic was reads;
+  no keyboard/host command was sent.
+- A direct HTTP probe from the Mac timed out because it was not connected to the
+  Pico AP. User deferred second-device HTTP/WebSocket coexistence checks and
+  stated these should not gate further BLE work; WLAN remains enabled for now.
+  AP startup alone does not establish HTTP/WebSocket or transfer performance.
+
+Automated/build validation for this milestone:
+
+```sh
+cargo fmt --all -- --check
+cargo test -p ble-protocol -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo build -p pico-companion --release
+cargo test -p pico_rust --lib --no-default-features
+cargo clippy -p pico_rust --lib --tests --no-default-features -- -D warnings
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf --features ble
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf --features 'ble usb_autostart'
+```
+
+All passed: 20 native/protocol tests and 30 firmware host tests. The normal
+stripped companion release was 7,825,264 bytes (7.46 MiB). Firmware links kept
+flash/SRAM within their existing regions. The existing Python Worker compressed
+size warning remains; TrouBLE's proc-macro dependency also reports a Rust future
+compatibility warning. No existing locked dependency version was removed or
+upgraded; 18 new lock entries include the local codec and BLE platform graph.
+
+Still unverified: Windows/Linux, forced MTU-23 hardware negotiation, Bluetooth
+off/on and denied-permission recovery, long reconnect/soak and RTT percentile
+measurements. Authenticated pairing, control ownership, real HID, abort/upload
+and Y Stop scenarios belong to subsequent command/pairing milestones. Read-only
+BLE success does not validate those security or execution paths.
