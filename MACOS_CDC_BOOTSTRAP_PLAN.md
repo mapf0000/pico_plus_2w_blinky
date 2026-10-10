@@ -1,6 +1,6 @@
 # macOS host-agent installation over USB CDC
 
-Research date: 2026-10-10. Status: production implementation added and flashed; final board acceptance in progress. Historical isolated-probe experiments are retained below.
+Research date: 2026-10-10. Status: production implementation added and flashed; working on the tested Apple Silicon Mac with German input. Broader recovery/platform acceptance remains. Historical isolated-probe experiments are retained below.
 
 ## Production implementation status
 
@@ -95,9 +95,52 @@ apps/host-agent/artifacts/aarch64-apple-darwin/host-agent --device-self-test --p
 ```
 
 The test exited normally and left no agent running. The new footer transition
-is covered by the display-model tests; physical observation is pending. The
+is covered by the display-model tests. After this firmware update, the operator
+reported that everything seems to work; the precise footer timing was not
+separately recorded. The
 operator clarified that the command fragments in their message were an
 accidental paste while switching windows, rather than a new HID typing failure.
+
+### Recommended next work
+
+1. Verify physical interruption recovery: unplug during a CDC download, reconnect,
+   and complete a fresh install. Confirm no partial executable replaces the
+   installed agent and that normal control traffic resumes. Record the exact
+   cancellation method when repeating Y Stop or Terminal Control-C checks.
+2. Test the automatic US preset with the matching input source, then another
+   intended macOS version and a USB hub. Test ambiguous selection with two Picos
+   if that setup is available. Keep those results separate from this Mac's DE
+   acceptance.
+3. Review the source diff and prepare a commit after explicit authorization.
+   Retain the working 96-character receiver for this version; Terminal prompt
+   and job-message cleanup is optional polish.
+4. USB mass-storage removal is now implemented as described below. Reclaiming
+   or replacing its internal 4 MiB flash reservation remains a later
+   packaging/layout change with its own build and hardware checks.
+
+### Removal of USB mass storage
+
+At the operator's request, the composite builder now exposes only logger CDC,
+control CDC, and HID. The MSC class and its bulk-only/SCSI implementation were
+removed. `firmware/src/usb/agent_image.rs` retains the internal FAT image as the
+CDC artifact source, using the existing `.msc_image` section at `0x10BFE000`.
+No artifact offsets, image capacity, or persistent configuration addresses change.
+The CDC classes are still allocated first, in the same order.
+
+The generated payload catalog now contains four entries: keyboard test, manual
+CDC arm, CDC DE install, and CDC US install. The four obsolete volume-copy
+launch/debug presets were removed. CDC installers retain the same 96-character
+receiver and encoded keyboard sequence. `scripts/device-test` no longer expects
+a mounted volume; its `--msc-label` and `--skip-msc` options were removed.
+`PICO_MSC_LABEL` remains a legacy build input for the private FAT container only.
+
+Software validation passed: build-support/executor tests (10 + 9), firmware
+library tests (30), build-support and firmware library/embedded Clippy,
+provisioned embedded release build, shell syntax/help, formatting, and diff
+checks. Static SRAM is 251,036 bytes, 224 fewer than the preceding build. The
+image remains exactly 4 MiB and no ELF section overlaps persistent configuration.
+This build is ready; verified flashing, no-MSC enumeration, and CDC delivery on
+this composite are pending physical BOOTSEL and exclusive control-port access.
 
 ### German HID correction
 

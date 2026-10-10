@@ -19,8 +19,6 @@
 #   --host-interval-ms N       Host-agent keepalive interval (default 10000).
 #   --host-timeout-ms N        Host-agent response timeout (default 2500).
 #   --skip-host-agent          Skip the production host-agent transport phase.
-#   --msc-label LABEL          Expected mounted volume label (default PICO_AGENT).
-#   --skip-msc                 Skip host read-only mass-storage metadata checks.
 #   --list                     List matching CDC metadata without protocol tests.
 #   -h, --help                 Show this help.
 #
@@ -36,10 +34,8 @@ DEFAULT_ELF="$ROOT_DIR/target/$TARGET/release/pico_rust"
 
 FLASH=0
 ELF=""
-SKIP_MSC=0
 SKIP_HOST_AGENT=0
 LIST_ONLY=0
-MSC_LABEL="PICO_AGENT"
 VID="0x1209"
 PID="0x0001"
 PORT=""
@@ -112,15 +108,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-host-agent)
       SKIP_HOST_AGENT=1
-      shift
-      ;;
-    --msc-label)
-      [[ $# -ge 2 ]] || { echo "--msc-label requires a value" >&2; exit 2; }
-      MSC_LABEL="$2"
-      shift 2
-      ;;
-    --skip-msc)
-      SKIP_MSC=1
       shift
       ;;
     --list)
@@ -201,82 +188,6 @@ else
   set -e
 fi
 
-if [[ $SKIP_MSC -eq 1 ]]; then
-  echo "[SKIP] Mass-storage metadata check disabled by --skip-msc"
-  if [[ $SUITE_STATUS -ne 0 || $HOST_STATUS -ne 0 ]]; then
-    exit 1
-  fi
-  exit 0
-fi
-
-MSC_STATUS=0
-case "$(uname -s)" in
-  Darwin)
-    VOLUME="/Volumes/$MSC_LABEL"
-    deadline=$((SECONDS + 15))
-    while [[ ! -d "$VOLUME" && $SECONDS -lt $deadline ]]; do
-      sleep 0.2
-    done
-
-    if [[ ! -d "$VOLUME" ]]; then
-      echo "[FAIL] Mass-storage volume did not mount at $VOLUME" >&2
-      MSC_STATUS=1
-    else
-      INFO="$(diskutil info "$VOLUME" 2>/dev/null || true)"
-      if printf '%s\n' "$INFO" | grep -Eq 'Media Read-Only:[[:space:]]+Yes' \
-        && printf '%s\n' "$INFO" | grep -Eq 'Volume Read-Only:[[:space:]]+Yes'; then
-        echo "[PASS] Mass-storage media and mounted volume are read-only"
-      else
-        echo "[FAIL] macOS did not report both media and volume read-only" >&2
-        MSC_STATUS=1
-      fi
-      if printf '%s\n' "$INFO" | grep -Eq 'Protocol:[[:space:]]+USB' \
-        && printf '%s\n' "$INFO" | grep -Eq 'File System Personality:[[:space:]]+MS-DOS FAT16' \
-        && printf '%s\n' "$INFO" | grep -Eq 'Disk Size:.*\(4194304 Bytes\)'; then
-        echo "[PASS] Mass-storage is an exact 4 MiB USB FAT16 device"
-      else
-        echo "[FAIL] Unexpected mass-storage protocol, filesystem, or size" >&2
-        MSC_STATUS=1
-      fi
-
-      for path in README.TXT MAC WIN LINUX; do
-        if [[ -e "$VOLUME/$path" ]]; then
-          echo "[PASS] Mass-storage entry present: /$path"
-        else
-          echo "[FAIL] Missing mass-storage entry: /$path" >&2
-          MSC_STATUS=1
-        fi
-      done
-      if [[ -f "$VOLUME/MAC/HOSTAGNT" ]]; then
-        echo "[PASS] Required macOS host-agent artifact is present"
-      else
-        echo "[FAIL] Required /MAC/HOSTAGNT artifact is missing" >&2
-        MSC_STATUS=1
-      fi
-    fi
-    ;;
-  Linux)
-    VOLUME=""
-    for candidate in "/run/media/${USER:-}/$MSC_LABEL" "/media/${USER:-}/$MSC_LABEL" "/media/$MSC_LABEL"; do
-      if [[ -d "$candidate" ]]; then
-        VOLUME="$candidate"
-        break
-      fi
-    done
-    if [[ -z "$VOLUME" ]]; then
-      echo "[SKIP] Could not locate the auto-mounted $MSC_LABEL volume on Linux"
-    elif command -v findmnt >/dev/null 2>&1 && findmnt -no OPTIONS "$VOLUME" | tr ',' '\n' | grep -qx ro; then
-      echo "[PASS] Mass-storage mount is read-only"
-    else
-      echo "[FAIL] Mass-storage mount is not reported read-only" >&2
-      MSC_STATUS=1
-    fi
-    ;;
-  *)
-    echo "[SKIP] Automated mass-storage metadata checks are not implemented on this host OS"
-    ;;
-esac
-
-if [[ $SUITE_STATUS -ne 0 || $HOST_STATUS -ne 0 || $MSC_STATUS -ne 0 ]]; then
+if [[ $SUITE_STATUS -ne 0 || $HOST_STATUS -ne 0 ]]; then
   exit 1
 fi

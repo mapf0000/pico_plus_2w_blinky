@@ -261,7 +261,7 @@ pub async fn run<'d, D: Driver<'d>>(
     armed_at: u64,
 ) -> Result<(), ()> {
     let artifact = ARTIFACT.as_ref().ok_or(())?;
-    let image = super::msc::image();
+    let image = super::agent_image::image();
     if !artifact.valid(image) || class.max_packet_size() != 64 {
         return Err(());
     }

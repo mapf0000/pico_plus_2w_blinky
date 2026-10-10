@@ -2,12 +2,6 @@
 use super::*;
 use keyboard_core::{KeyTap, LayoutId, OpOwned, ProgramOwned, bytecode};
 
-pub(super) struct AgentImage<'a> {
-    pub volume: &'a str,
-    pub directory: &'a str,
-    pub binary: &'a str,
-    pub present: bool,
-}
 struct Preset {
     name: &'static str,
     layout: LayoutId,
@@ -27,22 +21,7 @@ fn text(value: impl Into<String>) -> OpOwned {
         delay_ms: 1,
     }
 }
-fn launcher(image: &AgentImage<'_>, debug: bool, layout: LayoutId) -> Result<Preset> {
-    // FAT label/path normalization permits no quotes. Quote the entire source path
-    // so volume labels containing spaces keep working.
-    let source = format!(
-        "/Volumes/{}/{}/{}",
-        image.volume, image.directory, image.binary
-    );
-    let command = if debug {
-        format!(
-            "mkdir -p ~/pico-agent && cp '{source}' ~/pico-agent/HOSTAGNT && chmod +x ~/pico-agent/HOSTAGNT && ~/pico-agent/HOSTAGNT"
-        )
-    } else {
-        format!(
-            "mkdir -p ~/pico-agent && cp '{source}' ~/pico-agent/HOSTAGNT && chmod +x ~/pico-agent/HOSTAGNT && {{ nohup ~/pico-agent/HOSTAGNT >/dev/null 2>&1 </dev/null & disown; }}"
-        )
-    };
+fn cdc_installer(available: bool, layout: LayoutId) -> Result<Preset> {
     let program = ProgramOwned {
         ops: vec![
             OpOwned::Layout(layout),
@@ -54,31 +33,24 @@ fn launcher(image: &AgentImage<'_>, debug: bool, layout: LayoutId) -> Result<Pre
             OpOwned::DelayMs(1500),
             chord("LGUI+N")?,
             OpOwned::DelayMs(1200),
-            text(command),
+            text(super::bootstrap::COMMAND),
             chord("ENTER")?,
         ],
     };
     Ok(Preset {
-        action: "Keyboard",
-        name: match (layout, debug) {
-            (LayoutId::Us, false) => "macOS: Launch agent (US)",
-            (LayoutId::Us, true) => "macOS: Debug agent (US)",
-            (_, false) => "macOS: Launch agent (DE)",
-            (_, true) => "macOS: Debug agent (DE)",
+        action: "CdcInstall",
+        name: match layout {
+            LayoutId::Us => "macOS: Install via CDC (US)",
+            _ => "macOS: Install via CDC (DE)",
         },
         layout,
         launches_agent: true,
-        available: image.present,
+        available,
         program,
     })
 }
-fn catalog(image: &AgentImage<'_>) -> Result<Vec<Preset>> {
+fn catalog(agent_present: bool) -> Result<Vec<Preset>> {
     let mut presets = Vec::new();
-    for layout in [LayoutId::MacDeDe, LayoutId::Us] {
-        for debug in [false, true] {
-            presets.push(launcher(image, debug, layout)?);
-        }
-    }
     presets.push(Preset {
         action: "Keyboard",
         name: "Keyboard test",
@@ -89,7 +61,7 @@ fn catalog(image: &AgentImage<'_>) -> Result<Vec<Preset>> {
             ops: vec![OpOwned::Layout(LayoutId::Us), text("Hello from Pico!")],
         },
     });
-    let enabled = image.present && std::env::var(super::env_consts::USB_SERIAL).is_ok();
+    let enabled = agent_present && std::env::var(super::env_consts::USB_SERIAL).is_ok();
     presets.push(Preset {
         name: "macOS: Arm manual CDC install",
         layout: LayoutId::Us,
@@ -101,17 +73,7 @@ fn catalog(image: &AgentImage<'_>) -> Result<Vec<Preset>> {
         },
     });
     for layout in [LayoutId::MacDeDe, LayoutId::Us] {
-        let mut preset = launcher(image, false, layout)?;
-        preset.name = if layout == LayoutId::Us {
-            "macOS: Install via CDC (US)"
-        } else {
-            "macOS: Install via CDC (DE)"
-        };
-        preset.action = "CdcInstall";
-        preset.available = enabled;
-        // Reuse the tested Terminal launcher with the short first-stage command.
-        preset.program.ops[9] = text(super::bootstrap::COMMAND);
-        presets.push(preset);
+        presets.push(cdc_installer(enabled, layout)?);
     }
     Ok(presets)
 }
@@ -144,12 +106,12 @@ fn validate_catalog(presets: &[Preset]) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn prepare(cfg: &Config, image: AgentImage<'_>) -> Result<()> {
+pub(super) fn prepare(cfg: &Config, agent_present: bool) -> Result<()> {
     use std::fmt::Write;
     let mut generated = String::from(
         "// Generated from typed Rust presets; do not edit.\nstatic PRESETS: &[Preset] = &[\n",
     );
-    let presets = catalog(&image)?;
+    let presets = catalog(agent_present)?;
     validate_catalog(&presets)?;
     for preset in presets {
         let bytes = compile(&preset)?;
@@ -173,34 +135,30 @@ mod tests {
     use super::*;
     #[test]
     fn every_preset_fits_and_round_trips_through_the_strict_keyboard_decoder() {
-        let image = AgentImage {
-            volume: "CUSTOM DISK",
-            directory: "MAC",
-            binary: "HOSTAGNT",
-            present: true,
-        };
-        for preset in catalog(&image).unwrap() {
+        for preset in catalog(true).unwrap() {
             let bytes = compile(&preset).unwrap();
             let decoded = bytecode::decode_to_flat(&bytes).unwrap();
             assert_eq!(bytecode::encode(&decoded).unwrap(), bytes);
         }
     }
     #[test]
-    fn launchers_follow_image_metadata_and_missing_binaries_disable_only_launchers() {
-        let image = AgentImage {
-            volume: "MY DISK",
-            directory: "OTHER",
-            binary: "AGENT",
-            present: false,
-        };
-        for preset in catalog(&image).unwrap() {
-            if preset.launches_agent && preset.action == "Keyboard" {
-                assert!(!preset.available);
-                assert!(preset.program.ops.iter().any(|op| matches!(op, OpOwned::Text { s, .. } if s.contains("'/Volumes/MY DISK/OTHER/AGENT'"))));
-            } else if !preset.launches_agent {
-                assert!(preset.available);
-            } else {
-                assert!(!preset.available);
+    fn catalog_uses_only_cdc_for_installation_and_disables_missing_agents() {
+        let presets = catalog(false).unwrap();
+        assert_eq!(presets.len(), 4);
+        for preset in presets {
+            assert_eq!(preset.available, !preset.launches_agent);
+            assert!(!preset.launches_agent || preset.action != "Keyboard");
+            assert!(
+                !preset
+                    .program
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, OpOwned::Text { s, .. } if s.contains("/Volumes/")))
+            );
+            if preset.action == "CdcInstall" {
+                assert!(preset.program.ops.iter().any(
+                    |op| matches!(op, OpOwned::Text { s, .. } if s == super::super::bootstrap::COMMAND)
+                ));
             }
         }
     }
@@ -208,19 +166,13 @@ mod tests {
     #[test]
     fn catalog_bounds_reject_empty_oversized_and_unrenderable_metadata() {
         assert!(validate_catalog(&[]).is_err());
-        let image = AgentImage {
-            volume: "PICO_AGENT",
-            directory: "MAC",
-            binary: "HOSTAGNT",
-            present: true,
-        };
-        let mut presets = catalog(&image).unwrap();
+        let mut presets = catalog(true).unwrap();
         assert!(validate_catalog(&presets).is_ok());
         presets[0].name = "invalid\nname";
         assert!(validate_catalog(&presets).is_err());
         presets[0].name = "valid name";
         while presets.len() <= 64 {
-            presets.extend(catalog(&image).unwrap());
+            presets.extend(catalog(true).unwrap());
         }
         assert!(validate_catalog(&presets).is_err());
     }

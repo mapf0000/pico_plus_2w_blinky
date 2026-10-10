@@ -18,7 +18,7 @@ The main data paths are:
 Browser (Yew) <-- WebSocket :81/ws --> Firmware <-- USB CDC TLV --> Host agent
                                       |
                                       +-- USB HID keyboard
-                                      +-- USB mass-storage host-agent image
+                                      +-- internal flash host-agent image (CDC source)
 ```
 
 For keyboard automation, a real RustPython generator runs in a dedicated browser Worker. Yielded keyboard effects are lowered to bounded KBD1, transported with correlated IDs, strictly validated, and executed as USB HID reports. Hardware Payloads are typed Rust presets compiled at build time through the same keyboard core. Both producers share one non-preempting execution service with job-scoped cancellation and device-wide Y Stop.
@@ -46,7 +46,7 @@ Detailed references:
 
 - `src/main.rs`: board initialization, Wi-Fi AP, network stack, task startup, and pin assignments.
 - `src/http/`: HTTP/WebSocket server, RPC routes, and embedded frontend serving.
-- `src/usb/`: USB HID, CDC control/relay protocol, MSC image, and USB supervision.
+- `src/usb/`: USB HID, CDC control/relay protocol, internal agent image, and USB supervision.
 - `src/display/`: on-device pages, including standalone Payloads, input, rendering, and status views.
 - `src/display_core/`: hardware-independent button routing, page models, bounded row scenes, and incremental rendering. `src/display/` owns GPIO/SPI/ADC and service adapters.
 - `src/device_config.rs`: persistent flash-backed configuration. Its constants must agree with `memory.x`.
@@ -88,7 +88,7 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 - `firmware-exec`: strict, two-pass `no_std` KBD1 validator/executor.
 - `script-protocol`: versioned correlated browser-to-firmware effect envelopes.
 - `bytecode-constants`: cross-target bytecode limits.
-- `build-support`: firmware build-time frontend/Worker compilation, compressed asset embedding, typed keyboard-preset generation, linker setup, and MSC image generation.
+- `build-support`: firmware build-time frontend/Worker compilation, compressed asset embedding, typed keyboard-preset generation, linker setup, and internal FAT agent-image generation.
 
 ### Scripts and configuration
 

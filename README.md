@@ -58,7 +58,7 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
 - Custom runner: `scripts/pico-run`
 
 ## Build: One‑shot
-- Flash + run with logs, while also packaging the local host-agent into the USB drive image:
+- Flash + run with logs, while also packaging the local host-agent into the internal CDC artifact image:
   - From repo root: `scripts/fw-deploy-with-agent`
 - Flash + run with logs:
   - From repo root: `cargo run -p pico_rust --release --target thumbv8m.main-none-eabihf`
@@ -85,17 +85,13 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
 ## Hardware keyboard payloads
 
 The display's **Payloads** page works without a browser or a running host agent.
-Use A/B to select, X to run, and A+X to enter or leave the sidebar. macOS agent
-launch and debug presets are provided for German and US input layouts; select the
-layout matching the host's active input source. The launchers open Terminal, copy
-the packaged agent from the USB drive to `~/pico-agent/HOSTAGNT`, and start it.
-The display distinguishes completed keyboard input from a detected agent handshake
-and reports a timeout after 15 seconds without an agent. Missing packaged binaries
-disable the launchers. The keyboard test types `Hello from Pico!` into the focused
-application; focus a text editor before using it.
+Use A/B to select, X to run, and A+X to enter or leave the sidebar. The keyboard
+test types `Hello from Pico!` into the focused application; focus a text editor
+before using it.
 
-USB CDC installation is also available on native Apple Silicon macOS, without
-mounting the USB drive or downloading anything. Package the agent and provision
+USB CDC installation is available on native Apple Silicon macOS. The device
+exposes logger CDC, control CDC, and a HID keyboard; it no longer exposes a USB
+mass-storage drive. Package the agent and provision
 a unique, short USB serial identity when building firmware:
 
 ```sh
@@ -160,7 +156,7 @@ its LED-color behavior outside Payloads.
 The Transfer page refreshes connection and transfer status automatically. Progress
 is coalesced to 10 Hz; connection changes and terminal states update immediately.
 
-## Host agent USB mass storage image
+## Host agent packaging
 - One-command local flow:
   - `scripts/fw-deploy-with-agent`
 - Build the macOS host agent:
@@ -171,13 +167,10 @@ is coalesced to 10 Hz; connection changes and terminal states update immediately
   - Windows (optional): `apps/host-agent/artifacts/x86_64-pc-windows-msvc/host-agent.exe`
   - Linux (optional): `apps/host-agent/artifacts/x86_64-unknown-linux-gnu/host-agent`
 - Firmware builds embed a read-only 4 MiB FAT16 image at `OUT_DIR/host-agent.img`. Packaged binaries share this capacity; the build fails if their combined size plus FAT metadata exceeds it.
-- The device exposes a USB drive (label `PICO_AGENT` by default) with:
-  - `/MAC/HOSTAGNT`
-  - `/WIN/HOSTAGNT.EXE` (if provided)
-  - `/LINUX/HOSTAGNT` (if provided)
-- Set `PICO_MSC_LABEL` to override the volume label (11 ASCII chars max).
+- The FAT image is an internal artifact container for CDC downloads; it is not exposed to the host as a USB drive. Its existing flash reservation and `.msc_image` section remain unchanged.
+- `PICO_MSC_LABEL` only changes the internal FAT label; it does not enable a USB drive.
 - Safe device checks without Wi-Fi or HID/file activity:
-  - `scripts/device-test` runs raw protocol injection, restricted production host-agent transport tests, and read-only MSC checks against installed firmware.
+  - `scripts/device-test` runs raw protocol injection, restricted production host-agent transport tests, against installed firmware.
   - `scripts/device-test --flash` builds, verify-flashes, executes, and tests a BOOTSEL device.
   - See `docs/DEVICE_TESTING.md` for safeguards and exact coverage.
 - Host agent credential prompt (macOS):

@@ -42,12 +42,11 @@ The flash step uses `picotool load -u -v -x -t elf`, the same verified update lo
 Useful focused invocations:
 
 ```sh
-scripts/device-test --list --skip-msc
+scripts/device-test --list
 scripts/device-test --port /dev/cu.usbmodem12302
-scripts/device-test --skip-msc
 scripts/device-test --skip-host-agent
-scripts/device-test --usb-throughput-benchmark --benchmark-mib 4 --skip-host-agent --skip-msc
-scripts/device-test --usb-raw-throughput-benchmark --benchmark-mib 4 --skip-host-agent --skip-msc
+scripts/device-test --usb-throughput-benchmark --benchmark-mib 4 --skip-host-agent
+scripts/device-test --usb-raw-throughput-benchmark --benchmark-mib 4 --skip-host-agent
 scripts/device-test --flash --elf target/thumbv8m.main-none-eabihf/release/pico_rust
 ```
 
@@ -60,7 +59,7 @@ cargo test -p host-agent
 cargo clippy -p host-agent --all-targets -- -D warnings
 ```
 
-Use `--vid`, `--pid`, or `--msc-label` only when the corresponding firmware descriptor/build setting was deliberately changed. `--port` is validated against the selected VID/PID by the raw phase before it is opened by the host agent. The host-agent phase performs two keepalive round-trips at the production 10-second cadence by default; `--host-keepalives`, `--host-interval-ms`, and `--host-timeout-ms` provide bounded diagnostic overrides.
+Use `--vid` or `--pid` only when the corresponding firmware descriptor/build setting was deliberately changed. `--port` is validated against the selected VID/PID by the raw phase before it is opened by the host agent. The host-agent phase performs two keepalive round-trips at the production 10-second cadence by default; `--host-keepalives`, `--host-interval-ms`, and `--host-timeout-ms` provide bounded diagnostic overrides.
 
 ## Automated checks
 
@@ -94,7 +93,10 @@ The wrapper then starts the real host-agent executable in its restricted one-sho
 
 Unit tests additionally inject a device-side shell-command tag and verify that restricted mode rejects it without invoking the general dispatcher.
 
-On macOS the wrapper then checks, without attempting a write, that both the media and mounted `PICO_AGENT` volume are reported read-only, that it is an exact 4 MiB USB FAT16 device, and that `/README.TXT`, `/MAC`, `/WIN`, `/LINUX`, and the required `/MAC/HOSTAGNT` artifact exist. Linux read-only mount metadata is checked when the common auto-mount paths and `findmnt` are available. Unsupported or unlocatable mount layouts are reported as skipped, not silently passed.
+USB mass storage is no longer exposed. The wrapper has no mounted-volume phase
+and no `--msc-label` or `--skip-msc` options. Verify the absence of a mass-storage
+interface during the board smoke test and use the CDC installation workflow to
+check artifact delivery.
 
 Every assertion prints `[PASS]`, `[FAIL]`, or `[SKIP]`, and any failure produces a nonzero process exit status.
 

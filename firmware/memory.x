@@ -6,7 +6,7 @@ MEMORY {
      * `psram` feature is enabled.)
      */
     /*
-     * Reserve 4 MiB for the read-only USB MSC image and 8 KiB at the end of
+     * Reserve 4 MiB for the internal CDC agent image and 8 KiB at the end of
      * flash for persistent config.
      */
     FLASH : ORIGIN = 0x10000000, LENGTH = 12280K
@@ -66,9 +66,9 @@ SECTIONS {
 } INSERT AFTER .text;
 
 SECTIONS {
-    /* ### USB MSC image
+    /* ### Internal CDC agent image (legacy section/region names)
      *
-     * Read-only FAT image exposed over USB mass storage.
+     * Read-only FAT artifact container; no USB mass-storage interface.
      */
     .msc_image : ALIGN(4)
     {

@@ -160,15 +160,7 @@ pub fn prepare(cfg: &Config) -> Result<()> {
         .iter()
         .find(|target| target.volume_dir == "MAC")
         .context("macOS image metadata missing")?;
-    super::presets::prepare(
-        cfg,
-        super::presets::AgentImage {
-            volume: core::str::from_utf8(&label_bytes)?.trim_end(),
-            directory: mac.volume_dir,
-            binary: mac.file_name,
-            present: mac.present,
-        },
-    )?;
+    super::presets::prepare(cfg, mac.present)?;
 
     let image = build_image(&label_bytes, root_files, dir_specs)?;
     super::bootstrap::prepare(cfg, image.mac.as_ref())?;

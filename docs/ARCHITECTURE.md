@@ -7,7 +7,7 @@ This document explains how the firmware, embedded Web UI, RustPython Worker, hos
 The Pico is the center of the system. It is simultaneously:
 
 - A Wi-Fi access point and HTTP/WebSocket server for the browser UI.
-- A composite USB device exposing logging, control, keyboard, and mass-storage interfaces.
+- A composite USB device exposing logging, control, and keyboard interfaces.
 - A relay between browser requests and privileged host-agent operations.
 - A bounded keyboard-bytecode executor and on-device display controller.
 
@@ -18,7 +18,7 @@ flowchart LR
     Agent["Host agent<br/>Tokio daemon"]
     HostOS["Host OS<br/>shell + filesystem + dialogs"]
     KeyboardTarget["USB host<br/>keyboard target"]
-    Flash["QSPI flash<br/>firmware + MSC + config"]
+    Flash["QSPI flash<br/>firmware + agent image + config"]
     Display["Pico Display 2.8<br/>buttons + RGB LED"]
 
     Browser <-->|HTTP assets + WebSocket| Pico
@@ -26,7 +26,6 @@ flowchart LR
     Agent --> HostOS
     Pico -->|USB HID reports| KeyboardTarget
     Pico -->|USB logger CDC| HostOS
-    Pico -->|read-only USB MSC| HostOS
     Pico <--> Flash
     Pico <--> Display
 ```
@@ -118,7 +117,7 @@ flowchart LR
     Support[crates/build-support]
     Trunk["Trunk release build<br/>wasm32-unknown-unknown"]
     Python["RustPython Worker build<br/>wasm-bindgen + gzip"]
-    MSC[Build 4 MiB FAT16 image]
+    MSC[Build internal 4 MiB FAT16 agent image]
     Out[Cargo OUT_DIR]
     Link[Embedded linker]
     ELF[Firmware ELF]
@@ -165,7 +164,7 @@ sequenceDiagram
     Main->>USB: Spawn USB task and mark USB enabled
     par Concurrent USB bring-up
         USB->>USB: Build composite descriptors/classes
-        USB->>USB: Run USB + logger + control + HID + MSC
+        USB->>USB: Run USB + logger + control + HID
     and Main initialization
         Main->>Storage: Initialize default device config
         Main->>Display: Spawn display/buttons/LED task
@@ -400,7 +399,7 @@ The browser never retries a keyboard effect because its outcome may be unknown a
 lowers them with `keyboard-core` during the firmware build. Generated static KBD1
 and bounded metadata are included by the display service adapter. Launcher paths
 and availability come from the same normalized volume label and target metadata
-that build the MSC image. The firmware adds no interpreter, heap allocation, or
+that build the internal agent image. The firmware adds no interpreter, heap allocation, or
 second bytecode format. Python remains a browser-resident process.
 
 Build-time validation requires 1–64 presets with names of 1–96 printable ASCII
@@ -518,14 +517,14 @@ The [threat model](THREAT_MODEL.md) treats the USB-connected PC and host-agent i
 | Python effects/layout | `apps/python-worker`, `crates/keyboard-core` | Frontend supervisor, Worker protocol, firmware executor compatibility |
 | USB composition | `firmware/src/usb/task.rs` | Interface-count env limits, host port selection, hardware smoke tests |
 | Hardware display | `firmware/src/display_core/`, `firmware/src/display/` | Input ownership, model/cache separation, bounded rows, native rendering tests, embedded size and board timing |
-| Memory allocation/layout | `firmware/memory.x`, `device_config.rs`, `psram_pool.rs`, HTTP buffers | Linker build, size report, persistence/MSC boundaries |
+| Memory allocation/layout | `firmware/memory.x`, `device_config.rs`, `psram_pool.rs`, HTTP buffers | Linker build, size report, persistence/agent-image boundaries |
 | Startup ordering | `firmware/src/main.rs` and supervisor tasks | Static resource ownership and hardware recovery |
 ## CDC installation ownership
 
 `crates/build-support/src/msc_image.rs` records the macOS executable's allocated
 flash extent and generates size/SHA-256 metadata. The CDC installer shell source
 and short receiver command are maintained in `crates/build-support`; generated
-files remain under `OUT_DIR`. The executable stays in the existing MSC image.
+files remain under `OUT_DIR`. The executable stays in the internal FAT image; USB mass storage is not exposed.
 
 `firmware/src/bootstrap_core.rs` owns allocation-free request parsing, ordered
 session validation, and logical extent slicing, with host tests. The existing

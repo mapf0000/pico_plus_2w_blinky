@@ -723,7 +723,7 @@ defined in v1: re-arm and restart instead.
 Responses ending on an exact 64-byte boundary get an explicit ZLP. A ZLP is
 not serial EOF. Firmware streams flash-backed extents through packets no larger
 than 64 bytes; neither a 16 KiB block nor the executable is buffered in SRAM.
-Generated extents are relative to the existing 4 MiB MSC image and validated
+Generated extents are relative to the existing internal 4 MiB FAT agent image and validated
 against it. There is no firmware FAT parser and no duplicate executable.
 
 The arm deadline is 30 seconds, request/write inactivity limit is 5 seconds,
