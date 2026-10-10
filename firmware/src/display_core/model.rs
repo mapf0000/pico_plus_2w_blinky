@@ -388,7 +388,6 @@ pub struct Snapshot {
 
 #[derive(Default)]
 pub struct SystemSnapshot {
-    pub pairing_code: Option<u32>,
     pub uptime_secs: u64,
     pub cpu_mhz: u32,
     pub temperature_c: Option<f32>,

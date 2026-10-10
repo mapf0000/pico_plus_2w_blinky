@@ -145,6 +145,34 @@ async fn with_flash<R>(f: impl FnOnce(&mut FlashDrv) -> R) -> Result<R, ()> {
     Ok(f(drv))
 }
 
+/// Read provisioning independently of USB identity. Normal ELF flashing has no
+/// load segment in this reserved region and never updates these records.
+pub async fn control_profile() -> Option<ble_session::provisioning::Profile> {
+    use ble_session::provisioning::{FLASH_OFFSET, Profile, RECORD_SIZE, SLOT_SIZE};
+    let mut chosen: Option<(u32, Profile)> = None;
+    for slot in 0..2 {
+        let mut bytes = [0; RECORD_SIZE];
+        let offset = FLASH_OFFSET + (slot * SLOT_SIZE) as u32;
+        if with_flash(|flash| flash.blocking_read(offset, &mut bytes))
+            .await
+            .ok()?
+            .is_err()
+        {
+            return None;
+        }
+        let decoded = Profile::decode(&bytes);
+        ble_session::erase(&mut bytes);
+        if let Some((sequence, profile)) = decoded
+            && chosen
+                .as_ref()
+                .is_none_or(|(old, _)| seq_is_newer(sequence, *old))
+        {
+            chosen = Some((sequence, profile));
+        }
+    }
+    chosen.map(|(_, profile)| profile)
+}
+
 async fn read_slot(idx: usize) -> Result<Option<(u32 /*seq*/, DeviceConfig)>, ()> {
     if idx >= PERSIST_SLOTS {
         return Err(());

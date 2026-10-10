@@ -15,6 +15,11 @@ tokio = { version = "1.53.2", features = ["rt", "sync", "time", "macros"] }
 btleplug = "0.13.4"
 uuid = "1.23.0"
 ble-protocol = { path = "../../crates/ble-protocol" }
+ble-session = { path = "../../crates/ble-session" }
+getrandom = "0.4.3"
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+zeroize = "1.9.1"
 
 script-protocol = { path = "../../crates/script-protocol" }
 

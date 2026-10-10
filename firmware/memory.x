@@ -7,9 +7,10 @@ MEMORY {
      */
     /*
      * Reserve 4 MiB for the internal CDC agent image and 8 KiB at the end of
-     * flash for persistent config.
+     * flash for persistent USB config, plus 8 KiB before the image for control keys.
      */
-    FLASH : ORIGIN = 0x10000000, LENGTH = 12280K
+    FLASH : ORIGIN = 0x10000000, LENGTH = 12272K
+    CONTROL_KEYS : ORIGIN = 0x10000000 + 12272K, LENGTH = 8K
     MSC : ORIGIN = 0x10000000 + 12280K, LENGTH = 4096K
     PERSIST : ORIGIN = 0x10000000 + 12280K + 4096K, LENGTH = 8K
     /*
@@ -79,6 +80,9 @@ SECTIONS {
 } INSERT AFTER .text;
 
 ASSERT(SIZEOF(.msc_image) == LENGTH(MSC), "MSC image must fill its flash region");
+ASSERT(ORIGIN(CONTROL_KEYS) == 0x10BFC000, "Control key address must match ble-session");
+ASSERT(LENGTH(CONTROL_KEYS) == 8192, "Control key region must contain two 4-KiB slots");
+ASSERT(ORIGIN(CONTROL_KEYS) + LENGTH(CONTROL_KEYS) == ORIGIN(MSC), "Control keys must precede agent image");
 
 SECTIONS {
     /* ### Boot ROM extra info

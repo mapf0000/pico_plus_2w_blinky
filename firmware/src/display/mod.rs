@@ -1,8 +1,7 @@
 //! Hardware ownership and orchestration for the Pico display.
 use crate::{
     display_core::{
-        Controller, DisplayConfig, MAX_LOG_ROWS, PageId, Renderer,
-        input::{Button, InputDebouncer},
+        Controller, DisplayConfig, MAX_LOG_ROWS, PageId, Renderer, input::InputDebouncer,
         model::Text,
     },
     log_buffer,
@@ -184,9 +183,6 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
     loop {
         ticker.next().await;
         dirty |= inputs.poll(&mut controller, &mut diagnostics, display.is_some());
-        let pairing = crate::ble_control::pairing_code();
-        dirty |= metrics.snapshot.pairing_code != pairing;
-        metrics.snapshot.pairing_code = pairing;
         let now_ms = Instant::now().as_millis();
         if let Some(display) = display.as_mut() {
             let page = controller.page();
@@ -235,9 +231,6 @@ async fn display_task(pins: DisplayPins<'static>) -> ! {
                 match result {
                     Ok(_) => {
                         renderer.commit(frame);
-                        if let Some(code) = metrics.snapshot.pairing_code {
-                            crate::ble_control::mark_displayed(code);
-                        }
                     }
                     Err(error) => {
                         renderer.invalidate();
@@ -272,24 +265,6 @@ impl Inputs {
         let events = self
             .debounce
             .sample(core::array::from_fn(|index| self.buttons[index].is_low()));
-        if crate::ble_control::pairing_code().is_some() {
-            controller.navigation = crate::display_core::input::Navigation::new(
-                PageId::ALL
-                    .iter()
-                    .position(|page| *page == PageId::System)
-                    .unwrap_or_default(),
-            );
-            if events[Button::Y].just_pressed {
-                crate::usb::hid::stop_device();
-                crate::ble_control::DECISION.signal(false);
-            } else if display_available
-                && crate::ble_control::pairing_displayed()
-                && events[Button::X].just_pressed
-            {
-                crate::ble_control::DECISION.signal(true);
-            }
-            return true;
-        }
         let snapshot = services::snapshot(sampled_at.as_millis());
         let reserved = snapshot.keyboard.reserved() || crate::usb::bootstrap::active();
         let mut dirty = controller.update(snapshot, services::take_completion());

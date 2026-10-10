@@ -1,13 +1,13 @@
 //! Bounded Bluetooth control protocol; every ATT write fits the default MTU.
 #![no_std]
 
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 pub const SERVICE_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000001;
 pub const INFO_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000002;
 pub const STATUS_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000003;
 pub const INFO_LEN: usize = 20;
 pub const STATUS_LEN: usize = 12;
-const CONTROL: u8 = 2;
+const CONTROL: u8 = 4; // PSK-protected control; incompatible with v2 pairing
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -172,19 +172,94 @@ mod tests {
     }
 }
 
-pub const PAIR_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000004;
+pub const AUTH_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000004;
 pub const COMMAND_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000005;
 pub const RESULT_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000006;
 pub const FRAME_LEN: usize = 20;
 pub const HEADER_LEN: usize = 8;
 pub const PAYLOAD_LEN: usize = FRAME_LEN - HEADER_LEN;
-pub const MAX_MESSAGE_LEN: usize = 4125;
+pub const MAX_MESSAGE_LEN: usize = 4142; // encrypted kind + script envelope + tag
 pub const KIND_CONTROL: u8 = 1;
 pub const KIND_SCRIPT: u8 = 2;
+pub const KIND_HANDSHAKE: u8 = 3;
+pub const KIND_RECORD: u8 = 4;
 pub const ACQUIRE: u8 = 0;
 pub const RELEASE: u8 = 1;
 pub const USB_ON: u8 = 2;
 pub const USB_OFF: u8 = 3;
+pub const POLL: u8 = 4;
+pub const SNAPSHOT_LEN: usize = FRAME_LEN + STATUS_LEN;
+pub const MAX_RESPONSE_LEN: usize = SNAPSHOT_LEN + 16;
+
+/// ATT characteristic storage is fixed at 20 bytes. Validate zero padding on the
+/// final outgoing fragment before passing its exact bytes to Receiver.
+pub fn read_fragment(bytes: &[u8]) -> Result<&[u8], Error> {
+    if bytes.len() != FRAME_LEN {
+        return Err(Error::Length);
+    }
+    let offset = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+    let total = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
+    let remaining = total.checked_sub(offset).ok_or(Error::Invalid)?;
+    if remaining == 0 {
+        return Err(Error::Invalid);
+    }
+    let length = HEADER_LEN + remaining.min(PAYLOAD_LEN);
+    if bytes[length..].iter().any(|b| *b != 0) {
+        return Err(Error::Invalid);
+    }
+    Ok(&bytes[..length])
+}
+
+/// One finite response, consumed by sequential ATT reads. A new authenticated
+/// poll replaces an interrupted response and starts at offset zero.
+pub struct Response {
+    bytes: [u8; MAX_RESPONSE_LEN],
+    length: usize,
+    offset: usize,
+    kind: u8,
+    token: u16,
+}
+impl Default for Response {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl Response {
+    pub const fn new() -> Self {
+        Self {
+            bytes: [0; MAX_RESPONSE_LEN],
+            length: 0,
+            offset: 0,
+            kind: 0,
+            token: 0,
+        }
+    }
+    pub fn set(&mut self, kind: u8, token: u16, bytes: &[u8]) -> Result<(), Error> {
+        if bytes.is_empty()
+            || bytes.len() > self.bytes.len()
+            || token == 0
+            || !matches!(kind, KIND_HANDSHAKE | KIND_RECORD)
+        {
+            return Err(Error::Invalid);
+        }
+        self.bytes[..bytes.len()].copy_from_slice(bytes);
+        self.length = bytes.len();
+        self.offset = 0;
+        self.kind = kind;
+        self.token = token;
+        Ok(())
+    }
+    pub fn next_fragment(&mut self) -> Result<[u8; FRAME_LEN], Error> {
+        let (frame, length) = fragment(
+            self.kind,
+            self.token,
+            &self.bytes[..self.length],
+            self.offset,
+        )?;
+        self.offset += length - HEADER_LEN;
+        Ok(frame)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -251,7 +326,7 @@ pub fn fragment(
     offset: usize,
 ) -> Result<([u8; FRAME_LEN], usize), Error> {
     if token == 0
-        || !matches!(kind, KIND_CONTROL | KIND_SCRIPT)
+        || !matches!(kind, KIND_HANDSHAKE | KIND_RECORD)
         || message.is_empty()
         || message.len() > MAX_MESSAGE_LEN
         || offset >= message.len()
@@ -316,7 +391,7 @@ impl Receiver {
         let total = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
         let payload = &bytes[HEADER_LEN..];
         if token == 0
-            || !matches!(kind, KIND_CONTROL | KIND_SCRIPT)
+            || !matches!(kind, KIND_HANDSHAKE | KIND_RECORD)
             || total == 0
             || total > MAX_MESSAGE_LEN
             || offset + payload.len() > total
@@ -358,11 +433,54 @@ impl Receiver {
 mod control_tests {
     use super::*;
     #[test]
+    fn response_reads_are_bounded_padded_and_replaceable() {
+        let mut response = Response::new();
+        assert!(response.next_fragment().is_err());
+        for size in [1, 12, 13, MAX_RESPONSE_LEN] {
+            let input = [42; MAX_RESPONSE_LEN];
+            response.set(KIND_RECORD, 7, &input[..size]).unwrap();
+            let mut receiver = Receiver::new();
+            for _ in 0..size.div_ceil(PAYLOAD_LEN) {
+                let frame = response.next_fragment().unwrap();
+                let exact = read_fragment(&frame).unwrap();
+                if let Some(message) = receiver.push(exact).unwrap() {
+                    assert_eq!(message.token, 7);
+                    assert_eq!(message.kind, KIND_RECORD);
+                    assert_eq!(message.payload, &input[..size]);
+                }
+            }
+            assert!(response.next_fragment().is_err());
+        }
+        response.set(KIND_RECORD, 8, &[7; 48]).unwrap();
+        response.next_fragment().unwrap();
+        response.set(KIND_RECORD, 9, &[8; 17]).unwrap();
+        let frame = response.next_fragment().unwrap();
+        assert_eq!(&frame[4..6], &[0, 0]);
+        let mut final_frame = response.next_fragment().unwrap();
+        final_frame[19] = 1;
+        assert!(read_fragment(&final_frame).is_err());
+        assert!(read_fragment(&final_frame[..19]).is_err());
+        assert!(
+            response
+                .set(KIND_RECORD, 1, &[0; MAX_RESPONSE_LEN + 1])
+                .is_err()
+        );
+        assert!(response.set(KIND_CONTROL, 1, &[0]).is_err());
+        let (mut legacy, length) = fragment(KIND_RECORD, 10, &[0], 0).unwrap();
+        legacy[0] = 2;
+        assert_eq!(
+            Receiver::new().push(&legacy[..length]).err(),
+            Some(Error::Version)
+        );
+        assert!(fragment(KIND_CONTROL, 1, &[ACQUIRE], 0).is_err());
+        assert!(fragment(KIND_SCRIPT, 1, &[1], 0).is_err());
+    }
+    #[test]
     fn maximum_upload_and_default_mtu() {
         let input = [0x5a; MAX_MESSAGE_LEN];
         let mut rx = Receiver::new();
         for offset in (0..input.len()).step_by(PAYLOAD_LEN) {
-            let (frame, len) = fragment(KIND_SCRIPT, 1, &input, offset).unwrap();
+            let (frame, len) = fragment(KIND_RECORD, 1, &input, offset).unwrap();
             assert!(len <= 20);
             let done = rx.push(&frame[..len]).unwrap();
             if offset + PAYLOAD_LEN >= input.len() {
@@ -376,15 +494,15 @@ mod control_tests {
     fn reject_gaps_replays_and_resume_after_abandon() {
         let mut rx = Receiver::new();
         let input = [1; 30];
-        let (first, len) = fragment(KIND_SCRIPT, 1, &input, 0).unwrap();
+        let (first, len) = fragment(KIND_RECORD, 1, &input, 0).unwrap();
         assert!(rx.push(&first[..len]).unwrap().is_none());
         assert!(rx.push(&first[..len]).is_err());
-        let (gap, len) = fragment(KIND_SCRIPT, 1, &input, 24).unwrap();
+        let (gap, len) = fragment(KIND_RECORD, 1, &input, 24).unwrap();
         assert!(rx.push(&gap[..len]).is_err());
         rx.abandon();
-        let (resume, len) = fragment(KIND_SCRIPT, 1, &input, 12).unwrap();
+        let (resume, len) = fragment(KIND_RECORD, 1, &input, 12).unwrap();
         assert!(rx.push(&resume[..len]).is_err());
-        let (cancel, len) = fragment(KIND_CONTROL, 2, &[RELEASE], 0).unwrap();
+        let (cancel, len) = fragment(KIND_RECORD, 2, &[RELEASE], 0).unwrap();
         assert_eq!(
             rx.push(&cancel[..len]).unwrap().unwrap().payload,
             &[RELEASE]
@@ -393,7 +511,7 @@ mod control_tests {
     }
     #[test]
     fn invalid_headers_and_results() {
-        let (frame, len) = fragment(KIND_CONTROL, 1, &[ACQUIRE], 0).unwrap();
+        let (frame, len) = fragment(KIND_RECORD, 1, &[ACQUIRE], 0).unwrap();
         for i in [0, 1, 4, 5, 7] {
             let mut bad = frame;
             bad[i] = 255;

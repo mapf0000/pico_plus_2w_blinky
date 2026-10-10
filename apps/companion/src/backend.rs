@@ -63,7 +63,16 @@ pub struct Backend {
 }
 
 impl Backend {
+    #[cfg(test)]
     pub fn start(mode: Mode, repaint: egui::Context) -> io::Result<Self> {
+        Self::start_with_profile(mode, None, repaint)
+    }
+
+    pub fn start_with_profile(
+        mode: Mode,
+        profile: Option<ble_session::provisioning::Profile>,
+        repaint: egui::Context,
+    ) -> io::Result<Self> {
         let (commands, mut command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (urgent, mut urgent_rx) = mpsc::channel(URGENT_CAPACITY);
         let (snapshots_tx, snapshots) = watch::channel(Snapshot::default());
@@ -78,7 +87,7 @@ impl Backend {
                     let start = Instant::now();
                     let connector = match mode {
                         Mode::Mock(scenario) => Connector::Mock(MockTransport::new(scenario)),
-                        Mode::Ble => Connector::Ble(crate::ble::BleTransport::new()),
+                        Mode::Ble => Connector::Ble(crate::ble::BleTransport::new(profile)),
                     };
                     let mut client = Client::new(connector);
                     let mut ticker = tokio::time::interval(Duration::from_millis(50));

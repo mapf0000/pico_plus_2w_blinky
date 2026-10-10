@@ -68,14 +68,14 @@ The linker divides the range `0x10000000..0x11000000` as follows:
 
 | Region | Start | End exclusive | Size | Purpose |
 | --- | ---: | ---: | ---: | --- |
-| `FLASH` | `0x10000000` | `0x10BFE000` | 12280 KiB | Boot metadata, executable firmware, generated payloads, read-only data |
+| `FLASH` | `0x10000000` | `0x10BFC000` | 12272 KiB | Boot metadata, executable firmware, generated payloads, read-only data |
+| `CONTROL_KEYS` | `0x10BFC000` | `0x10BFE000` | 8 KiB | Two factory-provisioned control-key slots |
 | `MSC` | `0x10BFE000` | `0x10FFE000` | 4096 KiB | Internal 4 MiB FAT agent image in legacy `.msc_image` |
 | `PERSIST` | `0x10FFE000` | `0x11000000` | 8 KiB | Two alternating 4 KiB device-configuration slots |
 
 ```text
 0x10000000                                                        0x11000000
-    |---------------- 12280 KiB FLASH ----------------|-- 4 MiB MSC --|-- 8 KiB --|
-                                                                        PERSIST
+    |---- 12272 KiB FLASH ----|-- 8 KiB keys --|-- 4 MiB MSC --|-- 8 KiB PERSIST --|
 ```
 
 `firmware/src/device_config.rs` must agree with this map:
@@ -117,7 +117,7 @@ byte. No persistent configuration erase was performed.
 Total on-chip SRAM represented by the linker map is 520 KiB. Most normal data, stacks, static buffers, and Embassy state use `RAM`; the direct banks are available for explicitly placed sections but are not broadly allocated by current code.
 
 Large fixed allocations include the CYW43 state, BLE pool/security state, one
-4,125-byte receiver, one 4,096-byte HID command, USB descriptors/logger/control
+4,142-byte ciphertext receiver plus 4,126-byte plaintext scratch, one 4,096-byte HID command, USB descriptors/logger/control
 buffers, 2,048-byte TLV decoder and bounded display frames/SPI tile staging.
 Static SRAM excludes runtime stacks. No HTTP worker or socket pool remains.
 Current linked measurements are in DEVICE_TESTING.md; keep both task-frame
@@ -225,16 +225,22 @@ No AP, DHCP, HTTP/WebSocket or network task runs. The CYW43 combined base image,
 NVRAM and Bluetooth patch are still loaded using the unchanged board pins/RM2
 divider. One peripheral connection advertises the project service as Pico BLE.
 TrouBLE 0.6 / CYW43 0.7 share bt-hci 0.8. The packet pool has eight 128-byte
-packets and three L2CAP channels (signalling, ATT, SMP).
+packets and three reserved L2CAP channels; signalling/ATT are used, SMP is disabled.
 
-Pairing requires numeric comparison and Pico X confirmation after rendering the
-code. Y rejects; timeout is 30 seconds. No persistent bonds are stored. Reconnect
-pairs again; forget stale OS bonds if necessary. A failed display cannot approve
-pairing. Read-only diagnostics remain available without pairing.
+BLE v3 uses provisioned-secret Noise authentication and encrypted records, without
+Pico confirmation, display access or OS pairing. The PC supplies a private profile;
+a missing/corrupt Pico key refuses control. Unauthenticated connections expire 30
+seconds after accept. See [trusted provisioning](../apps/companion/README.md#trusted-provisioning)
+for profile generation, BOOTSEL key-region installation and private backups.
+Ordinary firmware ELF flashing preserves the key region; whole-chip erase does
+not. Keep provisioning on a trusted PC, never the hostile USB target. Runtime
+rotation is not implemented. ROSC supplies fresh firmware ephemeral randomness
+and must remain running; firmware does not introduce a heap allocator.
 
 Use stable Rust, `thumbv8m.main-none-eabihf` and `picotool` for flashing. Firmware
 builds generate the CDC image/presets only; no Trunk, WASM target, wasm-bindgen or
-Python toolchain is required. Memory map and persistent USB identity are unchanged.
+Python toolchain is required. The agent-image and USB-identity addresses remain unchanged; the application
+region gives 8 KiB to the new separate key reservation.
 
 ## Flashing paths
 
@@ -288,7 +294,7 @@ Normal ELF flashing writes the sections present in the ELF. The persistent-confi
 | Flash succeeds but no CDC appears | Wait through re-enumeration; inspect both CDC devices; use `--no-wait` to separate flash from serial diagnosis; verify the USB task starts in early logs/RTT. |
 | Host agent selects the logger port | Pass `--port`, or let active probing evaluate all USB CDC candidates; remove stale cached selection by reconnecting/restarting after the failed dispatch. |
 | Pico is not discovered | Enable Bluetooth, grant OS permission and scan again; inspect BLE advertising logs. |
-| Pairing fails | Compare the code and confirm with Pico X within 30 seconds; forget stale OS bonds and retry. |
+| Authentication fails | Use a matching private profile and BLE v3 firmware; confirm trusted key provisioning. No button/OS pairing is required. |
 | Display is blank | Confirm the Pico Display 2.8 is seated correctly; verify GP16–GP20; inspect ST7789 initialization logs. Buttons/LED should remain functional on display init failure. |
 | PSRAM is not detected | Verify this is the Pico Plus 2 W variant and internal GPIO47/QMI CS1 wiring; firmware should fall back to SRAM and log the condition. |
 | CDC installer is unavailable | Package the Apple Silicon agent, provision `PICO_USB_SERIAL`, and rebuild; confirm the artifact target path. |

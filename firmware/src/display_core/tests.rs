@@ -903,11 +903,8 @@ fn in_flight_frames_own_text_and_uncommitted_frames_force_retry() {
 }
 
 #[test]
-fn pairing_scene_shows_six_digits_and_physical_confirmation_without_metrics() {
-    let metrics = SystemSnapshot {
-        pairing_code: Some(42),
-        ..Default::default()
-    };
+fn bluetooth_system_scene_shows_metrics_without_confirmation() {
+    let metrics = SystemSnapshot::default();
     let scene = Scene::build(
         PageView::System {
             ssid: "Bluetooth",
@@ -916,12 +913,6 @@ fn pairing_scene_shows_six_digits_and_physical_confirmation_without_metrics() {
         Rectangle::new(Point::zero(), Size::new(320, 240)),
         Palette::default(),
     );
-    assert!(scene.rows.iter().any(|row| row.text == "Compare: 000042"));
-    assert!(
-        scene
-            .rows
-            .iter()
-            .any(|row| row.text == "X: Confirm, Y: Reject")
-    );
-    assert!(!scene.rows.iter().any(|row| row.text.starts_with("Uptime:")));
+    assert!(scene.rows.iter().any(|row| row.text == "Radio: Bluetooth"));
+    assert!(scene.rows.iter().any(|row| row.text.starts_with("Uptime:")));
 }

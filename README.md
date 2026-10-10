@@ -15,12 +15,20 @@ cargo run -p pico-companion -- --mock
 cargo run -p pico-companion -- --mock --self-test
 ```
 
-Scan, select the Pico, connect, then choose **Pair and acquire control**.
-Compare the six-digit code on the PC and Pico and press **X** on the Pico to
-confirm; **Y** rejects. Confirmation expires after 30 seconds. Pairing requires
-a working Pico display and authenticated encryption. Connections are not bonded:
-reconnect requires pairing again. If the OS retained an old bond, forget it and
-retry. Discovery and live status are readable before pairing.
+Provision a unique device key before deployment (see
+[provisioning](apps/companion/README.md#trusted-provisioning)), then run:
+
+```sh
+cargo run -p pico-companion -- --profile /private/path/pico.json
+```
+
+Scan, select the Pico, connect, then choose **Authenticate and acquire control**.
+The app authenticates on connect using the profile and encrypts commands/results.
+No Pico button press, display, OS pairing or Bluetooth bond is required, including
+reconnect. Firmware without a provisioned key exposes public status but refuses
+control. BLE v3 deliberately rejects older apps/firmware. Physical Y Stop remains.
+The prototype stores the profile in a private file; OS credential-store import
+and authenticated remote key rotation are still planned.
 
 Select the input layout used by the USB target. Set an initial delay, send text,
 and focus a disposable editor on that target. Cancel stops the current effect;
@@ -56,8 +64,8 @@ Never use bare workspace `cargo test`: the default member is embedded firmware.
 
 ```sh
 cargo fmt --all -- --check
-cargo test -p companion-core -p pico-companion -p ble-protocol
-cargo clippy -p pico-companion -p companion-core -p ble-protocol --all-targets -- -D warnings
+cargo test -p companion-core -p pico-companion -p ble-protocol -p ble-session
+cargo clippy -p pico-companion -p companion-core -p ble-protocol -p ble-session --all-targets -- -D warnings
 cargo test -p pico_rust --lib --no-default-features
 cargo clippy -p pico_rust --lib --tests --no-default-features -- -D warnings
 cargo test -p firmware-exec -p build-support -p script-protocol
@@ -66,13 +74,15 @@ cargo test -p host-agent -p transfer-crypto -p transfer-protocol
 
 `cargo run -p pico-companion -- --ble --self-test` checks real discovery,
 information, live status and reconnect without sending keyboard effects.
-Authenticated pairing and HID checks still require physical interaction.
+Add `--profile /private/path/pico.json` to test fresh authenticated sessions,
+acquire/release and encrypted status without HID effects or Pico interaction.
 
 ## Repository and documentation
 
 - `apps/companion`: native egui app, bounded Tokio backend and btleplug adapter.
 - `crates/companion-core`: client state, correlation, deadlines and keyboard lowering.
 - `crates/ble-protocol`: shared `no_std` BLE values and fragmentation.
+- `crates/ble-session`: allocation-free Noise sessions and persistent provisioning.
 - `firmware`: RP2350B Embassy firmware, Bluetooth, display, USB HID/CDC.
 - `apps/host-agent`: portable serial agent and internal CDC bootstrap artifact.
 - `crates/keyboard-core`, `firmware-exec`, `script-protocol`: shared keyboard machinery.
@@ -87,6 +97,7 @@ and [contributor guidance](AGENTS.md).
 The board retains 16 MiB flash, 8 MiB PSRAM and 520 KiB SRAM. PSRAM is initialized
 for diagnostics; Bluetooth uses fixed SRAM buffers. The internal 4 MiB agent
 image and two 4 KiB persistent USB-identity slots retain their flash addresses.
+A separate 8 KiB control-key region precedes the agent image.
 
 ## Hardware keyboard payloads
 

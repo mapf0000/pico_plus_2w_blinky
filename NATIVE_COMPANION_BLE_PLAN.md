@@ -7,9 +7,12 @@ items from this backlog as milestones land.
 
 ## Baseline and scope
 
-Bluetooth discovery, connection, numeric-comparison pairing, control acquisition,
+Bluetooth discovery, connection, provisioned-secret authentication, control acquisition,
 USB on/off, layout-aware text effects and cancellation are implemented. The user
-confirmed pairing, real USB keyboard output and delayed cancellation on hardware.
+confirmed the previous v2 pairing, real USB keyboard output and delayed cancellation
+on hardware. BLE v3 now has host/embedded validation plus macOS/Pico acceptance
+for unattended control/status/reconnect, wrong-key rejection and unauthenticated
+command/continuous-read timeout rejection. V3 HID acceptance remains separate.
 WLAN, HTTP/WebSocket, the Yew frontend and browser Python Worker have been removed.
 The target computer still connects to the Pico through USB HID/CDC and runs the
 host agent. The control computer runs the companion and connects through BLE.
@@ -18,7 +21,7 @@ Keep egui/Glow, the bounded backend, one BLE connection and one HID job. Preserv
 connection ownership, priority cancellation and independent local payload execution.
 The user requires operation without physical Pico access, including the first
 connection. Replace numeric comparison with provisioned-secret authentication as
-milestone 0; the current firmware still requires a button until that lands.
+milestone 0. BLE v3 now implements this without a pairing gate or display overlay.
 Add concrete operations as needed; no WLAN fallback or general transport framework
 is required. Python runs on the control computer.
 
@@ -36,7 +39,7 @@ Bluetooth-only removal (`2f6579c`). Historical sources can be read with
 
 | Former workflow | Current companion / reusable code | Remaining work |
 | --- | --- | --- |
-| Unattended authorization (new deployment requirement) | Current BLE v2 requires physical numeric comparison on each connection | Provisioned per-device key, mutually authenticated encrypted session and control without Pico interaction |
+| Unattended authorization (new deployment requirement) | BLE v3 Noise PSK, private provisioning profile, encrypted control/snapshots and no physical gate implemented | Board acceptance, OS credential-store import/profile selection and authenticated atomic rotation |
 | Overview: USB state, firmware version/build, host OS, agent presence/version, CDC installation stage, compatibility errors | Basic build/protocol/USB/presence/uptime/RTT; `firmware/src/capabilities.rs` and `usb/bootstrap.rs` retain richer state | Versioned capability/metadata response, freshness and agent compatibility, bootstrap progress and actionable errors |
 | Start/stop USB | Implemented; fault cases remain unverified | Hardware acceptance for enable/disable, detach and job contention |
 | USB manufacturer/product editing and persistent save | `device_config.rs` still reads the two existing flash slots; mutation/save code was removed | Restore validated, transactional saving while USB is off; native editor and readback |
@@ -61,73 +64,57 @@ Two distinctions prevent unnecessary work:
 - Execute/credential capabilities in old HELLO did not create browser RPCs.
   Reaching Web UI parity does not require exposing either over BLE.
 
-## 0. Unattended authentication with a provisioned secret
+## 0. Unattended authentication: acceptance and key lifecycle
 
-**Decision:** one random 32-byte pre-shared key (PSK) per Pico, provisioned before
-deployment, and a mutually authenticated Noise session over ordinary BLE GATT.
-No numeric comparison, button press, Bluetooth bond or display is required for
-the first connection, reconnect or device reboot. The companion imports the
-device profile once; possession of that key grants authority for that Pico.
+Implemented: allocation-free `ble-session` using fixed
+`Noise_NNpsk0_25519_ChaChaPoly_SHA256`, checked X25519, directional authenticated
+records, BLE v3 negotiation, bounded MTU-23 fragmentation and encrypted snapshots.
+Empty handshake payloads cannot execute effects. Connect with a matching profile
+authenticates; encrypted Acquire grants control. Commands/results stay encrypted.
+SMP pairing and the numeric-comparison display/button gate are removed. Physical
+Y Stop and incarnation-scoped cancellation remain.
 
-Use `Noise_NNpsk0_25519_ChaChaPoly_SHA256` as the proposed fixed suite. Keep
-handshake payloads empty, then require a valid encrypted Acquire message before
-granting control. Never execute early handshake payloads: the first handshake
-message can be replayed. Subsequent requests, results, private metadata and events
-use the session's directional authenticated encryption, not an unprotected channel
-after a one-time login. A session authenticates a key holder, not an individual
-computer; per-computer credentials are unnecessary for the first implementation.
+The companion generates/imports private per-device profiles and matching factory
+images. Firmware reads a versioned CRC-checked two-slot reservation, separate from
+USB identity and absent from normal ELF load segments. No default key or USB/BLE
+key export exists. Snow interoperability, wrong key/context, first-handshake
+replay, record replay/tampering/reflection, sequence gaps, fresh sessions, maximum
+records, response framing and provisioning corruption have software coverage.
+See [the wire specification](docs/PROTOCOL.md#bluetooth-control-v3),
+[provisioning commands](apps/companion/README.md#trusted-provisioning) and
+[acceptance evidence](docs/DEVICE_TESTING.md).
 
-Implementation slices:
+Remaining:
 
-1. **Crypto feasibility:** build a portable fixed-buffer session core and test
-   host/Pico interoperability with Noise vectors and the existing host-side Snow
-   implementation. Start by evaluating `noise-protocol` with default features
-   disabled and a narrow RustCrypto/RNG adapter. It supports static dispatch and
-   allocation-free operation. Snow 0.10 supports `no_std` but requires `alloc`, so
-   do not bring the current `transfer-crypto` dependency tree into firmware.
-   Verify PSK support, zeroization, embedded compilation, stack/RAM/code size and
-   handshake execution time before choosing the firmware crate.
-2. **Provisioning:** generate the PSK on a trusted provisioning computer and
-   install it before deployment through the firmware/provisioning workflow. Use
-   private inputs, never a universal default or a checked-in key. Store the key
-   in dedicated versioned persistent configuration, separate from USB identity;
-   review flash layout and preserve it on ordinary firmware updates. Import the
-   profile independently into the control PC's OS credential store. The untrusted
-   USB target/host agent must never generate, receive or retrieve this control key.
-   An already deployed device without a key needs an existing trusted provisioning
-   or update route; unauthenticated BLE cannot safely bootstrap trust by itself.
-3. **BLE v3 session:** deliberately reject v2 peers; provide minimal public
-   discovery and bounded handshake/record characteristics. Transport access must
-   not trigger the old SMP numeric-comparison gate. Protect operations at the
-   application layer, so security does not depend on Just Works or OS pairing.
-   Bind the handshake prologue to this service, version and provisioned device
-   identity. Use fresh cryptographic ephemeral keys on every connection/reboot.
-   Bound handshake work, timeout and failed attempts; unauthenticated idle clients
-   must release the single connection so they cannot hold it indefinitely.
-4. **Protected control:** authenticate complete bounded records before parsing
-   or dispatching commands. Account for the 16-byte AEAD tag and framing overhead
-   above the existing 4,125-byte script envelope without increasing KBD1 limits.
-   Define strict directional sequencing, fragment bounds and loss handling;
-   reject tampering, duplicate/out-of-order records and prior-session ciphertext.
-   Fragmentation headers are untrusted and may never authorize an effect.
-   Keep Cancel/Disconnect priority, full effect IDs and incarnation ownership.
-   Disconnect clears session keys and remote work; local payloads stay independent.
-5. **Companion workflow and key lifecycle:** import/select the device profile,
-   Connect, authenticate, acquire control; no Pico confirmation. Reconnect can
-   authenticate automatically but never replay commands. Keep secrets out of
-   diagnostics, command-line arguments and exports except an explicit private
-   provisioning export. Plan authenticated, atomic key rotation with a bounded
-   old/new transition and reboot/interruption tests; there is no remotely callable
-   unauthenticated reset. Retain a secure backup: losing all authorized credentials
-   requires a separate trusted reprovisioning route, not a button fallback.
+- Record independent power-cycle authentication, missing-key device behavior,
+  forced default ATT MTU, interrupted maximum upload/response, Cancel latency,
+  v3 HID/key release and local-preset contention. Unattended acquire/release,
+  encrypted status/reconnect, wrong key, unauthenticated command rejection, timeout
+  under continuous reads and key persistence across ELF deployment have passed
+  on macOS/Pico. Measure standalone handshake time and stack headroom;
+  compilation/linked static size does not establish runtime stack usage or entropy.
+- Import/select profiles into each supported OS credential store and reconnect
+  without repeatedly supplying a file. Current `--profile PATH` is a private-file
+  prototype; macOS/Linux permissions are checked, Windows ACL handling is not
+  accepted. Keep explicit trusted provisioning export and secure external backups.
+  Do not place production credentials only under `target/`.
+- Implement authenticated atomic key rotation after agreeing its recovery behavior.
+  Proposed flow: generate and securely persist the new profile on the trusted PC
+  first; rotate only over an authenticated acquired idle connection; write/verify
+  the inactive flash slot and make the CRC-valid higher sequence the commit point.
+  Keep the current old-key session only long enough to acknowledge, then disconnect;
+  new connections accept only the committed key. If acknowledgement is lost, the
+  PC retains both candidates and determines the committed one through fresh
+  authentication, never an unauthenticated query/reset. Validate flash-write safety
+  alongside BLE, interruption at every write phase and reboot before enabling this.
+  Rotation is not yet callable, and the two reserved slots alone are not evidence
+  of working transactional rotation.
 
-Acceptance: real first connection, reconnect and power cycle require no Pico
-interaction; wrong/missing keys, wrong device/context, replayed handshake/records,
-tampered commands/results and authentication timeouts never grant control. Both
-directions verify the peer before trusting private data. Verify MTU-23 operation,
-bounded failure handling, key persistence, interrupted rotation and prompt remote
-cancellation without using physical Stop. Physical Y Stop remains available when
-someone is present, but no required operator workflow depends on it.
+Possession of the per-device key grants authority rather than identifying a
+particular computer. Losing every backup needs another trusted reprovisioning
+route. The hostile USB target/agent never receives this key. Firmware flash is not
+encrypted at rest; physical extraction/firmware compromise is outside the boundary.
+The prototype bounds unauthenticated occupancy and disconnect rate, not radio DoS.
 
 ## 1. Stable controls, complete overview and USB identity
 
@@ -166,8 +153,8 @@ Record pending and completed board checks in DEVICE_TESTING.md.
 ## 2. Bounded BLE responses/events and filesystem browsing
 
 This is the shared prerequisite for filesystem pages, Python button events and
-file streaming. Today's 20-byte Result slot only carries keyboard/control codes;
-it cannot return directory pages or file records. `usb/events.rs` is an unavailable
+file streaming. Today's finite 48-byte encrypted response carries control/status snapshots;
+it cannot stream directory pages or file records. `usb/events.rs` is an unavailable
 sink, so a new screen alone cannot restore these workflows.
 
 - Extend `ble-protocol` with explicitly versioned request/response/event framing,
@@ -282,9 +269,10 @@ not automatically justify four simultaneous native downloads.
 
 ## 5. Recovery, packaging and release acceptance
 
-- Provide clear scan/profile import/authenticate/reconnect and wrong-key errors.
-  Reconnect uses a fresh session without Pico interaction; preserve intentional
-  control acquisition and never replay effects. OS bonding is not a prerequisite.
+- Complete in-app profile import/selection and convenient reconnect, building on
+  the implemented CLI profile workflow and actionable wrong-key error. Reconnect
+  uses a fresh session without Pico interaction; preserve intentional control
+  acquisition and never replay effects. OS bonding is not a prerequisite.
 - Test repeated connect/control/cancel/disconnect cycles, soak, app shutdown and
   device reboot. Measure idle CPU/RAM, startup and release artifact size, including
   interpreter and staging components; keep heavyweight work lazy.
@@ -308,8 +296,9 @@ authorization timing. The [Noise-Rust project](https://github.com/blckngm/noise-
 documents allocation-free `no_std` support. Its RustCrypto defaults include system
 RNG features: select/adapt primitives explicitly for the Pico rather than copying
 the default dependency configuration. [Snow's documentation](https://docs.rs/snow/0.10.0/snow/)
-states that its `no_std` mode needs allocation. These are feasibility candidates,
-not a completed embedded security or performance validation.
+states that its `no_std` mode needs allocation. The allocation-free implementation now uses Noise-Rust with a narrow X25519
+adapter. Host interoperability and compilation do not establish hardware performance
+or a complete security audit.
 
 The installed btleplug 0.13.4 exposes `mtu()`, `subscribe()` and `notifications()`;
 TrouBLE 0.6.0 provides the GATT stack. These APIs enable the proposed outgoing
@@ -322,8 +311,8 @@ to be proven. For the optional WASM spike, Wasmtime documents
 [sandbox boundaries](https://docs.wasmtime.dev/security.html) and
 [execution interruption](https://docs.wasmtime.dev/examples-interrupting-wasm.html).
 Its [configuration API](https://docs.wasmtime.dev/api/wasmtime/struct.Config.html)
-also explains why interruption needs bounded memory. No runtime dependency has
-been selected or added by this planning update.
+also explains why interruption needs bounded memory. No Python runtime dependency has
+been selected or added.
 
 Use the affected suites in [AGENTS.md](AGENTS.md#validation-matrix). Extend protocol
 tests for malformed/boundary/order/ownership cases, supervisor tests for process

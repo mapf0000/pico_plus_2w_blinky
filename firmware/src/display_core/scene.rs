@@ -204,12 +204,6 @@ impl Scene {
                 }
             }
             PageView::System { ssid, metrics } => {
-                if let Some(code) = metrics.pairing_code {
-                    scene.body("Bluetooth pairing", 20);
-                    scene.body(&bounded_text(format_args!("Compare: {code:06}")), 24);
-                    scene.body("X: Confirm, Y: Reject", 20);
-                    return scene;
-                }
                 scene.body(&bounded_text(format_args!("Radio: {ssid}")), 14);
                 let seconds = metrics.uptime_secs;
                 let hours = seconds / 3600;

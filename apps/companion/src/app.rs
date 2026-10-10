@@ -16,8 +16,12 @@ pub struct CompanionApp {
 }
 
 impl CompanionApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, mode: Mode) -> std::io::Result<Self> {
-        let backend = Backend::start(mode, cc.egui_ctx.clone())?;
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        mode: Mode,
+        profile: Option<ble_session::provisioning::Profile>,
+    ) -> std::io::Result<Self> {
+        let backend = Backend::start_with_profile(mode, profile, cc.egui_ctx.clone())?;
         Ok(Self {
             backend,
             snapshot: Snapshot::default(),
@@ -171,7 +175,10 @@ impl CompanionApp {
                 && !self.snapshot.control_acquired
                 && !self.snapshot.pending;
             if ui
-                .add_enabled(can_acquire, egui::Button::new("Pair and acquire control"))
+                .add_enabled(
+                    can_acquire,
+                    egui::Button::new("Authenticate and acquire control"),
+                )
                 .clicked()
             {
                 self.send(Action::Acquire);
@@ -205,7 +212,7 @@ impl CompanionApp {
             }
         });
         if !self.mode.is_mock() {
-            ui.small("Compare the pairing code on the Pico and PC. Press X on the Pico to confirm; Y rejects.");
+            ui.small("Uses the provisioned device key. No Pico button press is required.");
         }
     }
 

@@ -23,7 +23,8 @@ Native egui companion <-- authenticated BLE GATT --> Firmware <-- USB CDC --> Ho
 
 The companion lowers bounded text to KBD1 using shared keyboard machinery.
 Hardware presets share the same non-preempting executor, scoped cancellation and
-physical Y Stop. BLE authentication requires physical numeric comparison. No
+physical Y Stop. BLE v3 authentication uses a provisioned per-device Noise PSK,
+without physical confirmation or OS pairing. No
 persistent bonds or native Python/file-transfer workflow exists yet.
 
 Detailed references:
@@ -48,13 +49,13 @@ Detailed references:
 ### Firmware: `firmware/`
 
 - `src/main.rs`: board initialization, CYW43 Bluetooth, task startup, and pin assignments.
-- `src/ble.rs`, `src/ble_control.rs`: GATT, pairing, bounded upload, session-scoped HID completion.
+- `src/ble.rs`, `src/ble_control.rs`: GATT, PSK authentication, bounded upload, session-scoped HID completion.
 - `src/usb/`: USB HID, CDC control/relay protocol, internal agent image, and USB supervision.
 - `src/display/`: on-device pages, including standalone Payloads, input, rendering, and status views.
 - `src/display_core/`: hardware-independent button routing, page models, bounded row scenes, and incremental rendering. `src/display/` owns GPIO/SPI/ADC and service adapters.
 - `src/device_config.rs`: persistent flash-backed configuration. Its constants must agree with `memory.x`.
 - `src/psram_pool.rs`: board-specific PSRAM initialization for diagnostics.
-- `memory.x`: 16 MiB flash layout, including two persistent 4 KiB configuration slots.
+- `memory.x`: 16 MiB flash layout, including two persistent 4 KiB USB-identity slots and two separate control-key slots.
 - `build.rs`: delegates the build pipeline to `crates/build-support`.
 - `cyw43-firmware/`: checked-in Wi-Fi/Bluetooth firmware blobs required by the embedded build.
 
@@ -84,10 +85,10 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 
 The package is `pico-companion`. Bluetooth is the default; `--ble` is an explicit
 alias and `--mock` selects the deterministic mock. The default firmware supports
-BLE v2 numeric-comparison pairing, acquired control, USB on/off and bounded
+BLE v3 provisioned-secret authentication, acquired control, USB on/off and bounded
 keyboard effects. Filesystem/file reception and Python scripting remain planned
 in `NATIVE_COMPANION_BLE_PLAN.md`. Native builds must remain independent of firmware
-asset generation and browser tooling. Require pairing before control. Keep device
+asset generation and browser tooling. Require an authenticated session before control. Keep device
 work out of UI callbacks, bound queues/diagnostics, and scope commands/results to
 a connection incarnation.
 
@@ -96,9 +97,10 @@ a connection incarnation.
 - `keyboard-core`: portable, language-neutral layouts, key parsing, lowering, and KBD1 encoding. It is `no_std` by default.
 - `firmware-exec`: strict, two-pass `no_std` KBD1 validator/executor.
 - `script-protocol`: versioned correlated companion-to-firmware effect envelopes.
-- `ble-protocol`: `no_std` v2 information/status/result codecs, UUIDs and MTU-23
-  command fragmentation.
+- `ble-protocol`: `no_std` v3 information/status/snapshot codecs, UUIDs and MTU-23
+  handshake/encrypted-record fragmentation.
 - `bytecode-constants`: cross-target bytecode limits.
+- `ble-session`: allocation-free Noise PSK sessions and versioned key provisioning.
 - `build-support`: typed keyboard-preset generation, linker setup, and internal FAT agent-image generation.
 
 ### Scripts and configuration
@@ -206,7 +208,7 @@ cargo build -p pico-companion --release
 ```
 
 Launch the actual native window for rendering/input changes. Mock tests do not
-replace real BLE pairing, radio coexistence, hardware HID, or platform checks.
+replace real BLE authentication, hardware HID, or platform checks.
 Also run the layout/executor suites when keyboard lowering changes.
 
 ### Host agent changes
@@ -285,18 +287,20 @@ Do not silently reuse an existing tag or reinterpret a payload without versionin
 ## Bluetooth implementation guidance
 
 - One connection, one outstanding request/effect, one bounded receiver.
-- Commands require authenticated encryption and physical confirmation of the current displayed code.
-- The user has authorized planning unattended PSK authentication in
-  `NATIVE_COMPANION_BLE_PLAN.md` milestone 0. Until that implementation lands, the
-  rule above describes BLE v2; the planned v3 uses provisioned-secret session
-  authentication instead of physical confirmation. Do not confuse the plan with
-  current firmware behavior or bypass authentication to remove the button prompt.
+- Commands/results require the BLE v3 provisioned-secret encrypted record path;
+  no plaintext fallback, numeric confirmation or OS pairing gate. Handshake payloads
+  remain empty; completing NNpsk0 alone does not grant control.
+- Keep control keys out of Git, logs, command arguments and the USB target/agent.
+  Provision only through a trusted route. Private profile files are a prototype;
+  OS credential-store integration and authenticated rotation remain planned.
+- Reserved key region `0x10BFC000..0x10BFE000` must agree with `ble-session` and
+  `memory.x`. Ordinary firmware ELF updates must have no load segment there.
 - Keep TrouBLE diagnostic logging disabled: upstream security logs include key material.
 - Use writes with response fitting default ATT MTU 23; never assume negotiated MTU.
 - Tokens are nonzero, monotonic and never reused in a connection. Incarnations must not wrap.
 - Cancel/reset bypass ordinary host queues; firmware completion publication cannot block HID cleanup.
 - Preserve strict script validation, local job independence and physical Y Stop.
-- Pairing currently does not persist bonds; record real macOS pairing tests separately from mocks.
+- Record real unattended first-connect/reconnect/reboot tests separately from mocks.
 
 ## Host-agent implementation guidance
 

@@ -345,3 +345,90 @@ file access occurred.
 Final review added a regression test for Cancel arriving before a queued Run
 starts. The actor discards that Run; it cannot execute after the UI reports
 cancellation. Native/core suites and targeted Clippy passed again after the fix.
+
+
+## Unattended BLE v3 authentication prototype — 2026-10-10
+
+Implemented per-device Noise PSK authentication, with no physical pairing gate,
+SMP/bond requirement or display overlay. Provisioning lives in a separate two-slot
+8-KiB region at `0x10BFC000..0x10BFE000`. The agent image and USB identity addresses
+are unchanged. Control requires encrypted Acquire; all operations/results/polled
+status stay in directional authenticated records. No early handshake effects.
+
+A private random profile/image was generated locally (ignored `target/provisioning/`),
+and a mode-0600 JSON backup was saved in the control user's Pico Companion
+application-support directory outside build output. No key appears in Git or logs.
+Using the user's earlier flash-and-test authorization, both key-region and firmware
+verification passed, then the device rebooted to the application:
+
+```sh
+picotool load -v target/provisioning/pico.flash.bin -t bin -o 0x10BFC000
+picotool load -v target/thumbv8m.main-none-eabihf/release/pico_rust -t elf
+picotool reboot
+target/release/pico-companion --profile target/provisioning/pico.json --self-test
+cargo run -p pico-companion --example auth_boundary
+```
+
+Real Apple Silicon macOS/Pico acceptance passed:
+
+- Fresh Noise authentication, Acquire/Release, encrypted advancing status,
+  disconnect and reauthentication/reacquisition, with no Pico button interaction,
+  OS pairing prompt or HID effects. Latest encrypted status request was 397 ms.
+- A different key with the same device ID failed authentication and disconnected;
+  the companion reports “Device authentication failed; check the provisioning
+  profile.” It never reached acquired control.
+- A plaintext Acquire written to Command before authentication closed the link.
+- An unauthenticated client expired despite 493 continuous public status reads:
+  29.68 seconds after discovery/read setup, consistent with the 30-second deadline
+  from firmware accept. Reassembly/read traffic cannot renew that deadline.
+- The newly provisioned key survived the ordinary ELF deployment and was loaded
+  on boot. Firmware CDC logs showed advertising/connection recovery and no
+  watchdog recovery; the display remained operational.
+
+Initial immediate post-reboot scans reported no device; later rescans succeeded
+after startup. The full application-only native window was
+launched with a profile; an eframe screenshot was inspected (no desktop capture).
+The longer authentication button renders correctly. The previously reported
+once-per-second busy-state flicker remains milestone 1 work.
+
+Automated validation passed: 36 native/protocol/session tests, 31 portable firmware
+model/display tests and 20 executor/script/transfer tests. Session tests cover Snow
+key agreement in both roles, wrong PSK/context, replayed initial handshake followed
+by stale Acquire, tampering/reflection/replay, skipped sequence numbers, maximum
+records and MTU-23 reassembly/cancel/readback. Profile tests check CRC/header
+corruption, private permissions, strict import bounds and refusal to overwrite.
+Commands (test counts exclude doc tests):
+
+```sh
+cargo test -p ble-session -p ble-protocol -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol -p ble-session --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo build -p pico-companion --release
+cargo test -p pico_rust --lib --no-default-features
+cargo clippy -p pico_rust --lib --tests --no-default-features -- -D warnings
+cargo test -p transfer-crypto -p transfer-protocol -p firmware-exec -p script-protocol
+cargo check -p ble-session --target thumbv8m.main-none-eabihf
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+cargo fmt --all -- --check
+```
+
+Linked allocated flash sections are 4,805,132 bytes plus 3,544 initialized-data
+load bytes, including the fixed 4,194,304-byte image. Application load ends at
+`0x10095FE8`. No ELF load segment overlaps the key reservation or USB identity.
+Allocated static striped SRAM is 95,028 bytes; its highest address including
+alignment is 95,036 bytes from RAM origin, leaving 429,252 before runtime stacks.
+Removing SMP offset the new crypto's code cost: flash section/load total decreased
+48,524 bytes from v2; the static RAM end increased 2,528 bytes. The native release is
+7,982,592 bytes. These are linked sizes, not peak RAM/stack or standalone crypto
+execution-time measurements. Existing upstream `proc-macro-error2` future-incompatibility
+notice remains; targeted Clippy has no warnings.
+
+Unverified: independent power cycling, forced MTU-23 hardware negotiation, v3 HID
+output/cancel/physical Y Stop, maximum radio upload/interrupted response, local
+contention, USB toggles/detach, long soak and Linux/Windows. Earlier user-confirmed
+HID/cancellation acceptance was v2 and is not relabelled as v3. The private backup was also used for a second successful authenticated/reconnect
+smoke after the rejection tests; latest encrypted status request was 342 ms. The
+release companion was opened using that backup. The wire writes
+always fit MTU 23; host integration tests prove that bound without establishing
+radio throughput. OS credential-store import/profile selection, remote atomic
+rotation and native Python/filesystem/file receipt remain unfinished.

@@ -5,16 +5,10 @@ use core::{
     cell::Cell,
     sync::atomic::{AtomicU32, Ordering},
 };
-use embassy_sync::{
-    blocking_mutex::{Mutex, raw::ThreadModeRawMutex},
-    signal::Signal,
-};
+use embassy_sync::blocking_mutex::{Mutex, raw::ThreadModeRawMutex};
 
 static CURRENT: AtomicU32 = AtomicU32::new(0);
 static NEXT: AtomicU32 = AtomicU32::new(0);
-static DISPLAYED: AtomicU32 = AtomicU32::new(0);
-static PASSKEY: AtomicU32 = AtomicU32::new(0);
-pub static DECISION: Signal<ThreadModeRawMutex, bool> = Signal::new();
 static RESULT: Mutex<ThreadModeRawMutex, Cell<ResultValue>> = Mutex::new(Cell::new(ResultValue {
     token: 0,
     code: Code::Idle,
@@ -37,14 +31,12 @@ impl Session {
             })
         });
         ACTIVE.lock(|value| value.set(None));
-        clear_pairing();
         Some(Self(session))
     }
 }
 impl Drop for Session {
     fn drop(&mut self) {
         CURRENT.store(0, Ordering::SeqCst);
-        clear_pairing();
         crate::usb::hid::cancel_companion_session(self.0);
         ACTIVE.lock(|value| value.set(None));
     }
@@ -90,26 +82,4 @@ pub async fn deliver(session: u32, result: HidResult) {
             },
         );
     }
-}
-pub fn begin_pairing(code: u32) {
-    DISPLAYED.store(0, Ordering::SeqCst);
-    DECISION.reset();
-    PASSKEY.store(code + 1, Ordering::SeqCst);
-}
-pub fn pairing_code() -> Option<u32> {
-    PASSKEY.load(Ordering::SeqCst).checked_sub(1)
-}
-pub fn clear_pairing() {
-    PASSKEY.store(0, Ordering::SeqCst);
-    DECISION.reset();
-}
-
-pub fn mark_displayed(code: u32) {
-    if pairing_code() == Some(code) {
-        DISPLAYED.store(code + 1, Ordering::SeqCst);
-    }
-}
-pub fn pairing_displayed() -> bool {
-    let code = PASSKEY.load(Ordering::SeqCst);
-    code != 0 && DISPLAYED.load(Ordering::SeqCst) == code
 }

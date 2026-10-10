@@ -1,18 +1,18 @@
-//! Bluetooth-only control service with authenticated numeric-comparison pairing.
+//! Bluetooth control authenticated by a provisioned Noise PSK, without pairing.
 use ble_protocol::Code;
-use embassy_futures::select::{Either3, select, select3};
-use embassy_time::{Duration, Instant, Timer};
-// TrouBLE 0.6 macros name embassy_sync directly. Scope its 0.7 API here;
-// firmware services continue using 0.8 without changing their synchronization.
+use embassy_futures::select::{Either, select};
 use embassy_sync_ble as embassy_sync;
+use embassy_time::{Duration, Instant, Timer};
 use portable_atomic::Ordering;
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
+const _: () = assert!(ble_protocol::MAX_MESSAGE_LEN == ble_session::MAX_CIPHERTEXT);
+const _: () = assert!(ble_protocol::VERSION == 3 && ble_protocol::KIND_RECORD == 4);
 
 const SERVICE_UUID: Uuid = Uuid::new_long(ble_protocol::SERVICE_UUID.to_le_bytes());
 const INFO_UUID: Uuid = Uuid::new_long(ble_protocol::INFO_UUID.to_le_bytes());
 const STATUS_UUID: Uuid = Uuid::new_long(ble_protocol::STATUS_UUID.to_le_bytes());
-const PAIR_UUID: Uuid = Uuid::new_long(ble_protocol::PAIR_UUID.to_le_bytes());
+const AUTH_UUID: Uuid = Uuid::new_long(ble_protocol::AUTH_UUID.to_le_bytes());
 const COMMAND_UUID: Uuid = Uuid::new_long(ble_protocol::COMMAND_UUID.to_le_bytes());
 const RESULT_UUID: Uuid = Uuid::new_long(ble_protocol::RESULT_UUID.to_le_bytes());
 const NAME: &str = "Pico BLE";
@@ -21,46 +21,45 @@ const NAME: &str = "Pico BLE";
 struct Server {
     pico: PicoService,
 }
-
 #[gatt_service(uuid = SERVICE_UUID)]
 struct PicoService {
     #[characteristic(uuid = INFO_UUID, read)]
     info: [u8; 20],
     #[characteristic(uuid = STATUS_UUID, read)]
     status: [u8; 12],
-    #[characteristic(uuid = PAIR_UUID, read)]
-    pair: u8,
+    #[characteristic(uuid = AUTH_UUID, write)]
+    auth: [u8; 20],
     #[characteristic(uuid = COMMAND_UUID, write)]
     command: [u8; 20],
     #[characteristic(uuid = RESULT_UUID, read)]
     result: [u8; 20],
 }
-
 fn status() -> [u8; ble_protocol::STATUS_LEN] {
     ble_protocol::Status {
         usb_enabled: crate::usb::usb_supervisor::USB_ENABLED.load(Ordering::SeqCst),
         usb_ready: crate::usb::hid::USB_READY.load(Ordering::SeqCst),
         host_agent_present: crate::capabilities::host_agent_present(),
-        uptime_secs: embassy_time::Instant::now().as_secs(),
+        uptime_secs: Instant::now().as_secs(),
     }
     .encode()
 }
 
 #[embassy_executor::task]
 pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6]) {
-    // One peripheral, signalling + ATT + SMP. Eight 128-byte packets, no heap.
+    // One connection, three channels, eight 128-byte packets, and no allocator.
     static RESOURCES: StaticCell<HostResources<DefaultPacketPool, 1, 3>> = StaticCell::new();
-    let resources = RESOURCES.init(HostResources::new());
     let controller = ExternalController::<_, 10>::new(driver);
-    let stack =
-        trouble_host::new(controller, resources).set_random_address(Address::random(address));
-    let stack = stack.set_random_generator_seed(&mut embassy_rp::clocks::RoscRng);
-    stack.set_io_capabilities(IoCapabilities::DisplayYesNo);
+    let stack = trouble_host::new(controller, RESOURCES.init(HostResources::new()))
+        .set_random_address(Address::random(address));
     let Host {
         mut peripheral,
         mut runner,
         ..
     } = stack.build();
+    let profile = crate::device_config::control_profile().await;
+    if profile.is_none() {
+        log::warn!("ble: control key not provisioned; control unavailable");
+    }
     let server = match Server::new_with_config(GapConfig::default(NAME)) {
         Ok(server) => server,
         Err(_) => {
@@ -75,184 +74,226 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
         )
         .is_err()
     {
-        log::error!("ble: info initialization failed");
-        return;
-    }
-    if server.set(&server.pico.pair, &1).is_err() {
         return;
     }
     let uuids = [ble_protocol::SERVICE_UUID.to_le_bytes()];
     let mut ad = [0; 31];
-    let ad_len = match AdStructure::encode_slice(
+    let Ok(ad_len) = AdStructure::encode_slice(
         &[
             AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
             AdStructure::ServiceUuids128(&uuids),
         ],
         &mut ad,
-    ) {
-        Ok(len) => len,
-        Err(_) => {
-            log::error!("ble: advertising encoding failed");
-            return;
-        }
+    ) else {
+        return;
     };
     let mut scan = [0; 31];
-    let scan_len = match AdStructure::encode_slice(
+    let Ok(scan_len) = AdStructure::encode_slice(
         &[AdStructure::CompleteLocalName(NAME.as_bytes())],
         &mut scan,
-    ) {
-        Ok(len) => len,
-        Err(_) => {
-            log::error!("ble: name encoding failed");
-            return;
-        }
+    ) else {
+        return;
     };
     let service = async {
         loop {
-            let advertisement = Advertisement::ConnectableScannableUndirected {
-                adv_data: &ad[..ad_len],
-                scan_data: &scan[..scan_len],
-            };
             let advertiser = match peripheral
-                .advertise(&Default::default(), advertisement)
+                .advertise(
+                    &Default::default(),
+                    Advertisement::ConnectableScannableUndirected {
+                        adv_data: &ad[..ad_len],
+                        scan_data: &scan[..scan_len],
+                    },
+                )
                 .await
             {
-                Ok(advertiser) => advertiser,
+                Ok(value) => value,
                 Err(_) => {
-                    log::warn!("ble: advertising failed; retrying");
-                    embassy_time::Timer::after_secs(1).await;
+                    Timer::after_secs(1).await;
                     continue;
                 }
             };
             crate::health::mark(crate::health::Stage::BluetoothAdvertising);
             log::info!("ble: control service advertising");
             let connection = match advertiser.accept().await {
-                Ok(connection) => connection,
+                Ok(value) => value,
                 Err(_) => {
-                    embassy_time::Timer::after_secs(1).await;
+                    Timer::after_secs(1).await;
                     continue;
                 }
             };
             let connection = match connection.with_attribute_server(&server) {
-                Ok(connection) => connection,
-                Err(_) => {
-                    log::warn!("ble: ATT connection rejected");
-                    continue;
-                }
+                Ok(value) => value,
+                Err(_) => continue,
             };
-            let Some(session) = crate::ble_control::Session::new() else {
+            let Some(owner) = crate::ble_control::Session::new() else {
                 return;
             };
-            if connection.raw().set_bondable(false).is_err() {
-                continue;
-            }
             let mut receiver = ble_protocol::Receiver::new();
-            let mut upload_at = Instant::now();
-            let mut pairing_at = Instant::now();
-            let mut confirmed = false;
+            let mut crypto: Option<ble_session::Session> = None;
+            let mut response = ble_protocol::Response::new();
+            let mut response_sequence = 0u16;
+            let mut authenticated = false;
             let mut acquired = false;
+            let connected_at = Instant::now();
+            let mut upload_at = connected_at;
+            let mut plaintext = [0; ble_session::MAX_PLAINTEXT];
             crate::health::mark(crate::health::Stage::BluetoothConnected);
             log::info!("ble: connected");
             loop {
-                let event = match select3(
-                    connection.next(),
-                    crate::ble_control::DECISION.wait(),
-                    Timer::after_millis(100),
-                )
-                .await
-                {
-                    Either3::First(event) => event,
-                    Either3::Second(yes) => {
-                        if crate::ble_control::pairing_code().is_some() {
-                            confirmed = yes;
-                            if yes {
-                                let _ = connection.pass_key_confirm();
-                            } else {
-                                let _ = connection.pass_key_cancel();
-                            }
-                            crate::ble_control::clear_pairing();
-                        }
-                        continue;
-                    }
-                    Either3::Third(()) => {
+                // Check even when a peer supplies a continuous stream of GATT events.
+                if !authenticated && connected_at.elapsed() > Duration::from_secs(30) {
+                    break;
+                }
+                let event = match select(connection.next(), Timer::after_millis(100)).await {
+                    Either::First(event) => event,
+                    Either::Second(()) => {
                         if Instant::now().duration_since(upload_at) > Duration::from_secs(5) {
                             receiver.abandon();
                         }
-                        if crate::ble_control::pairing_code().is_some()
-                            && Instant::now().duration_since(pairing_at) > Duration::from_secs(30)
-                        {
-                            let _ = connection.pass_key_cancel();
-                            crate::ble_control::clear_pairing();
+                        // Fixed from accept: fragments/reads cannot extend unauthenticated ownership.
+                        if !authenticated && connected_at.elapsed() > Duration::from_secs(30) {
+                            break;
                         }
                         continue;
                     }
                 };
                 match event {
-                    GattConnectionEvent::Disconnected { .. } => {
-                        log::info!("ble: disconnected");
-                        break;
-                    }
-                    GattConnectionEvent::PassKeyConfirm(key) => {
-                        confirmed = false;
-                        pairing_at = Instant::now();
-                        crate::ble_control::begin_pairing(key.value());
-                    }
-                    // Only numeric comparison with physical confirmation authorizes control.
-                    GattConnectionEvent::PassKeyInput | GattConnectionEvent::PassKeyDisplay(_) => {
-                        let _ = connection.pass_key_cancel();
-                    }
-                    GattConnectionEvent::PairingFailed(_) => {
-                        confirmed = false;
-                        acquired = false;
-                        crate::ble_control::clear_pairing();
-                    }
+                    GattConnectionEvent::Disconnected { .. } => break,
                     GattConnectionEvent::Gatt { event } => {
-                        let authenticated = confirmed
-                            && connection
-                                .raw()
-                                .security_level()
-                                .is_ok_and(|level| level.authenticated());
-                        let _ = server.set(&server.pico.status, &status());
-                        let _ = server.set(&server.pico.result, &crate::ble_control::result());
                         let reply = match event {
-                            GattEvent::Read(read)
-                                if read.handle() == server.pico.pair.handle && !authenticated =>
-                            {
-                                let _ = connection.raw().request_security();
-                                read.reject(AttErrorCode::INSUFFICIENT_AUTHENTICATION)
+                            GattEvent::Read(read) if read.handle() == server.pico.result.handle => {
+                                match response.next_fragment() {
+                                    Ok(frame) => {
+                                        let _ = server.set(&server.pico.result, &frame);
+                                        read.accept()
+                                    }
+                                    Err(_) => read.reject(AttErrorCode::UNLIKELY_ERROR),
+                                }
+                            }
+                            GattEvent::Read(read) if read.handle() == server.pico.status.handle => {
+                                let _ = server.set(&server.pico.status, &status());
+                                read.accept()
                             }
                             GattEvent::Write(write)
-                                if write.handle() == server.pico.command.handle =>
+                                if write.handle() == server.pico.auth.handle
+                                    || write.handle() == server.pico.command.handle =>
                             {
-                                if !authenticated {
-                                    write.reject(AttErrorCode::INSUFFICIENT_AUTHENTICATION)
-                                } else {
-                                    upload_at = Instant::now();
-                                    match receiver.push(write.data()) {
-                                        Ok(Some(ble_protocol::Message {
-                                            token,
-                                            kind,
-                                            payload: message,
-                                        })) => {
-                                            let code = command(
-                                                session.0,
-                                                &mut acquired,
-                                                token,
-                                                kind,
-                                                message,
-                                            )
-                                            .await;
-                                            if let Some(code) = code {
-                                                crate::ble_control::publish(token, code);
-                                            }
-                                            // Attribute storage is bounded to twenty bytes; parsing uses the exact write length.
-                                            write.accept()
+                                let is_auth = write.handle() == server.pico.auth.handle;
+                                if (is_auth && crypto.is_some()) || (!is_auth && crypto.is_none()) {
+                                    break;
+                                }
+                                if upload_at.elapsed() > Duration::from_secs(5) {
+                                    receiver.abandon();
+                                }
+                                upload_at = Instant::now();
+                                let message = match receiver.push(write.data()) {
+                                    Ok(value) => value,
+                                    Err(_) => break,
+                                };
+                                if let Some(message) = message {
+                                    if is_auth {
+                                        if message.kind != ble_protocol::KIND_HANDSHAKE {
+                                            break;
                                         }
-                                        Ok(None) => write.accept(),
-                                        Err(_) => write
-                                            .reject(AttErrorCode::INVALID_ATTRIBUTE_VALUE_LENGTH),
+                                        let Some(profile) = profile.as_ref() else {
+                                            break;
+                                        };
+                                        let mut ephemeral = [0; 32];
+                                        embassy_rp::clocks::RoscRng.fill_bytes(&mut ephemeral);
+                                        let mut handshake =
+                                            ble_session::Handshake::new(false, profile, ephemeral);
+                                        ble_session::erase(&mut ephemeral);
+                                        if handshake.read(message.payload).is_err() {
+                                            break;
+                                        }
+                                        let mut answer = [0; ble_session::HANDSHAKE_LEN];
+                                        if handshake.write(&mut answer).is_err() {
+                                            break;
+                                        }
+                                        let Ok(session) = handshake.finish() else {
+                                            break;
+                                        };
+                                        crypto = Some(session);
+                                        if response
+                                            .set(
+                                                ble_protocol::KIND_HANDSHAKE,
+                                                message.token,
+                                                &answer,
+                                            )
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    } else {
+                                        if message.kind != ble_protocol::KIND_RECORD {
+                                            break;
+                                        }
+                                        let Some(session) = crypto.as_mut() else {
+                                            break;
+                                        };
+                                        let Ok(length) = session.open(
+                                            message.token,
+                                            message.payload,
+                                            &mut plaintext,
+                                        ) else {
+                                            break;
+                                        };
+                                        let Some((&kind, body)) = plaintext[..length].split_first()
+                                        else {
+                                            break;
+                                        };
+                                        // No authority is derived from the unprotected fragment headers.
+                                        authenticated = true;
+                                        if kind == ble_protocol::KIND_CONTROL
+                                            && body == [ble_protocol::POLL]
+                                        {
+                                            // Poll preserves the active Run's result token and completion.
+                                        } else if matches!(
+                                            kind,
+                                            ble_protocol::KIND_CONTROL | ble_protocol::KIND_SCRIPT
+                                        ) {
+                                            if let Some(code) = command(
+                                                owner.0,
+                                                &mut acquired,
+                                                message.token,
+                                                kind,
+                                                body,
+                                            )
+                                            .await
+                                            {
+                                                crate::ble_control::publish(message.token, code);
+                                            }
+                                        } else {
+                                            break;
+                                        }
+                                        ble_session::erase(&mut plaintext);
+                                        let Some(next) = response_sequence.checked_add(1) else {
+                                            break;
+                                        };
+                                        response_sequence = next;
+                                        let mut snapshot = [0; ble_protocol::SNAPSHOT_LEN];
+                                        snapshot[..20]
+                                            .copy_from_slice(&crate::ble_control::result());
+                                        snapshot[20..].copy_from_slice(&status());
+                                        let mut encrypted = [0; ble_protocol::MAX_RESPONSE_LEN];
+                                        let Ok(length) =
+                                            session.seal(next, &snapshot, &mut encrypted)
+                                        else {
+                                            break;
+                                        };
+                                        if response
+                                            .set(
+                                                ble_protocol::KIND_RECORD,
+                                                next,
+                                                &encrypted[..length],
+                                            )
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
                                     }
                                 }
+                                write.accept()
                             }
                             GattEvent::Write(write) => {
                                 write.reject(AttErrorCode::WRITE_NOT_PERMITTED)
@@ -266,9 +307,13 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                     _ => {}
                 }
             }
+            ble_session::erase(&mut plaintext);
+            connection.raw().disconnect();
+            drop(crypto);
+            drop(owner); // Session drop cancels only this incarnation's remote effect.
+            Timer::after_millis(250).await;
         }
     };
-    // USB and the physical display remain alive on HCI failure.
     select(runner.run(), service).await;
     log::error!("ble: service stopped after HCI failure");
 }

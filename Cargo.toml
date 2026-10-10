@@ -5,6 +5,7 @@ members = [
   "crates/build-support",
   "crates/companion-core",
   "crates/ble-protocol",
+  "crates/ble-session",
   "crates/bytecode-constants",
   "crates/script-protocol",
   "crates/keyboard-core",

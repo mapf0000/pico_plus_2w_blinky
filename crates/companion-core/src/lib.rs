@@ -21,6 +21,8 @@ pub const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
+    MissingKey,
+    Authentication,
     PermissionDenied,
     Busy,
     UsbUnavailable,
@@ -41,6 +43,8 @@ pub enum Failure {
 impl Failure {
     pub fn message(self) -> &'static str {
         match self {
+            Self::MissingKey => "Load the device's provisioning profile with --profile PATH",
+            Self::Authentication => "Device authentication failed; check the provisioning profile",
             Self::PermissionDenied => "Bluetooth permission denied",
             Self::Busy => "Another controller owns control",
             Self::UsbUnavailable => "USB keyboard is unavailable",

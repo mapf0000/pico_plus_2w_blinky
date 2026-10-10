@@ -118,7 +118,7 @@ impl<T: Transport> Client<T> {
                         .as_ref()
                         .is_some_and(|c| c.upload_timeout != Duration::ZERO)
                     {
-                        Duration::from_secs(90)
+                        Duration::from_secs(10)
                     } else {
                         REQUEST_TIMEOUT
                     },

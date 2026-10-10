@@ -18,10 +18,12 @@ const CLEANUP_TIMEOUT: Duration = Duration::from_millis(750);
 const SCAN_TIME: Duration = Duration::from_secs(2);
 const SERVICE: Uuid = Uuid::from_u128(ble_protocol::SERVICE_UUID);
 const INFO: Uuid = Uuid::from_u128(ble_protocol::INFO_UUID);
-const PAIR: Uuid = Uuid::from_u128(ble_protocol::PAIR_UUID);
+const AUTH: Uuid = Uuid::from_u128(ble_protocol::AUTH_UUID);
 const COMMAND: Uuid = Uuid::from_u128(ble_protocol::COMMAND_UUID);
 const RESULT: Uuid = Uuid::from_u128(ble_protocol::RESULT_UUID);
 const STATUS: Uuid = Uuid::from_u128(ble_protocol::STATUS_UUID);
+const _: () = assert!(ble_protocol::MAX_MESSAGE_LEN == ble_session::MAX_CIPHERTEXT);
+const _: () = assert!(ble_protocol::VERSION == 3 && ble_protocol::KIND_RECORD == 4);
 
 #[derive(Clone)]
 struct Command {
@@ -39,8 +41,11 @@ pub struct BleTransport {
 }
 
 impl BleTransport {
-    pub fn new() -> Self {
-        Self::spawn(Radio::default())
+    pub fn new(profile: Option<ble_session::provisioning::Profile>) -> Self {
+        Self::spawn(Radio {
+            profile,
+            ..Radio::default()
+        })
     }
 
     fn spawn(radio: impl RadioIo + Send + 'static) -> Self {
@@ -100,6 +105,8 @@ impl Transport for BleTransport {
 
 #[derive(Default)]
 struct Radio {
+    profile: Option<ble_session::provisioning::Profile>,
+    crypto: Option<ble_session::Session>,
     adapter: Option<Adapter>,
     devices: Vec<Device>,
     connected: Option<Peripheral>,
@@ -120,6 +127,7 @@ trait RadioIo {
 impl RadioIo for Radio {
     async fn cleanup(&mut self) {
         self.active = None;
+        self.crypto = None;
         self.token = 0;
         if let Some(peripheral) = self.connected.take() {
             let _ = tokio::time::timeout(CLEANUP_TIMEOUT, peripheral.disconnect()).await;
@@ -219,7 +227,12 @@ impl RadioIo for Radio {
                 let info = characteristic(&peripheral, INFO)?;
                 let bytes = peripheral.read(&info).await.map_err(failure)?;
                 let info = ble_protocol::Info::decode(&bytes).map_err(protocol_failure)?;
-                let status = read_status(&peripheral).await?;
+                let status = if self.profile.is_some() {
+                    self.authenticate().await?;
+                    self.snapshot().await?.1
+                } else {
+                    read_status(&peripheral).await?
+                };
                 Ok(Reply::Connected(Capabilities {
                     read_only: false,
                     script_version: script_protocol::VERSION,
@@ -237,15 +250,17 @@ impl RadioIo for Radio {
                 if !peripheral.is_connected().await.map_err(failure)? {
                     return Err(Failure::LinkLost);
                 }
-                Ok(Reply::Status(read_status(peripheral).await?))
+                if self.crypto.is_some() {
+                    let (_, status) = self.snapshot().await?;
+                    Ok(Reply::Status(status))
+                } else {
+                    Ok(Reply::Status(read_status(peripheral).await?))
+                }
             }
             Operation::Acquire => {
-                let peripheral = self.connected.as_ref().ok_or(Failure::LinkLost)?;
-                // An ATT authentication error triggers the OS pairing dialog.
-                peripheral
-                    .read(&characteristic(peripheral, PAIR)?)
-                    .await
-                    .map_err(failure)?;
+                if self.crypto.is_none() {
+                    self.authenticate().await?;
+                }
                 let code = self.control(ble_protocol::ACQUIRE).await?;
                 if code == ble_protocol::Code::Acquired {
                     Ok(Reply::Acquired)
@@ -272,9 +287,8 @@ impl RadioIo for Radio {
                 if code != ble_protocol::Code::UsbChanged {
                     return Err(code_failure(code));
                 }
-                Ok(Reply::Status(
-                    read_status(self.connected.as_ref().ok_or(Failure::LinkLost)?).await?,
-                ))
+                let (_, status) = self.snapshot().await?;
+                Ok(Reply::Status(status))
             }
             Operation::Run(frame) => {
                 let script_protocol::Message::Run { id, .. } =
@@ -335,14 +349,70 @@ impl Radio {
         self.token = self.token.checked_add(1).ok_or(Failure::IdExhausted)?;
         Ok(self.token)
     }
-    async fn upload(&self, kind: u8, token: u16, bytes: &[u8]) -> Result<(), Failure> {
+    async fn authenticate(&mut self) -> Result<(), Failure> {
+        let profile = self.profile.as_ref().ok_or(Failure::MissingKey)?;
+        let mut ephemeral = [0; 32];
+        getrandom::fill(&mut ephemeral).map_err(|_| Failure::Authentication)?;
+        let mut handshake = ble_session::Handshake::new(true, profile, ephemeral);
+        zeroize::Zeroize::zeroize(&mut ephemeral);
+        let mut message = [0; ble_session::HANDSHAKE_LEN];
+        handshake
+            .write(&mut message)
+            .map_err(|_| Failure::Authentication)?;
+        let token = self.next_token()?;
+        self.write_fragments(AUTH, ble_protocol::KIND_HANDSHAKE, token, &message)
+            .await
+            .map_err(authentication_io_failure)?;
+        let (kind, received_token, bytes) = self
+            .read_response()
+            .await
+            .map_err(authentication_io_failure)?;
+        if kind != ble_protocol::KIND_HANDSHAKE || received_token != token {
+            return Err(Failure::Authentication);
+        }
+        handshake
+            .read(&bytes)
+            .map_err(|_| Failure::Authentication)?;
+        self.crypto = Some(handshake.finish().map_err(|_| Failure::Authentication)?);
+        Ok(())
+    }
+    async fn upload(&mut self, kind: u8, token: u16, bytes: &[u8]) -> Result<(), Failure> {
+        use zeroize::Zeroize;
+        if bytes.len() + 1 > ble_session::MAX_PLAINTEXT {
+            return Err(Failure::InvalidData);
+        }
+        let mut plaintext = zeroize::Zeroizing::new(vec![kind]);
+        plaintext.extend_from_slice(bytes);
+        let mut encrypted = vec![0; plaintext.len() + ble_session::TAG_LEN];
+        let result = self.crypto.as_mut().ok_or(Failure::Authentication)?.seal(
+            token,
+            &plaintext,
+            &mut encrypted,
+        );
+        plaintext.zeroize();
+        let length = result.map_err(|_| Failure::Authentication)?;
+        self.write_fragments(
+            COMMAND,
+            ble_protocol::KIND_RECORD,
+            token,
+            &encrypted[..length],
+        )
+        .await
+    }
+    async fn write_fragments(
+        &self,
+        uuid: Uuid,
+        kind: u8,
+        token: u16,
+        bytes: &[u8],
+    ) -> Result<(), Failure> {
         let peripheral = self.connected.as_ref().ok_or(Failure::LinkLost)?;
         let characteristic = peripheral
             .characteristics()
             .into_iter()
             .find(|c| {
                 c.service_uuid == SERVICE
-                    && c.uuid == COMMAND
+                    && c.uuid == uuid
                     && c.properties.contains(CharPropFlags::WRITE)
             })
             .ok_or(Failure::Incompatible)?;
@@ -356,23 +426,61 @@ impl Radio {
         }
         Ok(())
     }
+    async fn read_response(&self) -> Result<(u8, u16, Vec<u8>), Failure> {
+        let peripheral = self.connected.as_ref().ok_or(Failure::LinkLost)?;
+        let characteristic = characteristic(peripheral, RESULT)?;
+        let mut receiver = ble_protocol::Receiver::new();
+        // At most four default-MTU reads for a handshake or encrypted snapshot.
+        for _ in 0..ble_protocol::MAX_RESPONSE_LEN.div_ceil(ble_protocol::PAYLOAD_LEN) {
+            let bytes = peripheral.read(&characteristic).await.map_err(failure)?;
+            let frame = ble_protocol::read_fragment(&bytes).map_err(protocol_failure)?;
+            let total = u16::from_le_bytes([frame[6], frame[7]]) as usize;
+            if total > ble_protocol::MAX_RESPONSE_LEN {
+                return Err(Failure::InvalidData);
+            }
+            if let Some(message) = receiver.push(frame).map_err(protocol_failure)? {
+                return Ok((message.kind, message.token, message.payload.to_vec()));
+            }
+        }
+        Err(Failure::InvalidData)
+    }
+    async fn snapshot(&mut self) -> Result<(ble_protocol::ResultValue, Status), Failure> {
+        let token = self.next_token()?;
+        self.upload(ble_protocol::KIND_CONTROL, token, &[ble_protocol::POLL])
+            .await?;
+        let (kind, sequence, encrypted) = self.read_response().await?;
+        if kind != ble_protocol::KIND_RECORD {
+            return Err(Failure::Authentication);
+        }
+        let mut plaintext = zeroize::Zeroizing::new([0; ble_protocol::SNAPSHOT_LEN]);
+        let length = self
+            .crypto
+            .as_mut()
+            .ok_or(Failure::Authentication)?
+            .open(sequence, &encrypted, &mut *plaintext)
+            .map_err(|_| Failure::Authentication)?;
+        if length != ble_protocol::SNAPSHOT_LEN {
+            return Err(Failure::InvalidData);
+        }
+        let result =
+            ble_protocol::ResultValue::decode(&plaintext[..20]).map_err(protocol_failure)?;
+        let status = ble_protocol::Status::decode(&plaintext[20..]).map_err(protocol_failure)?;
+        Ok((result, status_model(status)))
+    }
     async fn wait_result(
-        &self,
+        &mut self,
         token: u16,
         alternate: Option<u16>,
         terminal: bool,
     ) -> Result<ble_protocol::Code, Failure> {
-        let peripheral = self.connected.as_ref().ok_or(Failure::LinkLost)?;
-        let characteristic = characteristic(peripheral, RESULT)?;
         loop {
-            let bytes = peripheral.read(&characteristic).await.map_err(failure)?;
-            let value = ble_protocol::ResultValue::decode(&bytes).map_err(protocol_failure)?;
+            let (value, _) = self.snapshot().await?;
             if (value.token == token || alternate == Some(value.token))
                 && (!terminal || value.code != ble_protocol::Code::Accepted)
             {
                 return Ok(value.code);
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
     async fn control(&mut self, opcode: u8) -> Result<ble_protocol::Code, Failure> {
@@ -422,18 +530,33 @@ async fn read_status(peripheral: &Peripheral) -> Result<Status, Failure> {
         .await
         .map_err(failure)?;
     let status = ble_protocol::Status::decode(&value).map_err(protocol_failure)?;
-    Ok(Status {
+    Ok(status_model(status))
+}
+
+fn status_model(status: ble_protocol::Status) -> Status {
+    Status {
         usb_enabled: status.usb_enabled,
         usb_ready: status.usb_ready,
         host_agent_present: status.host_agent_present,
         uptime_secs: Some(status.uptime_secs),
-    })
+    }
 }
 
 fn protocol_failure(error: ble_protocol::Error) -> Failure {
     match error {
         ble_protocol::Error::Version => Failure::Incompatible,
         _ => Failure::InvalidData,
+    }
+}
+
+fn authentication_io_failure(error: Failure) -> Failure {
+    // A peer with a different key closes the connection instead of emitting an
+    // unauthenticated credential oracle. Preserve permission/timeout errors.
+    match error {
+        Failure::LinkLost | Failure::BluetoothUnavailable | Failure::InvalidData => {
+            Failure::Authentication
+        }
+        other => other,
     }
 }
 
@@ -490,7 +613,7 @@ async fn run(
             continue;
         }
         let timeout = match &command.request.operation {
-            Operation::Acquire => Duration::from_secs(90),
+            Operation::Acquire | Operation::Connect(_) => Duration::from_secs(10),
             Operation::Run(_) => Duration::from_secs(300),
             _ => IO_TIMEOUT,
         };

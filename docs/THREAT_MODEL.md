@@ -1,20 +1,49 @@
 # Current Bluetooth security boundary
 
-The control PC and physically operated Pico are trusted; the USB target may be
-hostile. BLE discovery/status/result disclose only fixed public diagnostics.
-Control requires authenticated encrypted pairing plus numeric comparison
-confirmed on the Pico. Confirmation is refused before the current code is
-rendered and expires after 30 seconds. Just Works does not authorize commands.
-No persistent bonds are written; reconnect requires physical confirmation.
-TrouBLE logging is disabled because its upstream security diagnostics include
-pairing codes and bond material. Application diagnostics omit keys/text/bytecode.
+The provisioning PC, control PC/profile and Pico firmware are trusted; the USB
+target may be hostile. A unique random 32-byte device key and device ID must be
+installed through a trusted provisioning route before unattended deployment.
+There is no universal default, unauthenticated BLE enrollment/reset, USB key
+retrieval or physical-confirmation requirement. No SMP pairing/bond is used.
 
-Only control acquisition/release, USB enable/disable and bounded keyboard effects
-are exposed over BLE. No shell, credentials, file contents or filesystem browsing
-is routed to BLE. Disconnect cancels this connection's effects, and old completion
-IDs cannot update a new connection. Local hardware jobs remain independent.
-One connection can occupy the radio and public information is readable without
-pairing; denial of service is an accepted prototype limitation.
+A fixed `Noise_NNpsk0_25519_ChaChaPoly_SHA256` handshake establishes fresh
+directional record keys with empty payloads and a service/version/device-bound
+prologue. Its first message is replayable, so it cannot grant authority or execute
+commands. A subsequent authenticated record proves possession of fresh session
+keys; encrypted Acquire grants control. All commands/results/status snapshots
+thereafter use authenticated records with strictly newer directional sequence
+numbers, including Cancel and Poll. Reconnect changes keys and never replays
+keyboard effects. Public Info/Status are unauthenticated diagnostics and must not
+be treated as peer identity or authority. See PROTOCOL.md for exact framing.
+
+Key possession authorizes the device, rather than identifying a particular PC.
+The prototype stores keys in private profile files on the trusted control PC and
+plaintext dedicated Pico flash; CRC only detects corruption. Unix loaders reject
+group/world-readable profiles. OS credential-store integration, Windows ACL
+acceptance, remote authenticated rotation and revocation are unfinished. Both the
+JSON profile and provisioning image contain the key and need private handling;
+back up credentials outside build output before deployment. Losing all copies
+requires another trusted provisioning route. Whole-flash reading, compromised
+firmware, physical extraction, control-PC compromise and radio traffic analysis
+are outside this protection. No secure boot/flash encryption claim is made.
+
+Fresh ephemeral randomness comes from OS getrandom on the PC and Embassy RP's
+ROSC RNG on the Pico. ROSC must remain running as configured; physical entropy
+quality/fault attacks are not validated. The no_std session core uses fixed
+buffers and zeroizing key types; caller-owned key/plaintext buffers are cleared.
+Upstream Noise scratch is not comprehensively zeroized or independently audited.
+TrouBLE logs stay disabled, and application diagnostics omit keys/text/bytecode.
+
+Only acquired control, USB enable/disable and bounded keyboard effects are exposed.
+No shell, credentials, file contents or filesystem browsing is routed over BLE.
+Disconnect cancels this connection's effects, and stale IDs cannot update a new
+connection. Local jobs and physical Y Stop remain independent.
+
+One connection can occupy the radio. Unauthenticated access expires 30 seconds
+after accept even under continuous reads/fragments, and disconnect has a 250-ms
+cooldown. These bounds do not prevent repeated connection attempts or radio
+jamming; strong denial-of-service resistance is outside the prototype. Crypto
+unit tests/compilation do not establish hardware/platform acceptance.
 
 The WLAN/AP/browser frontend and Python Worker have been removed. The following
 sections retain the previous USB bulk-crypto design as a historical reference.
@@ -95,7 +124,8 @@ These are review priorities, not claims that every listed defense is implemented
 
 ## Read-only BLE prototype
 
-The optional `ble` firmware feature advertises a public read-only GATT service.
+Historical v1 behavior (superseded by the current BLE v3 boundary above):
+the optional `ble` firmware feature advertises a public read-only GATT service.
 Anyone in radio range may connect and read a short firmware build label, device
 uptime, USB enabled/HID-ready flags and recent host-agent presence. It exposes no
 hostname, filesystem, credentials, logs, typed text or host/device control.

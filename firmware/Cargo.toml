@@ -62,8 +62,9 @@ script-protocol = { path = "../crates/script-protocol" }
 
 embassy-sync-ble = { package = "embassy-sync", version = "0.7.2", optional = true }
 ble-protocol = { path = "../crates/ble-protocol", optional = true }
-# Disable TrouBLE logging: upstream security diagnostics include passkeys/bond keys.
-trouble-host = { version = "=0.6.0", optional = true, default-features = false, features = ["peripheral", "gatt", "derive", "default-packet-pool", "default-packet-pool-mtu-128", "default-packet-pool-size-8", "security"] }
+ble-session = { path = "../crates/ble-session", optional = true }
+# Application-layer Noise owns authentication; omit SMP pairing and upstream diagnostics.
+trouble-host = { version = "=0.6.0", optional = true, default-features = false, features = ["peripheral", "gatt", "derive", "default-packet-pool", "default-packet-pool-mtu-128", "default-packet-pool-size-8"] }
 
 [features]
 psram = []
@@ -81,7 +82,7 @@ firmware = [
   "panic-probe",
   "cyw43",
   "cyw43-pio",
-  "dep:trouble-host", "dep:ble-protocol", "dep:embassy-sync-ble",
+  "dep:trouble-host", "dep:ble-protocol", "dep:ble-session", "dep:embassy-sync-ble",
 ]
 ## Enable USB to start automatically at boot (useful for debug runs)
 usb_autostart = []

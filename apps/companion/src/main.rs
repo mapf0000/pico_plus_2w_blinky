@@ -1,6 +1,7 @@
 mod app;
 mod backend;
 mod ble;
+mod profile;
 mod smoke;
 
 use clap::Parser;
@@ -13,6 +14,12 @@ use eframe::egui;
     about = "Native Pico companion feasibility app (mock or Bluetooth control)"
 )]
 struct Args {
+    /// Private per-device provisioning profile; required to acquire real BLE control.
+    #[arg(long, conflicts_with_all = ["mock", "create_profile"])]
+    profile: Option<std::path::PathBuf>,
+    /// Generate a private profile and matching .flash.bin; exits without device access.
+    #[arg(long, conflicts_with_all = ["mock", "ble", "self_test"])]
+    create_profile: Option<std::path::PathBuf>,
     /// Use an in-memory device.
     #[arg(long, conflicts_with = "ble")]
     mock: bool,
@@ -30,6 +37,17 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = Args::parse();
+    if let Some(path) = &args.create_profile {
+        let flash = profile::create(path)?;
+        println!(
+            "Created private profile {} and provisioning image {} (flash address {:#010x}). Keep both private and back up the profile securely.",
+            path.display(),
+            flash.display(),
+            ble_session::provisioning::FLASH_ADDRESS
+        );
+        return Ok(());
+    }
+    let profile = args.profile.as_deref().map(profile::load).transpose()?;
     args.ble = !args.mock;
     let mode = if args.ble {
         backend::Mode::Ble
@@ -38,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     if args.self_test {
         if args.ble {
-            return ble_smoke();
+            return ble_smoke(profile);
         }
         if args.mock_scenario != Scenario::Normal {
             return Err("--self-test uses the normal scenario; omit --mock-scenario".into());
@@ -63,12 +81,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Pico Companion — Mock"
         },
         options,
-        Box::new(move |cc| Ok(Box::new(app::CompanionApp::new(cc, mode)?))),
+        Box::new(move |cc| Ok(Box::new(app::CompanionApp::new(cc, mode, profile)?))),
     )?;
     Ok(())
 }
 
-fn ble_smoke() -> Result<(), Box<dyn std::error::Error>> {
+fn ble_smoke(
+    profile: Option<ble_session::provisioning::Profile>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use companion_core::{Action, Connection};
     use std::{
         thread,
@@ -77,12 +97,21 @@ fn ble_smoke() -> Result<(), Box<dyn std::error::Error>> {
     enum Phase {
         Scan,
         Connect,
+        Acquire,
         Samples(usize),
+        Release,
+        ReAcquire,
+        ReRelease,
         Disconnect,
         Reconnect,
     }
-    let backend = backend::Backend::start(backend::Mode::Ble, egui::Context::default())?;
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let authenticated = profile.is_some();
+    let backend = backend::Backend::start_with_profile(
+        backend::Mode::Ble,
+        profile,
+        egui::Context::default(),
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut phase = Phase::Scan;
     let mut revision = 0;
     let mut device_id = None;
@@ -107,6 +136,14 @@ fn ble_smoke() -> Result<(), Box<dyn std::error::Error>> {
                     phase = Phase::Connect;
                 }
                 Phase::Connect if snapshot.connection == Connection::Connected => {
+                    if authenticated {
+                        backend.send(snapshot.epoch, Action::Acquire)?;
+                        phase = Phase::Acquire;
+                    } else {
+                        phase = Phase::Samples(0);
+                    }
+                }
+                Phase::Acquire if snapshot.control_acquired && !snapshot.pending => {
                     phase = Phase::Samples(0);
                 }
                 Phase::Samples(count)
@@ -133,11 +170,20 @@ fn ble_smoke() -> Result<(), Box<dyn std::error::Error>> {
                             status.host_agent_present,
                             snapshot.last_rtt.unwrap_or_default().as_millis()
                         );
-                        backend.send(snapshot.epoch, Action::Disconnect)?;
-                        phase = Phase::Disconnect;
+                        if authenticated {
+                            backend.send(snapshot.epoch, Action::Release)?;
+                            phase = Phase::Release;
+                        } else {
+                            backend.send(snapshot.epoch, Action::Disconnect)?;
+                            phase = Phase::Disconnect;
+                        }
                     } else {
                         phase = Phase::Samples(count + 1);
                     }
+                }
+                Phase::Release if !snapshot.control_acquired && !snapshot.pending => {
+                    backend.send(snapshot.epoch, Action::Disconnect)?;
+                    phase = Phase::Disconnect;
                 }
                 Phase::Disconnect if snapshot.connection == Connection::Disconnected => {
                     backend.send(
@@ -147,8 +193,23 @@ fn ble_smoke() -> Result<(), Box<dyn std::error::Error>> {
                     phase = Phase::Reconnect;
                 }
                 Phase::Reconnect if snapshot.connection == Connection::Connected => {
+                    if authenticated {
+                        backend.send(snapshot.epoch, Action::Acquire)?;
+                        phase = Phase::ReAcquire;
+                    } else {
+                        println!(
+                            "Public BLE smoke passed: discovery, live status, disconnect and reconnect. No authentication or control writes."
+                        );
+                        return Ok(());
+                    }
+                }
+                Phase::ReAcquire if snapshot.control_acquired && !snapshot.pending => {
+                    backend.send(snapshot.epoch, Action::Release)?;
+                    phase = Phase::ReRelease;
+                }
+                Phase::ReRelease if !snapshot.control_acquired && !snapshot.pending => {
                     println!(
-                        "BLE smoke passed: discovery, info, three live status reads, disconnect and reconnect. No control writes."
+                        "Authenticated BLE smoke passed: fresh sessions, acquire/release, encrypted live status and reconnect. No Pico interaction or HID effects."
                     );
                     return Ok(());
                 }

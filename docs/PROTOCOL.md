@@ -10,11 +10,11 @@ Related documents:
 - [Python scripting reference](SCRIPTING.md)
 - [Threat model](THREAT_MODEL.md)
 
-## Bluetooth control v2
+## Bluetooth control v3
 
-Shared definitions: `crates/ble-protocol`. Version 1 was read-only; version 2
-is deliberately incompatible, so old firmware/apps fail negotiation.
-One connection, one outstanding logical request/effect, no automatic retries.
+Shared definitions: `crates/ble-protocol`; allocation-free crypto and provisioning:
+`crates/ble-session`. V3 deliberately rejects v1/v2 peers and plaintext commands.
+One connection, one outstanding logical request/effect, no effect retries.
 All integers are little-endian; reserved bytes must be zero.
 
 | UUID (128-bit) | Characteristic | Operation / size |
@@ -22,61 +22,107 @@ All integers are little-endian; reserved bytes must be zero.
 | `7069636f-0001-4c32-9b89-5d7a00000001` | Service | project service |
 | suffix `00000002` | Info | public read, 20 bytes |
 | suffix `00000003` | Status | public read, 12 bytes |
-| suffix `00000004` | Pairing gate | read, 1 byte (`1`); rejects with ATT insufficient authentication until numeric comparison is physically confirmed and encryption authenticated |
-| suffix `00000005` | Command | authenticated write with response, 9–20 bytes |
-| suffix `00000006` | Result | public read, 20 bytes |
+| suffix `00000004` | Auth | handshake fragment write with response, 9–20 bytes |
+| suffix `00000005` | Command | encrypted-record fragment write with response, 9–20 bytes |
+| suffix `00000006` | Result | sequential response-fragment reads, fixed 20 bytes |
 
-Info: bytes 0–3 `PBLE`, byte 4 version `2`, byte 5 control flag `2`,
+Info: bytes 0–3 `PBLE`, byte 4 version `3`, byte 5 control flag `4`,
 bytes 6–7 zero, bytes 8–19 printable ASCII build label with zero padding.
 Status: byte 0 version, byte 1 flags (bit 0 USB enabled, bit 1 USB ready,
 bit 2 agent recently present), bytes 2–3 zero, bytes 4–11 uptime seconds `u64`.
-No hostname, credentials, typed text or key material is exposed.
+These public diagnostics are not authenticated and do not grant authority.
 
-| Command offset | Field |
+### Handshake and records
+
+A unique random 32-byte PSK and 16-byte device ID are installed before deployment.
+Use exactly `Noise_NNpsk0_25519_ChaChaPoly_SHA256`, with empty handshake payloads.
+Prologue is the 16 ASCII bytes `pico-control-v3:` followed by the device ID.
+Each side supplies a fresh X25519 ephemeral for every handshake. Each of the two
+handshake messages is exactly 48 bytes. The companion writes the first on Auth
+and reads the second through Result. Completing the handshake does not acquire
+control: the first NNpsk0 message can be replayed. A valid fresh encrypted record
+must follow, and only encrypted Acquire grants the connection's control lease.
+
+Noise Split yields independent client-to-Pico and Pico-to-client keys. Transport
+records use ChaCha20-Poly1305 with associated data `[3, 4, seq_lo, seq_hi]`, and
+nonce four zero bytes followed by the sequence as little-endian `u64`. Sequences
+are independent nonzero `u16` values per direction, strictly increasing, allowing
+gaps but no replay. A skipped/incomplete upload cannot consume a nonce again.
+Disconnect/reconnect before exhaustion; every new connection has fresh keys.
+This is a project record envelope using Noise-derived keys, not Noise's implicit
+sequential transport framing. There is no plaintext fallback or OS bond.
+
+| Fragment offset | Field |
 | --- | --- |
-| 0 | version `2` |
-| 1 | kind: control `1`, script `2` |
-| 2–3 | nonzero connection-local monotonic `u16` token |
+| 0 | version `3` |
+| 1 | outer kind: handshake `3`, encrypted record `4` |
+| 2–3 | nonzero monotonic `u16` token/record sequence |
 | 4–5 | `u16` payload offset |
-| 6–7 | `u16` complete logical length (1–4,125) |
-| 8–19 | 1–12 payload bytes; last fragment uses its exact length |
+| 6–7 | `u16` complete length, at most 4,142 bytes |
+| 8–19 | 1–12 payload bytes |
 
-Fragments must be contiguous, with consistent token/kind/total. Reject gaps,
-overlaps, duplicates, reused/older/zero tokens, excess lengths and wrong versions.
-The first fragment of a newer token must have offset zero; it abandons any
-partial upload. Partial uploads expire after five seconds and cannot resume.
-Exhaustion requires reconnect, where a new firmware incarnation scopes ownership.
-ATT acknowledgement confirms a fragment, not HID admission or completion.
+Writes use exact final-fragment length. Result reads are always 20 bytes with
+zero padding after the final fragment's exact payload. Headers are untrusted:
+reassembly checks contiguous offsets, consistent token/kind/total, nonzero/newer
+tokens and lengths; records additionally authenticate their sequence and all
+plaintext. A newer token starting at offset zero abandons an incomplete upload.
+Five-second partial-upload expiry prevents resuming abandoned fragments. The
+companion uses one token space for its handshake and records. The server's record
+sequence is independent of the echoed handshake token.
 
-Control payload is exactly one opcode: `0` acquire, `1` release, `2` USB on,
-`3` USB off. Authentication precedes acquisition; the lease is scoped to this
-connection. Release/USB off require no reserved HID job. Script payload retains
-the existing 29-byte version-1 `script-protocol` run/cancel header (including its
-leading kind byte `8`), full request/process/effect `u64` IDs and up to 4,096 KBD1
-bytes. No USB tag or script version is reinterpreted. Cancel uses a newer fragment
-token to interrupt upload, then targets the full active IDs if already admitted.
+Result holds one finite response of at most 48 bytes. Each ATT read advances its
+fragment cursor; reading past the end fails. A new completed authenticated command
+or Poll replaces the previous response at offset zero. This permits cancellation
+of a partially read response. ATT acknowledgement confirms a fragment, not an
+authenticated record, effect admission or HID completion.
 
-Result: byte 0 version, byte 1 code, bytes 2–3 token, bytes 4–19 zero.
-Codes: idle `0` (token zero only), acquired `1`, released `2`, admitted `3`,
-completed `4`, cancelled `5`, rejected `6`, USB unavailable `7`, busy `8`,
-USB changed `9`. Run completion retains its run token; cancellation of a partial
-upload returns cancelled with the cancel token. The app accepts either for that
-scoped cancel. Terminal state persists until the next logical command; no
-notification subscription or receipt queue is needed. Unknown/malformed results
-fail closed. The client never replays a possibly executed effect.
+Encrypted command plaintext is one inner kind byte plus its payload: control
+`1`, script `2`. Control payload is exactly one opcode: Acquire `0`, Release `1`,
+USB on `2`, USB off `3`, Poll `4`. Except Poll and Acquire, controls require the
+lease; Release/USB off require no reserved HID job. Script retains the existing
+version-1 29-byte envelope, full request/process/effect `u64` IDs, leading kind
+byte `8`, and up to 4,096 KBD1 bytes. Maximum plaintext is therefore 4,126 bytes,
+plus the 16-byte tag. No USB tag, script version or KBD1 limit changes.
 
-Pairing is nonbonding authenticated encryption using numeric comparison.
-Pico X confirms a displayed six-digit code; Y rejects. The firmware allows 30
-seconds for physical confirmation, the native app up to 90 seconds for the OS
-pairing flow. Just Works and input-only/passkey-display fallbacks cannot grant
-control. Each connection requires new confirmation. Firmware completion delivery
-checks incarnation and full effect IDs before updating the result slot.
+Encrypted response plaintext is exactly 32 bytes: ResultValue (20) followed by
+Status (12). ResultValue: byte 0 version, byte 1 code, bytes 2–3 command token,
+bytes 4–19 zero. Codes: idle `0` (token zero only), acquired `1`, released `2`,
+admitted `3`, completed `4`, cancelled `5`, rejected `6`, USB unavailable `7`,
+busy `8`, USB changed `9`. Poll preserves this result token and terminal state.
+The server encrypts a fresh snapshot for every completed command/Poll; the client
+polls until a correlated response, timeout or disconnect. Snapshot record sequence
+and contained command/result token are different fields.
+
+Cancel uses a newer encrypted record to abandon an incomplete Run, then targets
+its full IDs if already admitted. Run completion retains its Run token; cancelling
+an upload not yet admitted returns Cancelled with the Cancel token. The client
+accepts either for that scoped Cancel. Disconnect invalidates incarnation-owned
+completion delivery and cancels only that connection's remote effect. Local
+payloads and physical Y Stop remain independent.
+
+Missing/corrupt provisioning, malformed handshake/record, authentication failure
+and sequence exhaustion fail closed. An unauthenticated connection expires 30
+seconds after accept, including under continuous GATT traffic; reads/fragments
+cannot extend that deadline. Each disconnect imposes a 250-ms advertising delay.
+The prototype does not provide strong radio denial-of-service resistance.
+
+### Factory provisioning record v1
+
+Dedicated two 4-KiB slots at `0x10BFC000..0x10BFE000`, separate from USB identity
+and absent from firmware ELF load segments. Each slot begins with a 64-byte
+record: `PKEY` at 0–3, version `1` at 4, zero at 5–7, nonzero `u32` sequence at
+8–11, IEEE CRC32 at 12–15, device ID at 16–31 and PSK at 32–63. CRC covers bytes
+0–11 and 16–63. Firmware chooses the valid newer sequence using wrap-aware
+comparison. All-zero ID/key is invalid; no compiled default exists. The initial
+provisioning image writes sequence 1 to slot 0 and leaves the remainder erased.
+CRC detects corruption; it is not authentication or encryption at rest. Remote
+key rotation is not implemented. See HARDWARE.md for trusted provisioning.
 
 ## Scope and conventions
 
 There are two application transports:
 
-1. Bluetooth GATT between the native companion and firmware (version 2 below).
+1. Bluetooth GATT between the native companion and firmware (version 3 above).
 2. A TLV byte stream between firmware and the host agent over the USB control CDC-ACM interface.
 
 Unless stated otherwise:
@@ -845,7 +891,9 @@ Terminal Control-C for that case. SHA-256 provides transfer integrity under the
 existing trusted-device distribution model, not independent device authenticity.
 
 
-## Read-only BLE feasibility service v1
+## Historical read-only BLE feasibility service v1
+
+Superseded by BLE v3 above; this section records the earlier feasibility wire format.
 
 Opt-in firmware feature `ble` adds a peripheral GATT service alongside WLAN.
 It does not change USB TLV or WebSocket contracts. There is no command, control
