@@ -77,23 +77,27 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 - `src/app.rs`: native egui rendering and controls.
 - `src/backend.rs`: bounded UI commands, Tokio backend and shutdown.
 - `src/smoke.rs`: deterministic headless mock lifecycle check.
-- `src/ble.rs`: bounded native BLE worker, read-only discovery/status and cleanup.
+- `src/ble.rs`: bounded native BLE worker, discovery/status, authenticated control,
+  keyboard upload/cancellation and cleanup.
 - `crates/companion-core`: platform-independent client state, keyboard lowering,
   correlation, deadlines and mock transport.
 
-The package is `pico-companion`. Choose `--mock` or `--ble`; BLE supports
-read-only status against firmware built with `--features ble`. No BLE control
-writes, authenticated pairing, or USB access are implemented. Native builds must remain independent of firmware asset
-generation and browser tooling. Require pairing before control. Keep device work out of UI callbacks, bound
-queues/diagnostics, and scope commands/results to a connection incarnation.
+The package is `pico-companion`. Bluetooth is the default; `--ble` is an explicit
+alias and `--mock` selects the deterministic mock. The default firmware supports
+BLE v2 numeric-comparison pairing, acquired control, USB on/off and bounded
+keyboard effects. Filesystem/file reception and Python scripting remain planned
+in `NATIVE_COMPANION_BLE_PLAN.md`. Native builds must remain independent of firmware
+asset generation and browser tooling. Require pairing before control. Keep device
+work out of UI callbacks, bound queues/diagnostics, and scope commands/results to
+a connection incarnation.
 
 ### Shared crates: `crates/`
 
-- `ble-protocol`: fixed-size, `no_std` read-only BLE information/status codecs and UUIDs.
 - `keyboard-core`: portable, language-neutral layouts, key parsing, lowering, and KBD1 encoding. It is `no_std` by default.
 - `firmware-exec`: strict, two-pass `no_std` KBD1 validator/executor.
 - `script-protocol`: versioned correlated companion-to-firmware effect envelopes.
-- `ble-protocol`: `no_std` information/status/result values and MTU-23 command fragmentation.
+- `ble-protocol`: `no_std` v2 information/status/result codecs, UUIDs and MTU-23
+  command fragmentation.
 - `bytecode-constants`: cross-target bytecode limits.
 - `build-support`: typed keyboard-preset generation, linker setup, and internal FAT agent-image generation.
 
@@ -282,6 +286,11 @@ Do not silently reuse an existing tag or reinterpret a payload without versionin
 
 - One connection, one outstanding request/effect, one bounded receiver.
 - Commands require authenticated encryption and physical confirmation of the current displayed code.
+- The user has authorized planning unattended PSK authentication in
+  `NATIVE_COMPANION_BLE_PLAN.md` milestone 0. Until that implementation lands, the
+  rule above describes BLE v2; the planned v3 uses provisioned-secret session
+  authentication instead of physical confirmation. Do not confuse the plan with
+  current firmware behavior or bypass authentication to remove the button prompt.
 - Keep TrouBLE diagnostic logging disabled: upstream security logs include key material.
 - Use writes with response fitting default ATT MTU 23; never assume negotiated MTU.
 - Tokens are nonzero, monotonic and never reused in a connection. Incarnations must not wrap.

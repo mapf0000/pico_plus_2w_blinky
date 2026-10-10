@@ -1,140 +1,334 @@
-# Native companion and Bluetooth plan
+# Native companion: remaining feature-parity plan
 
-Updated 2026-10-10 after the deployed Bluetooth keyboard demonstration milestone.
+Updated 2026-10-10. This is the active backlog for replacing the former Web UI
+with the native Rust/egui Bluetooth companion. Completed implementation and test
+history belong in [DEVICE_TESTING.md](docs/DEVICE_TESTING.md); remove completed
+items from this backlog as milestones land.
 
-## Scope decision
+## Baseline and scope
 
-The user requested: **“rip wlan out and implement bluetooth.”** This supersedes
-the original coexistence plan. Removed WLAN AP/DHCP/TCP/HTTP/WebSocket, browser
-frontend, RustPython Worker, generated asset pipeline and obsolete browser mocks.
-No transport registry, dual-controller arbitration or WLAN fallback is needed.
+Bluetooth discovery, connection, numeric-comparison pairing, control acquisition,
+USB on/off, layout-aware text effects and cancellation are implemented. The user
+confirmed pairing, real USB keyboard output and delayed cancellation on hardware.
+WLAN, HTTP/WebSocket, the Yew frontend and browser Python Worker have been removed.
+The target computer still connects to the Pico through USB HID/CDC and runs the
+host agent. The control computer runs the companion and connects through BLE.
 
-The product is a native Rust/egui app controlling the Pico over authenticated
-Bluetooth LE. The Pico remains the USB HID/CDC endpoint for the target computer.
-Keep the implementation small: one BLE connection, one pending logical request/
-effect, bounded fragmentation and the existing keyboard executor. Native Python,
-bulk file transfer, filesystem browsing and credential workflows are separate
-future features, not requirements for the current keyboard milestone.
+Keep egui/Glow, the bounded backend, one BLE connection and one HID job. Preserve
+connection ownership, priority cancellation and independent local payload execution.
+The user requires operation without physical Pico access, including the first
+connection. Replace numeric comparison with provisioned-secret authentication as
+milestone 0; the current firmware still requires a button until that lands.
+Add concrete operations as needed; no WLAN fallback or general transport framework
+is required. Python runs on the control computer.
 
-## Milestone status
+Parity means the former UI's useful workflows, including failure handling and
+security boundaries. Packaging and platform acceptance are additional release
+work. Shell execution and credential prompts are optional extensions: they were
+on-device daemon operations, not controls in the former Web UI. USB mass storage
+was already removed before this baseline and is not a parity requirement.
 
-| Milestone | Status | Evidence / remaining gate |
+## Research baseline and gaps
+
+Compared current source with commit `194e7c2`, the last commit before the
+Bluetooth-only removal (`2f6579c`). Historical sources can be read with
+`git show 194e7c2:<path>`; the old paths below are intentionally absent today.
+
+| Former workflow | Current companion / reusable code | Remaining work |
 | --- | --- | --- |
-| 1. Native shell and client | Complete | egui/Glow window, bounded Tokio backend, production KBD1 lowering, deterministic mock lifecycle, correlation/cancellation tests |
-| 2. Read-only BLE feasibility | Complete | actual macOS/Pico discovery, information, live status and reconnect passed; former WLAN coexistence gate withdrawn |
-| 3. Bluetooth-only keyboard demonstration | Complete and hardware accepted | WLAN/browser removal, BLE v2, numeric comparison, scoped completion, USB controls and text/cancel; verified flash, BLE/USB smoke, user-confirmed pairing, exact demo output and delayed cancellation |
-| 4. Hardware edge cases | Next | X/Y reject/timeout, physical Y Stop, USB enable/disable/detach, reconnect/re-pair, near-limit upload and local contention |
-| 5. Reliability and packaging | Planned after 4 | reconnect/forget/re-pair, repeated cycles/soak, measured RTT/memory/CPU/startup, platform builds, app bundle/permissions |
-| 6. Additional native workflows | Deferred | choose separately: host metadata/commands, authenticated bulk receiver, filesystem, supervised native scripting |
+| Unattended authorization (new deployment requirement) | Current BLE v2 requires physical numeric comparison on each connection | Provisioned per-device key, mutually authenticated encrypted session and control without Pico interaction |
+| Overview: USB state, firmware version/build, host OS, agent presence/version, CDC installation stage, compatibility errors | Basic build/protocol/USB/presence/uptime/RTT; `firmware/src/capabilities.rs` and `usb/bootstrap.rs` retain richer state | Versioned capability/metadata response, freshness and agent compatibility, bootstrap progress and actionable errors |
+| Start/stop USB | Implemented; fault cases remain unverified | Hardware acceptance for enable/disable, detach and job contention |
+| USB manufacturer/product editing and persistent save | `device_config.rs` still reads the two existing flash slots; mutation/save code was removed | Restore validated, transactional saving while USB is off; native editor and readback |
+| Python editor, generator execution, Start/Stop and errors | Text demo only; keyboard lowering, script envelopes and strict HID execution remain | Supervised interpreter, editor, generator send/throw, deadlines, local waits and capability checks |
+| Python `wait_event()` for buttons and connection/USB/agent changes | Status can supply capability transitions; device button publisher was removed | Authenticated, bounded button events; supervisor event routing and lifecycle semantics |
+| Host filesystem navigation | Agent listing/pagination and firmware page validation remain | BLE request/page relay; Home/Root/Up, breadcrumbs, hidden files, metadata, selection, pagination and errors |
+| Encrypted path/default-path transfer initiation and session reconnect | Agent session/crypto/sender and shared `transfer-crypto` / `transfer-protocol` remain | Native session client, authenticated BLE relay and transfer controls |
+| Downloads: queue, progress, rate/ETA, verification, save | No native receiver; `usb/events.rs` deliberately rejects delivery | Bounded stream-to-disk receiver, verification/receipt, safe saving and transfer activity UI |
+| Diagnostics: connection activity, filtering, errors-only, clear and autoscroll | Bounded static-message diagnostics | Bounded structured entries, operation/error context and equivalent viewing controls |
+| Connection loss and reconnect | Explicit reconnect and incarnation checks exist | Convenient recovery with fresh secret-authenticated sessions, stale-response rejection and no execution replay; platform acceptance |
 
-The updated native companion is open. The user confirmed acquired control after
-PC/Pico pairing and then confirmed real demo text output and delayed cancellation.
-These establish the first authenticated keyboard demonstration; broader fault/
-platform acceptance is still pending. Evidence is in DEVICE_TESTING.md.
+Historical evidence: `apps/frontend/src/app.rs`, `ui/overview.rs`, `ui/scripts.rs`,
+`ui/transfers.rs`, `ui/diagnostics.rs`, `api.rs`, `python.rs`,
+`apps/python-worker/src/lib.rs`, `docs/SCRIPTING.md`, and
+`firmware/src/http/routes/ws.rs` at `194e7c2`.
 
-## Implemented architecture
+Two distinctions prevent unnecessary work:
 
-```text
-Control PC                        Pico Plus 2 W             USB target PC
-native egui UI                    BLE GATT + pairing
-    |                                  |
-companion-core client <--- BLE ---> session-scoped control
-    |                                  |
-btleplug async actor              existing HID executor ---> keyboard input
-                                       +--- USB CDC ------> host agent
-```
+- The old USB Mac/Windows selector wrote `host.rs` state for status reporting;
+  no USB execution path consumed it. Display the agent-reported OS and keep the
+  existing target keyboard layout selector. Do not restore a nonfunctional toggle.
+- Execute/credential capabilities in old HELLO did not create browser RPCs.
+  Reaching Web UI parity does not require exposing either over BLE.
 
-- `apps/companion`: egui/eframe with Glow, bounded backend, btleplug radio actor.
-  Bluetooth is default; `--mock` is explicit. No firmware/browser build dependency.
-- `companion-core`: one pending request, connection incarnations, deadlines,
-  supported layouts, keyboard lowering and deterministic mock.
-- `ble-protocol`: shared `no_std` v2 codecs and fixed 4,125-byte reassembly.
-- `firmware/src/ble.rs`: one TrouBLE/CYW43 peripheral, pairing and dispatch.
-- `firmware/src/ble_control.rs`: checked nonreused incarnation, pairing display
-  state, active effect correlation and fixed terminal result slot.
-- `usb/hid.rs`: local/companion owners, strict validator, non-preemption, scoped
-  cancel, key-release cleanup, independent local completion and physical Y Stop.
-- `usb/events.rs`: explicitly unavailable bulk sink. A BLE control connection
-  cannot cause file ACKs without a native receiver. Existing USB tags remain.
-- `build-support`: linker, internal CDC agent image and typed presets only.
+## 0. Unattended authentication with a provisioned secret
 
-The host radio actor uses four queued requests and sixteen events. Priority
-reset/cancel interrupts upload/result polling rather than waiting behind Run.
-Old-generation requests/results are discarded and execution is never replayed.
-Firmware publishes completion before releasing HID admission without awaiting
-radio output. Result reads avoid a notification subscription/receipt queue.
+**Decision:** one random 32-byte pre-shared key (PSK) per Pico, provisioned before
+deployment, and a mutually authenticated Noise session over ordinary BLE GATT.
+No numeric comparison, button press, Bluetooth bond or display is required for
+the first connection, reconnect or device reboot. The companion imports the
+device profile once; possession of that key grants authority for that Pico.
 
-BLE writes are at most 20 bytes, including an eight-byte header. A monotonic
-nonzero connection token plus exact offsets scopes each logical message.
-New tokens abandon partial upload, permitting prompt cancellation. Partial state
-expires after five seconds. Strict script v1/KBD1 stays unchanged inside BLE v2.
-Read-only v1 firmware is deliberately incompatible with the new companion.
+Use `Noise_NNpsk0_25519_ChaChaPoly_SHA256` as the proposed fixed suite. Keep
+handshake payloads empty, then require a valid encrypted Acquire message before
+granting control. Never execute early handshake payloads: the first handshake
+message can be replayed. Subsequent requests, results, private metadata and events
+use the session's directional authenticated encryption, not an unprotected channel
+after a one-time login. A session authenticates a key holder, not an individual
+computer; per-computer credentials are unnecessary for the first implementation.
 
-Control requires authenticated encryption and physically confirmed numeric
-comparison. The current six-digit code must have actually rendered before Pico X
-can confirm. Y rejects and preserves Stop; confirmation expires after 30 seconds.
-Just Works/fallback pairing cannot grant control. No persistent bonding or flash
-layout/config-schema changes. Troubleshooting may require forgetting stale OS
-bonds. Upstream TrouBLE logging is disabled to avoid passkey/bond-key diagnostics.
+Implementation slices:
 
-## Recorded validation and size
+1. **Crypto feasibility:** build a portable fixed-buffer session core and test
+   host/Pico interoperability with Noise vectors and the existing host-side Snow
+   implementation. Start by evaluating `noise-protocol` with default features
+   disabled and a narrow RustCrypto/RNG adapter. It supports static dispatch and
+   allocation-free operation. Snow 0.10 supports `no_std` but requires `alloc`, so
+   do not bring the current `transfer-crypto` dependency tree into firmware.
+   Verify PSK support, zeroization, embedded compilation, stack/RAM/code size and
+   handshake execution time before choosing the firmware crate.
+2. **Provisioning:** generate the PSK on a trusted provisioning computer and
+   install it before deployment through the firmware/provisioning workflow. Use
+   private inputs, never a universal default or a checked-in key. Store the key
+   in dedicated versioned persistent configuration, separate from USB identity;
+   review flash layout and preserve it on ordinary firmware updates. Import the
+   profile independently into the control PC's OS credential store. The untrusted
+   USB target/host agent must never generate, receive or retrieve this control key.
+   An already deployed device without a key needs an existing trusted provisioning
+   or update route; unauthenticated BLE cannot safely bootstrap trust by itself.
+3. **BLE v3 session:** deliberately reject v2 peers; provide minimal public
+   discovery and bounded handshake/record characteristics. Transport access must
+   not trigger the old SMP numeric-comparison gate. Protect operations at the
+   application layer, so security does not depend on Just Works or OS pairing.
+   Bind the handshake prologue to this service, version and provisioned device
+   identity. Use fresh cryptographic ephemeral keys on every connection/reboot.
+   Bound handshake work, timeout and failed attempts; unauthenticated idle clients
+   must release the single connection so they cannot hold it indefinitely.
+4. **Protected control:** authenticate complete bounded records before parsing
+   or dispatching commands. Account for the 16-byte AEAD tag and framing overhead
+   above the existing 4,125-byte script envelope without increasing KBD1 limits.
+   Define strict directional sequencing, fragment bounds and loss handling;
+   reject tampering, duplicate/out-of-order records and prior-session ciphertext.
+   Fragmentation headers are untrusted and may never authorize an effect.
+   Keep Cancel/Disconnect priority, full effect IDs and incarnation ownership.
+   Disconnect clears session keys and remote work; local payloads stay independent.
+5. **Companion workflow and key lifecycle:** import/select the device profile,
+   Connect, authenticate, acquire control; no Pico confirmation. Reconnect can
+   authenticate automatically but never replay commands. Keep secrets out of
+   diagnostics, command-line arguments and exports except an explicit private
+   provisioning export. Plan authenticated, atomic key rotation with a bounded
+   old/new transition and reboot/interruption tests; there is no remotely callable
+   unauthenticated reset. Retain a secure backup: losing all authorized credentials
+   requires a separate trusted reprovisioning route, not a button fallback.
 
-- Targeted native/protocol/executor/build-support/script suites: 44 tests passed.
-- Firmware portable display/bootstrap suite: 31 tests passed.
-- Host-agent: 24 unit tests plus six macOS PTY end-to-end tests passed.
-- Transfer crypto/protocol: three/six tests passed; keyboard layout matrix: four.
-- Device test tool: five tests and targeted Clippy passed.
-- Native/firmware portable Clippy, formatting, mock self-test, native release,
-  embedded release and embedded no_std codec check passed.
-- Actual default firmware verify-flash/reboot passed; persistent slots excluded.
-- Actual BLE discovery/info/three status reads/disconnect/reconnect passed;
-  latest status RTT 104 ms. No control writes in this automated board test.
-- User confirmed physical pairing/control acquisition and successful demo text
-  plus cancellation during the initial delay on the real USB target.
-- Actual USB suite: 11/11 protocol cases, host-agent handshake and two keepalives.
-  No HID reports or source files used. Unavailable bulk open correctly aborted.
+Acceptance: real first connection, reconnect and power cycle require no Pico
+interaction; wrong/missing keys, wrong device/context, replayed handshake/records,
+tampered commands/results and authentication timeouts never grant control. Both
+directions verify the peer before trusting private data. Verify MTU-23 operation,
+bounded failure handling, key persistence, interrupted rotation and prompt remote
+cancellation without using physical Stop. Physical Y Stop remains available when
+someone is present, but no required operator workflow depends on it.
 
-| Linked measurement | Before (WLAN + read-only BLE) | Bluetooth only |
-| --- | ---: | ---: |
-| Firmware allocated flash sections, including four-MiB internal image | 9,862,860 bytes | 4,857,200 bytes |
-| Static striped SRAM end | 263,552 bytes | 92,508 bytes |
-| Stripped native release | 7,825,264 bytes | 7,858,720 bytes |
+## 1. Stable controls, complete overview and USB identity
 
-Runtime stack/peak RAM, idle CPU and startup remain unmeasured. One connection,
-three L2CAP channels and eight 128-byte BLE packets are statically allocated.
-Application load ends at `0x100A1D78`, below the internal image `0x10BFE000`;
-persistent slots remain at `0x10FFE000` and `0x10FFF000`. Static striped SRAM
-leaves 431,780 bytes before runtime stacks. Hardware details and exact checks:
-[DEVICE_TESTING.md](docs/DEVICE_TESTING.md).
+Implement in small changes: polling/UI state first, metadata next, identity last.
+Use milestone 0's protected record path for metadata/configuration requests and
+responses; milestone 2 extends it with streamed pages/events and receiver credit.
+The flicker fix can land independently of authentication.
 
-## Next acceptance steps
+- **Button flicker:** the user sees flicker roughly every second. Code inspection
+  shows `Client::tick()` creates a global pending Status request and buttons gate
+  on `snapshot.pending`; this is a likely cause, not a confirmed rendering diagnosis.
+  Separate background refresh from user-operation busy state. Queue a bounded
+  user intent behind an in-flight read without allowing conflicting mutations;
+  retain immediate Cancel/Disconnect priority. Verify appearance and clicks in
+  the actual connected window over multiple polling cycles.
+- Expose firmware version/build, supported layouts/limits, agent version/OS and
+  presence freshness, filesystem/transfer versions, and CDC bootstrap stage/error.
+  Reuse `capabilities.rs` and `usb/bootstrap.rs`; avoid parallel copies of state.
+  Gate workflows by advertised support and agent availability. Keep sensitive
+  metadata behind authenticated control; existing public discovery stays minimal.
+- Restore configuration mutation and persistence using the current printable
+  ASCII bounds (manufacturer 32 bytes, product 48). Reject edits while USB is
+  active, report flash failures, and acknowledge success only after persistence.
+  Preserve the existing slot/schema/layout and apply identity on next USB start.
+  Review flash-write safety while the BLE stack is running.
+- Add operation context, filtering, errors-only, clear and autoscroll to bounded
+  diagnostics. Host data remains text; omit secrets, script text and file contents.
 
-1. Pairing/control and delayed text/cancel are already confirmed on hardware.
-   Next reject once with Y and once by timeout, ensuring no control is granted;
-   reconnect/re-pair and confirm old commands are not replayed.
-2. Verify USB enable/disable and local-preset contention.
-3. Cancel during upload; press physical Y during another effect.
-   Confirm all keys release, no text resumes and a new effect can be admitted.
-4. Test local-preset contention, USB disable/enable, USB detach during a job, BLE
-   disconnect and app exit. Old completions/cancels cannot affect a new connection.
-5. Exercise a valid near-4-KiB effect over default-size fragments, repeated
-   reconnect/re-pair and a soak. Measure RTT distributions and app resources.
+Acceptance: refresh never flashes controls or swallows clicks; unsupported or
+absent-agent features explain why they are unavailable; identity validation and
+flash failure are tested; saved identity survives reboot and USB enumeration.
+Verify USB toggles, authentication failure/timeout, physical Y Stop, detach, disconnect,
+partial-upload cancellation, near-limit effects and local-preset contention.
+Record pending and completed board checks in DEVICE_TESTING.md.
 
-Linux/Windows physical BLE and permission packaging remain unverified. Add those
-only after remaining macOS/Pico edge-case checks pass. Keep native Python and bulk
-transfer out of this acceptance change. The next workflow should be selected from
-actual usage; bulk transfer needs an authenticated receiver, bounded storage,
-verification and real backpressure before USB chunks may be acknowledged.
+## 2. Bounded BLE responses/events and filesystem browsing
 
-## Run commands
+This is the shared prerequisite for filesystem pages, Python button events and
+file streaming. Today's 20-byte Result slot only carries keyboard/control codes;
+it cannot return directory pages or file records. `usb/events.rs` is an unavailable
+sink, so a new screen alone cannot restore these workflows.
 
-```sh
-cargo run -p pico-companion
-cargo run -p pico-companion -- --mock --self-test
-cargo run -p pico-companion -- --ble --self-test
-cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
-```
+- Extend `ble-protocol` with explicitly versioned request/response/event framing,
+  correlation, connection ownership and capability negotiation, building on the
+  protected metadata/configuration slice. Negotiate additions to BLE v3 without
+  accepting a downgrade to the old control gate or plaintext operations.
+- Add an authenticated outgoing GATT characteristic and native subscription.
+  Use notifications with explicit application credit/acknowledgement for streaming;
+  notification submission does not prove receiver consumption. Keep command
+  results, Cancel/Disconnect and physical Stop responsive during streaming.
+- Start with MTU-23 support. Measure negotiated MTU and test larger fragments
+  within stack/characteristic limits. Current packets are eight fixed 128-byte
+  buffers; a larger MTU requires an explicit packet-pool/memory review. Never
+  assume an OS supplies a large MTU or increase all buffers indiscriminately.
+- Replace the unavailable sink with one connection-owned bounded relay; separate
+  pure payload validation from BLE delivery. Reuse the existing sole CDC owner,
+  `CtrlCommand` queue and `usb/ctrl/relay` validation. Remove browser JSON/kind
+  wrappers at this adapter boundary where practical; preserve USB wire versions.
+- Define bounds before coding: fragment size, logical record maximum (USB payloads
+  are at most 2,048 bytes), reassembly storage, queues, credits and deadlines.
+  Reset partial uploads, pages and queued events on connection loss. No stale
+  receiver can consume or acknowledge a replacement connection's records.
+- Implement correlated filesystem list/cancel and validated pages using existing
+  filesystem v1. Recover pure decoding/state from the old `filesystem.rs` into
+  native code; replace Yew rendering. Preserve cursor/hidden/entry-type semantics,
+  superseded-request cancellation and list deadlines; bound accumulated entries.
+- Restore best-effort released-button events from display routing, excluding
+  gestures consumed by menus, Payloads and device-wide Stop. Keep display
+  hardware adapters out of protocol/state code.
 
-Builds need stable Rust and the embedded target, not Trunk/WASM/Python. Flashing
-continues to require an explicit user request and available hardware. No commits
-or pushes are made by agents unless requested.
+Acceptance: fragmented maximum-size pages, malformed frames, queue saturation,
+stale pages and reconnect are covered. Real browsing supports Home/Root/Up,
+breadcrumbs, hidden files, Load more, path selection and actionable errors.
+Run a synthetic record stream at MTU 23 and the negotiated larger MTU; record
+throughput, queue high-water marks and Cancel/Stop latency. Set measured transfer
+timeouts before building the download workflow. No assumed Wi-Fi-equivalent rate.
+
+## 3. Native Python scripting
+
+Depends on milestone 2 for complete event parity; interpreter/supervisor work can
+start independently. Preserve the former Python API instead of inventing a DSL.
+
+- Recover the pure VM/prelude and tests from the old Worker. Keep RustPython 0.6.0
+  and its compatible Ruff 0.16.5 pins initially; avoid unrelated upgrades.
+  Add a supervised child process launched only on Start, potentially a helper
+  mode of the same executable, with bounded versioned IPC and hard termination.
+  No interpreter execution in egui callbacks or the BLE actor.
+- First run a small feasibility spike: generators, send/throw, infinite loops,
+  allocation exhaustion, Stop, denied imports and startup/size/peak-RAM measurement.
+  A child process provides termination/crash containment, not a filesystem/network
+  sandbox. Choose and document the isolation/resource boundary before shipping.
+  If native restrictions cannot preserve the former boundary simply, evaluate an
+  interpreter-only WASM module with a native runtime and no host/WASI capabilities.
+  This would not restore the browser frontend. Measure cost rather than assuming
+  either interpreter packaging option is the lightest.
+- Restore `layout`, `tap`, `modtap`, `text`, `sleep`, `wait_event`, `require_usb`
+  and `require_host_agent`, the existing `PicoError` subclasses and generator
+  send/throw behavior. Add a general validated keyboard-effect submission API to
+  `companion-core`; today's UI action only submits text. Reuse script v1 and KBD1.
+- Restore 32-KiB/1,024-line source limits, 30-second startup, 500-ms subsequent
+  steps, 1,024-character text and 4,096-byte KBD1, one process/effect and bounded
+  diagnostics. Establish an enforceable native memory limit; the former WASM
+  linear-memory ceiling was 128 MiB. Maintain device-effect completion deadlines.
+- Keep timers/event waits in the supervisor. Buffer at most 32 button events,
+  dropping oldest; do not replay capability transitions or events lost offline.
+  Connection loss throws into an outstanding effect without retrying keystrokes;
+  a script may catch the error and retain state while the app remains open.
+  App exit/Stop kills the child and best-effort cancels its scoped device effect.
+- Add source editor, Start/Stop, Ctrl/Cmd+Enter, explicit running/waiting/fault
+  states, bounded diagnostics and API help. Source edits affect the next run.
+
+Acceptance: former API examples and generator tests pass, including loops,
+send/throw and exception recovery. A non-yielding script cannot freeze the UI;
+Stop and timeouts terminate it. Verify button waits, capability changes,
+disconnect/re-authentication, HID cancellation and key release on hardware.
+
+## 4. Encrypted file reception and saving
+
+Depends on milestone 2. Reuse transfer/session v2 and the current host agent;
+port pure session/store logic from the old `transfer/secure.rs` and `store.rs`.
+Replace browser IndexedDB/download adapters with native streaming storage.
+
+- Establish the existing in-memory Noise session with the host agent over the
+  secret-authenticated, acquired BLE connection. Retain per-file AEAD, strict lengths,
+  ordering, SHA-256 and the encrypted final receipt; no plaintext downgrade.
+  The control PSK authenticates the companion/Pico session, not the source computer
+  or file. Keep it separate from the host file-transfer session and keys.
+- Carry session envelopes and encrypted open/chunk/close records through the
+  bounded relay. Retain firmware's public structure/order checks without giving
+  it file keys. USB ACK credit must reflect bounded downstream capacity; BLE
+  receiver credit advances only as authenticated records are accepted into bounded
+  storage work. Never ACK dropped records or equate notifications with disk writes.
+  Final success requires verification and the native receiver's encrypted receipt.
+- Stream to app-owned temporary files on a worker, update the hash incrementally,
+  and bound staging work, active transfers, history and cumulative storage.
+  Handle full disk, write failures, app exit and disconnect with abort/cleanup.
+  Never allocate a whole file in memory or restore the PSRAM WebSocket batch pool.
+- Restore encrypted path input, Queue transfer, Set as default, Queue default and
+  session reconnect. Show queued/receiving/verifying/finished/failed/aborted state,
+  byte progress, rate/ETA and useful error/retry counts. Retry transport records
+  only under the existing exact-ciphertext rules; never reuse a nonce with new data.
+- Save verified files through an explicit destination choice. Treat host filenames
+  as display metadata, not local paths: prevent traversal, overwrite surprises and
+  symlink escapes. Never automatically open, execute or interpret downloaded files.
+
+Acceptance: byte-exact multi-chunk and empty-file reception; authenticated manifest,
+ordering/length/hash failures; malformed/duplicate records, retry/timeout, slow/full
+disk, disconnect and saturated queues. Demonstrate a representative real file and
+record throughput and control latency. Revise credits/timeouts from measurements,
+including the existing five-second USB ACK timeout. Four firmware relay states do
+not automatically justify four simultaneous native downloads.
+
+## 5. Recovery, packaging and release acceptance
+
+- Provide clear scan/profile import/authenticate/reconnect and wrong-key errors.
+  Reconnect uses a fresh session without Pico interaction; preserve intentional
+  control acquisition and never replay effects. OS bonding is not a prerequisite.
+- Test repeated connect/control/cancel/disconnect cycles, soak, app shutdown and
+  device reboot. Measure idle CPU/RAM, startup and release artifact size, including
+  interpreter and staging components; keep heavyweight work lazy.
+- Package the macOS app with the required Bluetooth permission metadata and helper
+  discovery. Then validate real Windows/Linux BLE and their installation/permission
+  paths; compilation alone is not platform acceptance. Do not add an updater first.
+- Update README/operator workflows, AGENTS, architecture, protocol, scripting,
+  threat model and device acceptance records with each implemented milestone.
+  Legacy WebSocket sections should remain clearly historical until migrated.
+
+Parity is reached when every workflow in the gap table works through the native
+app with the USB target, has the stated failure handling, and has recorded hardware
+acceptance. Packaging/platform claims require their own actual-device evidence.
+
+## Technical sources and validation
+
+Research used the repository snapshot above and installed dependency sources.
+The [Noise specification](https://noiseprotocol.org/noise.html#pre-shared-symmetric-keys)
+defines PSK handshakes; the application still owns framing, replay policy and
+authorization timing. The [Noise-Rust project](https://github.com/blckngm/noise-rust)
+documents allocation-free `no_std` support. Its RustCrypto defaults include system
+RNG features: select/adapt primitives explicitly for the Pico rather than copying
+the default dependency configuration. [Snow's documentation](https://docs.rs/snow/0.10.0/snow/)
+states that its `no_std` mode needs allocation. These are feasibility candidates,
+not a completed embedded security or performance validation.
+
+The installed btleplug 0.13.4 exposes `mtu()`, `subscribe()` and `notifications()`;
+TrouBLE 0.6.0 provides the GATT stack. These APIs enable the proposed outgoing
+path but do not establish throughput or application backpressure. See the
+[btleplug Peripheral API](https://docs.rs/btleplug/latest/btleplug/api/trait.Peripheral.html).
+
+The old Worker already has native RustPython tests and uses
+`Interpreter::without_stdlib`; reuse is feasible, while native isolation remains
+to be proven. For the optional WASM spike, Wasmtime documents
+[sandbox boundaries](https://docs.wasmtime.dev/security.html) and
+[execution interruption](https://docs.wasmtime.dev/examples-interrupting-wasm.html).
+Its [configuration API](https://docs.wasmtime.dev/api/wasmtime/struct.Config.html)
+also explains why interruption needs bounded memory. No runtime dependency has
+been selected or added by this planning update.
+
+Use the affected suites in [AGENTS.md](AGENTS.md#validation-matrix). Extend protocol
+tests for malformed/boundary/order/ownership cases, supervisor tests for process
+termination and reconnect, and receiver tests for storage/backpressure. Firmware
+protocol/capacity/flash changes require an embedded release build and size review.
+UI changes require the actual native window; authentication, HID and streaming require
+board checks. Flash only when explicitly authorized. Update this backlog after
+each accepted milestone; retain test evidence in DEVICE_TESTING.md.

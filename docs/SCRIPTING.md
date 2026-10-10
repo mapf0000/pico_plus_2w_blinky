@@ -15,6 +15,7 @@ current connection; disconnect cancels remote work; Pico Y stops any active job.
 No timeout/reconnect replays execution. Layout selection describes the USB
 computer's active input layout, not the companion's input layout.
 
-Native Python would require a separately supervised process, bounded IPC, hard
-termination and a reviewed isolation boundary. It is deferred in
-[the plan](../NATIVE_COMPANION_BLE_PLAN.md).
+Native Python requires a separately supervised process, bounded IPC, hard
+termination and a reviewed isolation boundary. Restoring the former Python API
+and button/capability events is a feature-parity milestone in
+[the plan](../NATIVE_COMPANION_BLE_PLAN.md#3-native-python-scripting).
