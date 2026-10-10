@@ -128,3 +128,30 @@ The former implementation plan required the following acceptance coverage. Prese
 - Disconnect/reconnect under queue pressure, real USB-to-WebSocket backpressure, browser decryption/hash/persistence failures, and bounded receiver resource use against a hostile source PC.
 
 Use [AGENTS.md](../AGENTS.md#validation-matrix) for reproducible build/test commands and [THREAT_MODEL.md](THREAT_MODEL.md#receiver-defenses-and-review-priorities) for the security review scope. Frontend browser integration tests and Linux/Windows builds were not run in the recorded dependency upgrade; that gap must not be inferred closed from macOS or Worker-only tests. Independent cryptographic review, fuzzing, and sustained connected-browser/hardware tests remain follow-up work.
+## CDC installation checks
+
+Run the host-side installer integration suite on native Apple Silicon macOS:
+
+```sh
+scripts/test-cdc-installer
+```
+
+This suite uses temporary PTYs and a compiled descriptor-audit helper as its
+downloadable executable; it never touches physical USB, sends HID reports, or
+starts the real agent. It covers fragmented installer and binary delivery,
+fullblock/byte readers, size/digest verification, detached descriptor closure,
+corruption, malformed metadata, symlink rejection, early EOF, watchdog expiry,
+interrupt cleanup, staging cleanup, and child-process cleanup. The serial glob
+is substituted with a temporary test path; watchdog expiry uses a shorter test
+interval. These substitutions do not change the receiver protocol.
+
+The existing `scripts/device-test` safety boundary remains unchanged. CDC
+installation hardware checks are separate and explicitly opt-in: they flash
+firmware, receive an executable, modify an installation directory, and launch
+an agent. Stop an existing agent first. Provision a unique `PICO_USB_SERIAL`
+and build/package from source, then select the manual-arm action on the board
+and enter the receiver command from README. Verify exact artifact equality and
+a real TLV handshake, then test repeat installation, Y Stop, unplug during
+transfer, and return to normal control service. Check physical Terminal/HID
+behavior separately on US and DE input layouts. Current single-Mac research
+results and remaining acceptance gates are recorded in the root CDC plan.

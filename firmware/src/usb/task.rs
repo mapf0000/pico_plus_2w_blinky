@@ -72,6 +72,9 @@ pub async fn usb_task(
         crate::usb::usb_supervisor::notify_started();
         crate::usb::hid::USB_READY.store(false, Ordering::SeqCst);
         crate::usb::ctrl::CTRL_READY.store(false, Ordering::SeqCst);
+        crate::usb::bootstrap::cancel();
+        crate::usb::bootstrap::release();
+        crate::usb::bootstrap::CAN_ARM.store(false, Ordering::Release);
 
         let cfg = build_usb_config().await;
 
@@ -164,6 +167,9 @@ pub async fn usb_task(
             Timer::after_millis(delay).await;
         }
         usb.disable().await;
+        crate::usb::bootstrap::cancel();
+        crate::usb::bootstrap::release();
+        crate::usb::bootstrap::CAN_ARM.store(false, Ordering::Release);
         crate::usb::hid::USB_READY.store(false, Ordering::SeqCst);
         crate::usb::ctrl::CTRL_READY.store(false, Ordering::SeqCst);
         crate::usb::usb_supervisor::notify_stopped();
@@ -191,7 +197,7 @@ async fn build_usb_config() -> UsbConfig<'static> {
     cfg.manufacturer = Some(identity.manufacturer.as_str());
     cfg.product = Some(identity.product.as_str());
 
-    cfg.serial_number = None;
+    cfg.serial_number = option_env!("PICO_USB_SERIAL");
 
     cfg.max_power = USB_CFG_MAX_POWER_MA;
     cfg.max_packet_size_0 = USB_MAX_PACKET_SIZE_0;

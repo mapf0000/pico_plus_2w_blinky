@@ -40,11 +40,57 @@ pub struct Hello {
     pub firmware: FirmwareBuild,
     pub protocols: ProtocolVersions,
     pub host_agent: HostAgentInfo,
+    #[serde(default)]
+    pub cdc_bootstrap: Option<CdcBootstrapInfo>,
     pub keyboard: KeyboardCapabilities,
     #[serde(default)]
     pub features: Vec<String>,
     #[serde(default)]
     pub privileged_operations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CdcBootstrapInfo {
+    pub version: u16,
+    pub available: bool,
+    #[serde(default)]
+    pub busy: bool,
+    pub state: CdcBootstrapState,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CdcBootstrapState {
+    Idle,
+    Armed,
+    Downloading,
+    Verified,
+    Failed,
+    Cancelled,
+}
+
+impl CdcBootstrapInfo {
+    pub fn active(&self) -> bool {
+        self.version == 1
+            && (self.busy
+                || matches!(
+                    self.state,
+                    CdcBootstrapState::Armed | CdcBootstrapState::Downloading
+                ))
+    }
+    pub fn label(&self) -> &'static str {
+        if self.version != 1 || !self.available {
+            return "Unavailable";
+        }
+        match self.state {
+            CdcBootstrapState::Idle => "Ready",
+            CdcBootstrapState::Armed => "Waiting for Terminal",
+            CdcBootstrapState::Downloading => "Installing",
+            CdcBootstrapState::Verified => "Waiting for agent",
+            CdcBootstrapState::Failed => "Failed",
+            CdcBootstrapState::Cancelled => "Stopped",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -844,6 +890,30 @@ pub async fn filesystem_cancel(request_id: u64) -> Result<(), ApiError> {
 mod tests {
     use super::*;
 
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn bootstrap_status_is_optional_and_quiet_recovery_stays_busy() {
+        let legacy: Hello = serde_json::from_str(r#"{"event_type":"hello","version":1,"firmware":{"version":"0.1.0","build":"test"},"protocols":{"websocket":3,"transfer":2,"filesystem":1},"host_agent":{"present":false,"version":null,"hostname":null},"keyboard":{"layouts":[],"features":[]}}"#).unwrap();
+        assert_eq!(legacy.cdc_bootstrap, None);
+        let old: CdcBootstrapInfo =
+            serde_json::from_str(r#"{"version":1,"available":true,"state":"idle"}"#).unwrap();
+        assert!(!old.active());
+        let recovering: CdcBootstrapInfo =
+            serde_json::from_str(r#"{"version":1,"available":true,"busy":true,"state":"failed"}"#)
+                .unwrap();
+        assert!(recovering.active());
+        assert_eq!(recovering.label(), "Failed");
+        assert!(
+            serde_json::from_str::<CdcBootstrapInfo>(
+                r#"{"version":1,"available":true,"state":"unknown"}"#
+            )
+            .is_err()
+        );
+    }
+
     fn hello(websocket: u16) -> Hello {
         Hello {
             event_type: "hello".into(),
@@ -862,6 +932,7 @@ mod tests {
                 version: Some("0.1.0".into()),
                 hostname: Some("test-host".into()),
             },
+            cdc_bootstrap: None,
             keyboard: KeyboardCapabilities {
                 layouts: vec!["mac_de-DE".into()],
                 features: vec!["hid_keyboard".into()],

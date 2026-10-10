@@ -1,9 +1,9 @@
-//! macOS German layout overrides.
+//! macOS German overrides for a generic HID keyboard classified as ANSI.
 use super::{CharMapping, LayoutOverride};
 use crate::{
-    KEY_0, KEY_2, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9, KEY_BACKSLASH, KEY_COMMA, KEY_DOT, KEY_MINUS,
-    KEY_NON_US_BACKSLASH, KEY_RIGHT_BRACKET, KEY_SLASH, KEY_SPACE, KeyTap, MOD_LALT, MOD_LSHIFT,
-    Mods,
+    KEY_0, KEY_2, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9, KEY_BACKSLASH, KEY_COMMA, KEY_DOT, KEY_GRAVE,
+    KEY_MINUS, KEY_NON_US_BACKSLASH, KEY_RIGHT_BRACKET, KEY_SLASH, KEY_SPACE, KeyTap, MOD_LALT,
+    MOD_LSHIFT, Mods,
 };
 
 const KEY_Q: crate::Usage = crate::KEY_A.add(b'Q' - b'A');
@@ -85,7 +85,9 @@ pub(super) const OVERRIDES: &[LayoutOverride] = &[
     },
     LayoutOverride {
         ch: '<',
-        usage: KEY_NON_US_BACKSLASH,
+        // macOS maps this generic ANSI HID usage to virtual key 0x32, which
+        // produces < in the German input source. Usage 0x64 produces ^ instead.
+        usage: KEY_GRAVE,
         mods: Mods::empty(),
     },
     LayoutOverride {
@@ -95,7 +97,7 @@ pub(super) const OVERRIDES: &[LayoutOverride] = &[
     },
     LayoutOverride {
         ch: '>',
-        usage: KEY_NON_US_BACKSLASH,
+        usage: KEY_GRAVE,
         mods: MOD_LSHIFT,
     },
     LayoutOverride {

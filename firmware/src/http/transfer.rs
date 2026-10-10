@@ -14,7 +14,7 @@ use transfer_protocol::{
     WS_BINARY_KIND_SECURE_CHUNK_BATCH,
 };
 
-pub const TRANSFER_TEXT_MAX: usize = 768;
+pub const TRANSFER_TEXT_MAX: usize = 1024;
 pub const TRANSFER_BINARY_MAX: usize = 1 + transfer_protocol::TLV_MAX_PAYLOAD;
 pub const WS_BINARY_KIND_FILESYSTEM: u8 = 2;
 

@@ -112,6 +112,9 @@ pub fn submit_browser(
     id: script_protocol::EffectId,
     program: Vec<u8, MAX_BYTECODE>,
 ) -> Result<JobHandle, SubmitError> {
+    if super::bootstrap::active() {
+        return Err(SubmitError::Busy);
+    }
     submit(
         Owner::Browser {
             session,
@@ -136,7 +139,8 @@ pub fn cancel(handle: JobHandle) -> bool {
     accepted
 }
 pub fn stop_device() -> bool {
-    active_job().is_some_and(|job| cancel(job.handle))
+    let install = super::bootstrap::cancel();
+    active_job().is_some_and(|job| cancel(job.handle)) || install
 }
 fn cancel_matching(matches: impl FnOnce(Owner) -> bool) {
     let accepted = JOBS.lock(|cell| cell.borrow_mut().cancel_matching(matches));
@@ -228,6 +232,9 @@ fn browser_result(owner: Owner, status: HidResultStatus) -> Option<(u32, HidResu
     }
 }
 fn complete(handle: JobHandle, status: HidResultStatus) {
+    if !matches!(status, HidResultStatus::Completed) {
+        super::bootstrap::keyboard_failed(handle);
+    }
     let job = JOBS.lock(|cell| cell.borrow_mut().claim_result(handle));
     if let Some(job) = job {
         if let Some((session, result)) = browser_result(job.owner, status) {

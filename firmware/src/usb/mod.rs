@@ -1,3 +1,4 @@
+pub mod bootstrap;
 pub mod ctrl;
 pub mod hid;
 pub mod msc;

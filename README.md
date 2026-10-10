@@ -94,6 +94,56 @@ and reports a timeout after 15 seconds without an agent. Missing packaged binari
 disable the launchers. The keyboard test types `Hello from Pico!` into the focused
 application; focus a text editor before using it.
 
+USB CDC installation is also available on native Apple Silicon macOS, without
+mounting the USB drive or downloading anything. Package the agent and provision
+a unique, short USB serial identity when building firmware:
+
+```sh
+scripts/build-host-agent
+PICO_USB_SERIAL=P1234567 cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+```
+
+Replace the example serial with a per-board value: 2–8 ASCII alphanumeric
+characters starting with `P`. Without this setting, CDC installation entries are
+disabled and USB keeps its existing location-based naming. The full composite
+retains logger first and control second.
+
+Select **macOS: Install via CDC (DE/US)** for the active input layout. It opens
+Terminal and types a 96-character receiver command; the installer and executable
+arrive over the control CDC port. The installer verifies size and SHA-256,
+atomically installs `~/pico-agent/HOSTAGNT`, closes the serial handles, and launches
+the agent with the selected port. **macOS: Arm manual CDC install** instead arms
+the receiver for 30 seconds without sending keyboard reports; enter this in a
+fresh zsh Terminal:
+
+```zsh
+(p=(/dev/cu.usbmodemP*3);(($#p==1))&&exec 3<>$p&&stty raw -echo<&3&&echo B1>&3&&exec /bin/sh<&3)
+```
+
+These are alternative workflows. To switch from manual arm to the automatic
+preset, press Y to cancel the pending arm, then select **Install via CDC**.
+Pressing X during a pending installation does not start another one.
+
+The DE mapping targets a generic Pico keyboard identified as ANSI by macOS,
+with the German input source selected. Keyboard hardware classification and
+input language are separate settings. ISO classification has not been validated
+for this preset.
+
+The count excludes Terminal launch and Return. Stop an existing agent before
+installation and allow up to 25 seconds for cached agent presence to expire;
+the CDC install footer reports recent agent activity and changes to
+**Agent not detected; press X to retry** when that cached presence expires.
+Zero/multiple matching Picos are refused. Y cancels the device
+transfer. Use Terminal Control-C if its receiver remains waiting. After the
+installer has arrived, its watchdog bounds stalled downloads to 120 seconds.
+Display and Web UI status distinguish transfer verification from an agent
+handshake. Terminal may print `>` continuation prompts and `dd` job messages;
+these are expected shell output during a successful install. Intel macOS is
+unsupported by the current artifact. An optional
+`PICO_CDC_INSTALL_DIR` in the Terminal environment selects another installation
+directory. Details and remaining platform checks are in
+[MACOS_CDC_BOOTSTRAP_PLAN.md](MACOS_CDC_BOOTSTRAP_PLAN.md).
+
 The preset list scrolls to keep the selection visible and reserves space for
 layout details and status. Status messages wrap across two rows; long labels use
 ellipsis with the sidebar open. Menu gestures consume both A and X releases,

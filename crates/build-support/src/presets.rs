@@ -14,6 +14,7 @@ struct Preset {
     launches_agent: bool,
     available: bool,
     program: ProgramOwned,
+    action: &'static str,
 }
 fn chord(value: &str) -> Result<OpOwned> {
     let (mods, usage) =
@@ -58,6 +59,7 @@ fn launcher(image: &AgentImage<'_>, debug: bool, layout: LayoutId) -> Result<Pre
         ],
     };
     Ok(Preset {
+        action: "Keyboard",
         name: match (layout, debug) {
             (LayoutId::Us, false) => "macOS: Launch agent (US)",
             (LayoutId::Us, true) => "macOS: Debug agent (US)",
@@ -78,6 +80,7 @@ fn catalog(image: &AgentImage<'_>) -> Result<Vec<Preset>> {
         }
     }
     presets.push(Preset {
+        action: "Keyboard",
         name: "Keyboard test",
         layout: LayoutId::Us,
         launches_agent: false,
@@ -86,6 +89,30 @@ fn catalog(image: &AgentImage<'_>) -> Result<Vec<Preset>> {
             ops: vec![OpOwned::Layout(LayoutId::Us), text("Hello from Pico!")],
         },
     });
+    let enabled = image.present && std::env::var(super::env_consts::USB_SERIAL).is_ok();
+    presets.push(Preset {
+        name: "macOS: Arm manual CDC install",
+        layout: LayoutId::Us,
+        launches_agent: true,
+        available: enabled,
+        action: "CdcArm",
+        program: ProgramOwned {
+            ops: vec![OpOwned::Layout(LayoutId::Us), OpOwned::DelayMs(0)],
+        },
+    });
+    for layout in [LayoutId::MacDeDe, LayoutId::Us] {
+        let mut preset = launcher(image, false, layout)?;
+        preset.name = if layout == LayoutId::Us {
+            "macOS: Install via CDC (US)"
+        } else {
+            "macOS: Install via CDC (DE)"
+        };
+        preset.action = "CdcInstall";
+        preset.available = enabled;
+        // Reuse the tested Terminal launcher with the short first-stage command.
+        preset.program.ops[9] = text(super::bootstrap::COMMAND);
+        presets.push(preset);
+    }
     Ok(presets)
 }
 fn compile(preset: &Preset) -> Result<Vec<u8>> {
@@ -128,12 +155,13 @@ pub(super) fn prepare(cfg: &Config, image: AgentImage<'_>) -> Result<()> {
         let bytes = compile(&preset)?;
         writeln!(
             generated,
-            "Preset {{ name: {:?}, layout: {:?}, launches_agent: {}, available: {}, program: &{:?} }},",
+            "Preset {{ name: {:?}, layout: {:?}, launches_agent: {}, available: {}, program: &{:?}, action: PresetAction::{} }},",
             preset.name,
             preset.layout.name(),
             preset.launches_agent,
             preset.available,
-            bytes
+            bytes,
+            preset.action,
         )?;
     }
     generated.push_str("];\n");
@@ -166,11 +194,13 @@ mod tests {
             present: false,
         };
         for preset in catalog(&image).unwrap() {
-            if preset.launches_agent {
+            if preset.launches_agent && preset.action == "Keyboard" {
                 assert!(!preset.available);
                 assert!(preset.program.ops.iter().any(|op| matches!(op, OpOwned::Text { s, .. } if s.contains("'/Volumes/MY DISK/OTHER/AGENT'"))));
-            } else {
+            } else if !preset.launches_agent {
                 assert!(preset.available);
+            } else {
+                assert!(!preset.available);
             }
         }
     }

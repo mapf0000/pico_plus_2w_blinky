@@ -385,6 +385,7 @@ dependencies = [
  "blake3",
  "flate2",
  "keyboard-core",
+ "sha2 0.11.0",
  "which",
 ]
 

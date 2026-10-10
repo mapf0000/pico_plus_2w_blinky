@@ -291,6 +291,49 @@ mod tests_mac_de_de {
     };
 
     #[test]
+    fn german_ansi_redirections_use_the_macos_angle_bracket_key() {
+        // Regression from a physical Pico: usage 0x64 was translated to ^/°,
+        // turning `3<>$p` into a filename and preventing the CDC port opening.
+        let mut owned = ProgramOwned::new();
+        owned.ops.push(OpOwned::Layout(LayoutId::MacDeDe));
+        owned.ops.push(OpOwned::Text {
+            s: "3<>$p <&3 >&3".into(),
+            delay_ms: 0,
+        });
+        let flat = lower_to_flat_with_layout(&owned, LayoutId::Us).unwrap();
+        let taps: Vec<_> = flat
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                FlatOp::Tap { usage, mods } => Some((*usage, *mods)),
+                _ => None,
+            })
+            .collect();
+        for (index, shift) in [(1, false), (2, true), (6, false), (10, true)] {
+            assert_eq!(taps[index].0, crate::KEY_GRAVE);
+            assert_eq!(
+                taps[index].1,
+                if shift {
+                    crate::MOD_LSHIFT
+                } else {
+                    Mods::empty()
+                }
+            );
+        }
+        assert!(
+            taps.iter()
+                .all(|(usage, _)| *usage != crate::KEY_NON_US_BACKSLASH)
+        );
+        assert!(matches!(
+            LayoutId::Us.map_char('<'),
+            Some(super::CharMapping::Tap {
+                usage: crate::KEY_COMMA,
+                mods: crate::MOD_LSHIFT,
+            })
+        ));
+    }
+
+    #[test]
     fn layout_switches_text_lowering_mac_de() {
         let mut owned = ProgramOwned::new();
         owned.ops.push(OpOwned::Layout(LayoutId::MacDeDe));

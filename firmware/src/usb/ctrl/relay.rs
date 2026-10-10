@@ -36,6 +36,9 @@ pub(super) struct RelayState {
 }
 
 impl RelayState {
+    pub(super) fn is_idle(&self) -> bool {
+        self.transfers.is_empty()
+    }
     pub(super) const fn new() -> Self {
         Self {
             transfers: Vec::new(),

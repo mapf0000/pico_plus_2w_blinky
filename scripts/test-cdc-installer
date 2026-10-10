@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""macOS PTY integration tests for the maintained CDC installer (no physical USB/HID).
+
+The delivered shell source is unchanged except for the test serial glob and,
+in timeout tests, a shorter watchdog interval. A temporary native audit helper
+is the downloadable executable; no real agent is installed or started.
+"""
+import hashlib
+import os
+from pathlib import Path
+import pty
+import select
+import shlex
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import tty
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = (ROOT / "crates/build-support/src/cdc_installer.sh").read_text()
+COMMAND = "(p=(/dev/cu.usbmodemP*3);(($#p==1))&&exec 3<>$p&&stty raw -echo<&3&&echo B1>&3&&exec /bin/sh<&3)"
+
+
+def line(fd, timeout=5):
+    result = bytearray()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if select.select([fd], [], [], max(0, deadline-time.monotonic()))[0]:
+            result.extend(os.read(fd, 1))
+            if result.endswith(b"\n"):
+                return bytes(result)
+    raise TimeoutError("receiver request timed out")
+
+
+def write(fd, data, fragment=37):
+    while data:
+        n = os.write(fd, data[:fragment])
+        data = data[n:]
+
+
+def group_processes(group):
+    rows = subprocess.check_output(["/bin/ps", "-axo", "pid=,pgid=,comm="], text=True)
+    return [(int(pid), command) for row in rows.splitlines()
+            if len(parts := row.strip().split(None, 2)) == 3
+            for pid, pgid, command in [parts] if int(pgid) == group]
+
+
+def trial(base, binary, scenario, fallback=False):
+    master, slave = pty.openpty()
+    tty.setraw(slave)
+    device = os.ttyname(slave)
+    case_dir = base / scenario
+    case_dir.mkdir()
+    port = case_dir / "cu.usbmodemPTEST3"
+    port.symlink_to(device)
+    (case_dir / "cu.usbmodemPTEST1").symlink_to(device)
+    pattern = shlex.quote(str(case_dir)) + "/cu.usbmodemP*3"
+    installer = SOURCE.replace("/dev/cu.usbmodemP*3", pattern)
+    if scenario == "watchdog":
+        installer = installer.replace("sleep 120", "sleep 1")
+    if fallback:
+        installer = installer.replace("if dd if=/dev/null iflag=fullblock count=0", "if false && dd if=/dev/null iflag=fullblock count=0")
+    destination = case_dir / "install with spaces"
+    destination.mkdir()
+    old = b"previous installation"
+    installed = destination / "HOSTAGNT"
+    installed.write_bytes(old)
+    marker = case_dir / "launch-audit"
+    if scenario == "symlink":
+        installed.unlink()
+        installed.symlink_to(case_dir / "outside")
+        (case_dir / "outside").write_bytes(old)
+    env = dict(os.environ, PICO_CDC_INSTALL_DIR=str(destination), CDC_AUDIT_FILE=str(marker),
+               CDC_AUDIT_RDEV=str(os.fstat(slave).st_rdev))
+    proc = subprocess.Popen(["/bin/zsh", "-f", "-c", COMMAND.replace("/dev/cu.usbmodemP*3", pattern)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, start_new_session=True)
+    try:
+        assert line(master) == b"B1\n"
+        write(master, installer.encode(), 7)
+        assert line(master) == b"M1 arm64\n"
+        digest = hashlib.sha256(binary).hexdigest()
+        if scenario == "manifest":
+            write(master, b"C2 arm64 999999999999999999999999 16384 invalid\n")
+        else:
+            write(master, f"C1 arm64 {len(binary)} 16384 {digest}\n".encode())
+        if scenario not in ("manifest", "symlink"):
+            offset = 0
+            index = 0
+            while offset < len(binary):
+                assert line(master) == f"G1 {index}\n".encode()
+                if scenario in ("watchdog", "interrupt"):
+                    # Watchdog shell and sleep child must not own the serial device.
+                    time.sleep(0.15)
+                    for pid, command in group_processes(proc.pid):
+                        if command.endswith("sleep"):
+                            listing = subprocess.run(["/usr/sbin/lsof", "-a", "-p", str(pid), "-Fn"], capture_output=True, text=True)
+                            assert device not in listing.stdout, "watchdog timer inherited serial"
+                    if scenario == "interrupt":
+                        os.killpg(proc.pid, signal.SIGINT)
+                    break
+                chunk = binary[offset:offset+16384]
+                if scenario == "corrupt" and offset == 0:
+                    chunk = bytes([chunk[0] ^ 1]) + chunk[1:]
+                if scenario == "eof":
+                    write(master, chunk[:37])
+                    os.close(master)
+                    master = None
+                    break
+                write(master, chunk)
+                offset += len(chunk)
+                index += 1
+            if scenario == "success":
+                assert line(master) == b"V1\n"
+                write(master, b"OK1\n")
+        stdout, stderr = proc.communicate(timeout=5)
+        if scenario == "success":
+            assert proc.returncode == 0, stderr.decode(errors="replace")
+            deadline = time.monotonic() + 3
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert marker.read_text() == "all serial descriptors closed", "detached launch audit failed"
+            assert installed.read_bytes() == binary
+            assert installed.stat().st_mode & 0o777 == 0o700
+        else:
+            assert proc.returncode != 0, "failed transfer returned success"
+            assert not marker.exists(), "failed transfer launched executable"
+            assert installed.read_bytes() == old, "failed transfer replaced existing installation"
+        assert not list(destination.glob(".cdc.*")), "staging leaked"
+        time.sleep(0.1)
+        assert not group_processes(proc.pid), "installer left child processes running"
+        print(f"PASS: {scenario}" + (" (byte reader)" if fallback else ""))
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+        if master is not None:
+            os.close(master)
+        os.close(slave)
+
+
+def main():
+    if sys.platform != "darwin" or os.uname().machine != "arm64":
+        print("SKIP: native Apple Silicon macOS required")
+        return
+    with tempfile.TemporaryDirectory(prefix="pico-cdc-installer-") as temporary:
+        base = Path(temporary)
+        audit_source = base / "audit.rs"
+        audit_source.write_text('''
+use std::os::unix::fs::MetadataExt;
+fn main() {
+    let rdev: u64 = std::env::var("CDC_AUDIT_RDEV").unwrap().parse().unwrap();
+    for fd in 0..256 {
+        if let Ok(m) = std::fs::metadata(format!("/dev/fd/{fd}")) {
+            assert_ne!(m.rdev(), rdev, "serial descriptor inherited");
+        }
+    }
+    let args: Vec<_> = std::env::args().collect();
+    assert_eq!(args[1], "--port");
+    std::fs::write(std::env::var("CDC_AUDIT_FILE").unwrap(), "all serial descriptors closed").unwrap();
+}
+''')
+        audit = base / "audit"
+        subprocess.run(["rustc", "--edition=2024", "-O", str(audit_source), "-o", str(audit)], check=True)
+        binary = audit.read_bytes()
+        for scenario in ["success", "corrupt", "manifest", "symlink", "eof", "watchdog", "interrupt"]:
+            trial(base, binary, scenario)
+        fallback_base = base / "fallback"
+        fallback_base.mkdir()
+        trial(fallback_base, binary, "success", fallback=True)
+
+
+if __name__ == "__main__":
+    main()

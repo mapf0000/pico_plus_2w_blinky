@@ -23,6 +23,11 @@ pub(crate) fn status_card(props: &StatusProps) -> Html {
                 <div class="metric"><span>{"Detected host"}</span><strong>{st.as_ref().map(|s| s.host_os.as_str()).unwrap_or("Unknown")}</strong></div>
                 <div class="metric"><span>{"Firmware"}</span><strong>{props.hello.as_ref().map(|hello| hello.firmware.version.as_str()).unwrap_or("Negotiating…")}</strong></div>
                 <div class="metric"><span>{"Host agent"}</span><strong>{props.hello.as_ref().map(|hello| if hello.host_agent.present { hello.host_agent.version.as_deref().unwrap_or("Update required") } else { "Not detected" }).unwrap_or("Checking…")}</strong></div>
+                if let Some(hello) = &props.hello {
+                    if let Some(install) = &hello.cdc_bootstrap {
+                        <div class="metric" role="status"><span>{"Agent installation"}</span><strong>{if hello.host_agent.present { "Agent connected" } else { install.label() }}</strong></div>
+                    }
+                }
             </div>
             <div class="card-footer-note"><span class="pulse-dot"></span>{"Status refreshes every five seconds while connected"}</div>
         </section>

@@ -475,7 +475,7 @@ Implementation:
 - Endpoint: `ws://<device-host>:81/ws`; normally `ws://192.168.4.1:81/ws`.
 - The embedded frontend derives `ws:`/`wss:` and hostname from the page URL and selects port 81, falling back to `192.168.4.1:81`. A frontend served on a non-default development port keeps same-origin `/ws` so Trunk can proxy it.
 - Maximum inbound firmware WebSocket frame buffer: 4125 bytes (`script-protocol::MAX_MESSAGE_LEN`).
-- Maximum queued text event: 768 bytes.
+- Maximum queued text event: 1,024 bytes.
 - Maximum queued binary event: 2049 bytes.
 - Maximum transmitted/accepted encrypted chunk batch: 16,402 bytes including its binary-kind byte.
 - Shared firmware event queue depth: 16.
@@ -696,3 +696,60 @@ Kinds 4–7 are host-to-browser only. Firmware prepends kinds 4–6 without decr
 | Filesystem browser | `firmware/src/usb/ctrl.rs`, `usb/ctrl/relay/events.rs` | `apps/frontend/src/filesystem.rs`, `api.rs`, `app.rs` | `apps/host-agent/src/filesystem.rs`, `dispatch.rs` |
 | RustPython keyboard effects | `firmware/src/http/routes/ws.rs`, `usb/hid.rs`; `crates/script-protocol`, `firmware-exec`, `keyboard-core` | `apps/python-worker`, `apps/frontend/src/python.rs`, `api.rs` | Not applicable |
 | Protocol tests | Inline module tests | Inline tests in `apps/frontend/src/**`, `apps/python-worker`, and shared protocol crates | Inline tests and `tests/e2e_mac.rs` |
+## Explicitly armed CDC bootstrap v1
+
+This is an exclusive stream mode on the existing control CDC interface, entered
+only by a local CDC installation action. USB enumeration and DTR alone never
+deliver installer source. Normal TLV tags, versions, the 2,048-byte maximum,
+and transfer backpressure remain unchanged outside bootstrap. Arming requires a
+configured serial identity, a packaged Apple Silicon artifact, a clean TLV
+boundary, an empty control queue, no active relay/benchmark/HID job, no detected
+agent, and a closed control port. Readiness samples DTR at 100 ms intervals.
+
+All requests end with LF; request lines are limited to 64 bytes before LF.
+Requests can span USB packets. One request is outstanding at a time; coalesced
+speculative requests, unknown versions, wrong indices, malformed numbers, and
+requests in the wrong phase terminate the session. No automatic block retry is
+defined in v1: re-arm and restart instead.
+
+| Request | Response |
+| --- | --- |
+| `B1` | One complete `{ ... }` shell compound command, at most 8 KiB |
+| `M1 arm64` | `C1 arm64 <size> 16384 <lowercase-sha256>` plus LF |
+| `G1 <zero-based-block-index>` | Exactly the next block's raw file bytes; last block may be shorter |
+| `V1` after all blocks | `OK1` plus LF; return to normal TLV service |
+| `X1` | Cancel; wait for the owner to close the control port |
+
+Responses ending on an exact 64-byte boundary get an explicit ZLP. A ZLP is
+not serial EOF. Firmware streams flash-backed extents through packets no larger
+than 64 bytes; neither a 16 KiB block nor the executable is buffered in SRAM.
+Generated extents are relative to the existing 4 MiB MSC image and validated
+against it. There is no firmware FAT parser and no duplicate executable.
+
+The arm deadline is 30 seconds, request/write inactivity limit is 5 seconds,
+and firmware session budget is 120 seconds (a pending read is checked every
+100 ms). DTR loss, USB disable, Y Stop, or a failed owning HID job cancels the
+session. A failed/cancelled stream remains reserved and quiet until DTR drops:
+ordinary commands return busy instead of contaminating a waiting shell reader.
+TLV decoder state is reset at mode boundaries. Successful `V1` means the host
+reported verification; it does not prove an agent handshake.
+
+HELLO v1 adds an optional `cdc_bootstrap` object with `version: 1`, `available`,
+`busy`, and `state` (`idle`, `armed`, `downloading`, `verified`, `failed`, or
+`cancelled`). Firmware publishes updates through the existing WebSocket owner;
+older clients can ignore the additive fields. The frontend displays installation
+state and disables new scripts/transfers/filesystem requests while busy. Text
+capacity grows from 768 to 1,024 bytes to fit HELLO and its RPC envelope; existing
+event queues still use their 2,049-byte payload capacity and unchanged depths.
+
+The host installer uses native macOS shell/file utilities, feature-detects
+`dd iflag=fullblock`, otherwise reads byte counts, and checks each accumulated
+length and final SHA-256. A private staging directory on the destination
+filesystem provides atomic replacement. Existing destination symlinks and
+nonregular executable paths are rejected. Its watchdog closes CDC descriptors
+before spawning a timer; interruption reaps the reader and timer and removes
+staging. Serial descriptors are closed with a standalone `exec` before launch.
+HUP is ignored before forking so detached startup is protected immediately.
+The first stage has no host watchdog before complete installer delivery; use
+Terminal Control-C for that case. SHA-256 provides transfer integrity under the
+existing trusted-device distribution model, not independent device authenticity.

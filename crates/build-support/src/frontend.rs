@@ -6,12 +6,16 @@ use std::io::Write as _;
 const RELEASE_DIST_DIR: &str = "frontend-dist";
 const GEN_RS: &str = "frontend_static.rs";
 const FP_FILE: &str = "frontend.fingerprint";
+const SHARED_KEYBOARD_INPUTS: &[&str] = &["crates/keyboard-core", "crates/bytecode-constants"];
 
 /// Register broad change detection for the frontend sources.
 pub fn register_reruns(cfg: &Config) {
     // One broad watch is enough; Cargo will re-run build.rs when anything changes.
     cargo::rerun_if_changed(&cfg.frontend_dir);
     cargo::rerun_if_changed(&cfg.python_worker_dir);
+    for input in SHARED_KEYBOARD_INPUTS {
+        cargo::rerun_if_changed(cfg.repo_root.join(input));
+    }
 }
 
 /// Ensure the UI is up-to-date, embed assets, and generate `frontend_static.rs`.
@@ -29,7 +33,8 @@ pub fn prepare(cfg: &Config) -> Result<()> {
         &["dist", "target", ".git", "node_modules"],
     )?;
     let python_fp = fingerprint_tree(&cfg.python_worker_dir, &["target", ".git", "pkg"])?;
-    let cur_fp = format!("front={frontend_fp};python={python_fp}");
+    let keyboard_fp = shared_keyboard_fingerprint(&cfg.repo_root)?;
+    let cur_fp = format!("front={frontend_fp};python={python_fp};keyboard={keyboard_fp}");
     let fp_path = cfg.out_dir.join(FP_FILE);
     let prev_fp = fs::read_to_string(&fp_path).ok();
 
@@ -349,6 +354,20 @@ fn rewrite_paths(index: &mut String, js: &Path, wasm: &Path, css: &Path) {
 
 /* ------------------------- Fingerprinting ------------------------- */
 
+fn shared_keyboard_fingerprint(repo_root: &Path) -> Result<String> {
+    let mut result = String::new();
+    for input in SHARED_KEYBOARD_INPUTS {
+        result.push_str(input);
+        result.push('=');
+        result.push_str(&fingerprint_tree(
+            &repo_root.join(input),
+            &["target", ".git"],
+        )?);
+        result.push(';');
+    }
+    Ok(result)
+}
+
 /// Compute a deterministic hash of all frontend sources (excluding build outputs).
 fn fingerprint_tree(root: &Path, skip_dirs: &[&str]) -> Result<String> {
     use blake3::Hasher;
@@ -411,6 +430,29 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn keyboard_dependency_edits_invalidate_embedded_worker_assets() {
+        let root = TestDir::new();
+        for input in SHARED_KEYBOARD_INPUTS {
+            fs::create_dir_all(root.0.join(input).join("src")).unwrap();
+            fs::write(root.0.join(input).join("src/lib.rs"), b"original").unwrap();
+        }
+        let original = shared_keyboard_fingerprint(&root.0).unwrap();
+        let keyboard = root.0.join("crates/keyboard-core");
+        fs::write(keyboard.join("src/lib.rs"), b"corrected layout").unwrap();
+        let corrected = shared_keyboard_fingerprint(&root.0).unwrap();
+        assert_ne!(original, corrected);
+        fs::create_dir_all(keyboard.join("target")).unwrap();
+        fs::write(keyboard.join("target/output"), b"generated").unwrap();
+        assert_eq!(corrected, shared_keyboard_fingerprint(&root.0).unwrap());
+        fs::write(
+            root.0.join("crates/bytecode-constants/src/lib.rs"),
+            b"updated constant",
+        )
+        .unwrap();
+        assert_ne!(corrected, shared_keyboard_fingerprint(&root.0).unwrap());
     }
 
     #[test]

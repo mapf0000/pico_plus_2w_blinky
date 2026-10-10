@@ -171,8 +171,9 @@ pub fn prepare(cfg: &Config) -> Result<()> {
     )?;
 
     let image = build_image(&label_bytes, root_files, dir_specs)?;
+    super::bootstrap::prepare(cfg, image.mac.as_ref())?;
     let out_path = cfg.out_dir.join("host-agent.img");
-    fs::write(&out_path, image).context("write host-agent.img")?;
+    fs::write(&out_path, image.bytes).context("write host-agent.img")?;
     Ok(())
 }
 
@@ -292,7 +293,17 @@ fn compute_layout() -> Result<Layout> {
     })
 }
 
-fn build_image(label: &[u8; 11], root_files: Vec<FileSpec>, dirs: Vec<DirSpec>) -> Result<Vec<u8>> {
+#[derive(Debug)]
+struct BuiltImage {
+    bytes: Vec<u8>,
+    mac: Option<super::bootstrap::Artifact>,
+}
+
+fn build_image(
+    label: &[u8; 11],
+    root_files: Vec<FileSpec>,
+    dirs: Vec<DirSpec>,
+) -> Result<BuiltImage> {
     let layout = compute_layout()?;
     let mut image = vec![0u8; IMAGE_BYTES];
 
@@ -366,11 +377,12 @@ fn build_image(label: &[u8; 11], root_files: Vec<FileSpec>, dirs: Vec<DirSpec>) 
     )?;
 
     let data_start = layout.data_start_sector * BYTES_PER_SECTOR;
+    let mut mac = None;
     for file in &root_allocs {
         write_file_data(&mut image, data_start, file.cluster, &file.data)?;
     }
     for dir in &dir_allocs {
-        let cluster_offset = cluster_offset(data_start, dir.cluster)?;
+        let directory_offset = cluster_offset(data_start, dir.cluster)?;
         let mut entries = Vec::new();
         entries.push(DirEntry::dot(dir.cluster));
         entries.push(DirEntry::dotdot(0));
@@ -382,14 +394,22 @@ fn build_image(label: &[u8; 11], root_files: Vec<FileSpec>, dirs: Vec<DirSpec>) 
                 file.size,
             ));
             write_file_data(&mut image, data_start, file.cluster, &file.data)?;
+            if dir.name == short_name("MAC", "")? && file.name == short_name("HOSTAGNT", "")? {
+                // Allocator::alloc_clusters assigns consecutive clusters. Capture
+                // their location here; firmware never parses FAT or assumes allocation order.
+                mac = Some(super::bootstrap::metadata(
+                    cluster_offset(data_start, file.cluster)?,
+                    &file.data,
+                )?);
+            }
         }
         write_dir_entries(
-            &mut image[cluster_offset..cluster_offset + CLUSTER_SIZE],
+            &mut image[directory_offset..directory_offset + CLUSTER_SIZE],
             &entries,
         )?;
     }
 
-    Ok(image)
+    Ok(BuiltImage { bytes: image, mac })
 }
 
 struct Allocator {
@@ -615,6 +635,13 @@ mod tests {
             }],
         )
         .unwrap();
+        let manifest = image.mac.as_ref().unwrap();
+        assert_eq!(manifest.size, binary.len());
+        assert_eq!(
+            &image.bytes[manifest.offset..manifest.offset + manifest.size],
+            &binary
+        );
+        let image = image.bytes;
         assert_eq!(image.len(), 4 * 1024 * 1024);
         assert_eq!(&image[54..62], b"FAT16   ");
         assert_eq!(&image[510..512], &[0x55, 0xaa]);

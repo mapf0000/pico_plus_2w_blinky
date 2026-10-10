@@ -266,8 +266,9 @@ impl Inputs {
             .debounce
             .sample(core::array::from_fn(|index| self.buttons[index].is_low()));
         let snapshot = services::snapshot(sampled_at.as_millis());
-        let reserved = snapshot.keyboard.reserved();
+        let reserved = snapshot.keyboard.reserved() || crate::usb::bootstrap::active();
         let mut dirty = controller.update(snapshot, services::take_completion());
+        dirty |= services::refresh_installation(controller);
         let routing = controller.route(events, reserved);
         if routing.stop {
             crate::usb::hid::stop_device();

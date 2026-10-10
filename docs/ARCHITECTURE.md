@@ -520,3 +520,24 @@ The [threat model](THREAT_MODEL.md) treats the USB-connected PC and host-agent i
 | Hardware display | `firmware/src/display_core/`, `firmware/src/display/` | Input ownership, model/cache separation, bounded rows, native rendering tests, embedded size and board timing |
 | Memory allocation/layout | `firmware/memory.x`, `device_config.rs`, `psram_pool.rs`, HTTP buffers | Linker build, size report, persistence/MSC boundaries |
 | Startup ordering | `firmware/src/main.rs` and supervisor tasks | Static resource ownership and hardware recovery |
+## CDC installation ownership
+
+`crates/build-support/src/msc_image.rs` records the macOS executable's allocated
+flash extent and generates size/SHA-256 metadata. The CDC installer shell source
+and short receiver command are maintained in `crates/build-support`; generated
+files remain under `OUT_DIR`. The executable stays in the existing MSC image.
+
+`firmware/src/bootstrap_core.rs` owns allocation-free request parsing, ordered
+session validation, and logical extent slicing, with host tests. The existing
+control task remains the sole CDC owner and routes an explicitly armed session
+to `usb/bootstrap.rs`, suppressing ordinary TLV output until clean handoff or
+port closure after failure. Arming precedes synchronous HID admission; failure
+rolls back the reservation, and HID errors cancel only the associated job.
+Browser HID submissions and new control commands return busy during reservation.
+
+The display exposes manual-arm and macOS US/DE CDC install actions. Y Stop covers
+the transfer after typing completes. The installer handles host-side staging,
+exact reads, digest validation, watchdog cleanup, and serial descriptor closure;
+the agent then opens the same port for its ordinary TLV handshake. Additive
+HELLO installation status is consumed by the frontend through the existing
+central WebSocket connection. Verification and agent detection remain separate.

@@ -2,6 +2,8 @@
 #![no_main]
 #![recursion_limit = "256"]
 
+mod bootstrap_core;
+
 // ===== Imports =====
 
 // use core::sync::atomic::Ordering; // no longer used in this module

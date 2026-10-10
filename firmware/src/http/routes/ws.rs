@@ -6,7 +6,9 @@ use picoserve::response::ws;
 use crate::host::{self, HostOs};
 use crate::http::transfer::{self, TRANSFER_TEXT_MAX};
 use crate::http::util::{escape_json_str, percent_decode_str};
-use crate::usb::ctrl::{CTRL_CHAN, CtrlCommand, MAX_SECURE_TRANSFER_FRAME, MAX_TRANSFER_PATH_LEN};
+use crate::usb::ctrl::{
+    CtrlCommand, MAX_SECURE_TRANSFER_FRAME, MAX_TRANSFER_PATH_LEN, try_command,
+};
 use crate::usb::hid::{self, HidResult, HidResultStatus, MAX_BYTECODE, SubmitError, USB_READY};
 use crate::usb::usb_supervisor;
 use heapless::{String, Vec};
@@ -35,7 +37,7 @@ impl ws::WebSocketCallback for HelloWs {
         tx.send_text(hello.as_str()).await?;
         crate::health::mark(crate::health::Stage::WebSocketActive);
         let session = transfer::begin_session();
-        let _ = CTRL_CHAN.try_send(CtrlCommand::RequestStatus);
+        let _ = try_command(CtrlCommand::RequestStatus);
 
         let mut buf = [0u8; WS_COMMAND_MAX];
         let mut exit = ConnectionExit::Peer;
@@ -105,7 +107,7 @@ impl ws::WebSocketCallback for HelloWs {
                             }
                             let mut payload: Vec<u8, MAX_SECURE_TRANSFER_FRAME> = Vec::new();
                             if payload.extend_from_slice(body).is_ok() {
-                                let _ = CTRL_CHAN.try_send(CtrlCommand::SecureTransfer { payload });
+                                let _ = try_command(CtrlCommand::SecureTransfer { payload });
                             }
                             continue;
                         }
@@ -426,7 +428,7 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
             return response;
         };
 
-        match CTRL_CHAN.try_send(CtrlCommand::ListDirectory {
+        match try_command(CtrlCommand::ListDirectory {
             request_id,
             cursor,
             entry_limit,
@@ -451,7 +453,7 @@ async fn handle_command(cmd: &str) -> String<TRANSFER_TEXT_MAX> {
             let _ = response.push_str("{\"error\":\"invalid filesystem request id\"}");
             return response;
         };
-        match CTRL_CHAN.try_send(CtrlCommand::CancelDirectoryList { request_id }) {
+        match try_command(CtrlCommand::CancelDirectoryList { request_id }) {
             Ok(()) => {
                 let _ = response.push_str("{\"ok\":true,\"queued\":true}");
                 response

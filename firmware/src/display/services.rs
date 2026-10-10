@@ -6,7 +6,7 @@ use crate::{
     display_core::{Controller, Preset, model::*},
     http::transfer,
     usb::{
-        ctrl::{self, CTRL_CHAN, CTRL_READY, CtrlCommand, TransferRelayMode, TransferViewState},
+        ctrl::{self, CTRL_READY, CtrlCommand, TransferRelayMode, TransferViewState},
         hid::{self, HidResultStatus, Owner, SubmitError},
     },
 };
@@ -70,12 +70,54 @@ pub fn execute(controller: &mut Controller, intent: Intent) {
     match intent {
         Intent::RunPreset(index) => {
             if let Some(preset) = PRESETS.get(index) {
+                if preset.action == PresetAction::Keyboard && crate::usb::bootstrap::active() {
+                    controller
+                        .payloads
+                        .submitted(Submission::Busy, preset.launches_agent);
+                    return;
+                }
+                let generation = if preset.action != PresetAction::Keyboard {
+                    match crate::usb::bootstrap::arm() {
+                        Some(generation) => Some(generation),
+                        None => {
+                            controller.payloads.installation_status(
+                                "CDC busy or unavailable",
+                                true,
+                                false,
+                                0,
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+                if preset.action == PresetAction::CdcArm {
+                    controller.payloads.installation_status(
+                        crate::usb::bootstrap::Phase::Armed.text(),
+                        false,
+                        true,
+                        embassy_time::Instant::now().as_millis(),
+                    );
+                    return;
+                }
                 let result = match hid::submit_preset(preset.program) {
-                    Ok(handle) => Submission::Accepted(handle),
+                    Ok(handle) => {
+                        if let Some(generation) = generation {
+                            crate::usb::bootstrap::bind(generation, handle);
+                        }
+                        Submission::Accepted(handle)
+                    }
                     Err(SubmitError::Busy) => Submission::Busy,
                     Err(SubmitError::UsbUnavailable) => Submission::UsbUnavailable,
                     Err(SubmitError::Invalid) => Submission::Invalid,
                 };
+                if !matches!(result, Submission::Accepted(_))
+                    && let Some(generation) = generation
+                {
+                    crate::usb::bootstrap::finish(generation, crate::usb::bootstrap::Phase::Failed);
+                    crate::usb::bootstrap::release();
+                }
                 controller.payloads.submitted(result, preset.launches_agent);
             }
         }
@@ -94,7 +136,7 @@ pub fn execute(controller: &mut Controller, intent: Intent) {
                     prompt: "Database credentials",
                 },
             };
-            let queued = ready && CTRL_CHAN.try_send(command).is_ok();
+            let queued = ready && ctrl::try_command(command).is_ok();
             controller.agent.submitted(action, ready, queued);
             if queued {
                 log::info!("host agent action queued: {}", action.name());
@@ -104,4 +146,26 @@ pub fn execute(controller: &mut Controller, intent: Intent) {
             ctrl::set_transfer_relay_mode(TransferRelayMode::RelayToBrowser)
         }
     }
+}
+
+pub fn refresh_installation(controller: &mut Controller) -> bool {
+    use crate::usb::bootstrap::Phase;
+    use core::cell::Cell;
+    use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
+    static LAST: Mutex<CriticalSectionRawMutex, Cell<Phase>> = Mutex::new(Cell::new(Phase::Idle));
+    let phase = crate::usb::bootstrap::phase();
+    let changed = LAST.lock(|last| {
+        let changed = last.get() != phase;
+        last.set(phase);
+        changed
+    });
+    if changed {
+        controller.payloads.installation_status(
+            phase.text(),
+            matches!(phase, Phase::Failed | Phase::Cancelled),
+            matches!(phase, Phase::Armed | Phase::Downloading | Phase::Verified),
+            embassy_time::Instant::now().as_millis(),
+        );
+    }
+    changed
 }

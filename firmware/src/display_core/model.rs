@@ -46,12 +46,20 @@ impl PageId {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresetAction {
+    Keyboard,
+    CdcInstall,
+    CdcArm,
+}
+
 pub struct Preset {
     pub name: &'static str,
     pub layout: &'static str,
     pub launches_agent: bool,
     pub available: bool,
     pub program: &'static [u8],
+    pub action: PresetAction,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -138,10 +146,24 @@ pub struct PayloadModel {
     pending: Option<JobHandle>,
     launching_agent: bool,
     agent_deadline_ms: Option<u64>,
+    waiting_for_agent_clear: bool,
 }
 
 impl PayloadModel {
+    pub fn installation_status(&mut self, text: &str, warning: bool, waiting: bool, now_ms: u64) {
+        self.waiting_for_agent_clear = false;
+        self.status.set(
+            text,
+            if warning {
+                Severity::Warning
+            } else {
+                Severity::Normal
+            },
+        );
+        self.agent_deadline_ms = waiting.then_some(now_ms.saturating_add(120_000));
+    }
     pub fn submitted(&mut self, result: Submission, launches_agent: bool) {
+        self.waiting_for_agent_clear = false;
         match result {
             Submission::Accepted(handle) => {
                 self.pending = Some(handle);
@@ -162,17 +184,35 @@ impl PayloadModel {
     }
 
     fn activate(&mut self, presets: &[Preset], agent_present: bool) -> Option<Intent> {
-        if self.pending.is_some() || self.agent_deadline_ms.is_some() {
+        if self.pending.is_some() {
+            self.status
+                .set("Keyboard busy; use Y to stop", Severity::Warning);
             return None;
         }
+        if self.agent_deadline_ms.is_some() {
+            self.status.set(
+                "Installation pending; wait for completion",
+                Severity::Warning,
+            );
+            return None;
+        }
+        self.waiting_for_agent_clear = false;
         let preset = presets.get(self.selected.0)?;
         if !preset.available {
             self.status
                 .set("Agent binary missing from USB image", Severity::Warning);
             None
         } else if preset.launches_agent && agent_present {
-            self.status
-                .set("Agent already connected", Severity::Success);
+            if preset.action != PresetAction::Keyboard {
+                self.waiting_for_agent_clear = true;
+                self.status.set(
+                    "Agent recently seen; wait 25s after stop",
+                    Severity::Warning,
+                );
+            } else {
+                self.status
+                    .set("Agent already connected", Severity::Success);
+            }
             None
         } else {
             Some(Intent::RunPreset(self.selected.0))
@@ -211,6 +251,12 @@ impl PayloadModel {
                 self.agent_deadline_ms = None;
                 changed = true;
             }
+        }
+        if self.waiting_for_agent_clear && !agent_present {
+            self.waiting_for_agent_clear = false;
+            self.status
+                .set("Agent not detected; press X to retry", Severity::Normal);
+            changed = true;
         }
         changed
     }

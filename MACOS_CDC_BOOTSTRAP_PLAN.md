@@ -1,6 +1,154 @@
 # macOS host-agent installation over USB CDC
 
-Research date: 2026-10-10. Status: implementation plan; no firmware or installer changes have been made.
+Research date: 2026-10-10. Status: production implementation added and flashed; final board acceptance in progress. Historical isolated-probe experiments are retained below.
+
+## Production implementation status
+
+The source implementation now includes validated optional `PICO_USB_SERIAL`,
+generated SHA-256/size/extent metadata, the maintained shell installer, manual-arm
+and US/DE CDC presets, an exclusive bounded CDC session, generation/job-owned
+cancellation, device-wide Y Stop, and display/Web UI status. The default build
+preserves location-based USB naming and leaves CDC presets disabled; provisioning
+an identity enables them. See README for build and operator commands.
+
+Firmware rejects new control/HID operations during reservation. After a failed
+stream it remains quiet until the host closes the port, then clears the TLV
+decoder before normal service. This avoids sending ordinary protocol bytes into
+a stalled shell reader. The native macOS installer uses a private directory on
+the destination filesystem, exact reads, accumulated-length checks, SHA-256,
+atomic replacement, and a 120-second watchdog with reaped child processes.
+Serial descriptors close before detached launch, and HUP is ignored before
+forking so startup cannot lose the race with shell exit. The first-stage recovery
+gap before complete installer delivery remains; use Terminal Control-C there.
+
+Completed software checks:
+
+- `scripts/build-host-agent` packaged the current Apple Silicon agent from source.
+- `scripts/test-cdc-installer`: all eight PTY scenarios passed, including native
+  executable launch, descriptor audit, corruption, metadata, symlink, EOF,
+  watchdog/interrupt cleanup, and the byte-reader fallback.
+- `cargo test -p build-support -p firmware-exec`: 10 + 9 tests passed.
+- `cargo test -p pico_rust --lib --no-default-features`: 30 tests passed,
+  including visible feedback when manual arm blocks a second install and
+  automatic retry guidance after cached agent presence expires.
+- The full keyboard layout matrix passed, and all generated presets fit KBD1.
+  The new CDC US and DE programs are each 552 encoded bytes, below 4,096.
+- Frontend wasm tests compile and Trunk release embedding/build succeeds. The new
+  bootstrap status/backward-compatibility test passes in headless Firefox; older
+  builtin `#[test]` frontend tests are compile-only on wasm and are not counted
+  as executed browser tests.
+- Build-support and firmware library Clippy checks pass with `-D warnings`;
+  the embedded release Clippy check also passes.
+- The embedded release build links successfully. One agent copy occurs in the
+  ELF; MSC remains 4 MiB, with no sections in the final configuration slots.
+  Static SRAM use is 251,260 bytes (about 245 KiB) in the latest reviewed build.
+  HELLO/RPC text capacity is now 1,024 bytes; event queue payloads/depths remain
+  unchanged. USB packet and request buffers stay 64 bytes.
+
+The production build was verified-flashed using serial `P1234567`. Its full USB
+composite enumerates logger `…P12345671` and control `…P12345673`. Selecting the
+local manual-arm action completed a real installation into an isolated temporary
+directory: all 1,487,440 bytes matched the packaged artifact's SHA-256, the agent
+launched, and firmware logged its normal TLV handshake. The receiver took 2.574
+seconds. The test stopped only its own agent afterward. This manual-arm test ran
+the receiver programmatically and did not open a visible Terminal or send HID
+reports. Physical HID US behavior, measured cancellation recovery, unplug during
+transfer, and cross-version/topology checks remain hardware gates. The operator
+subsequently reported that stopping the agent and reinstalling worked, and that
+cancellation worked. The cancellation method and recovery timing were not
+recorded; these reports are distinguished from the instrumented acceptance runs.
+The subsequent HID attempt opened Terminal but typed `^`/`°` instead of `<`/`>`,
+so zsh tried to open a nonexistent filename and never opened the CDC port. This
+was a keyboard mapping failure before transfer. Historical probe results below
+are not substitutes for the remaining acceptance checks.
+
+The manual and HID actions are alternatives, rather than sequential steps. A
+pending manual arm blocks another launch; Y cancels it before switching to the
+HID action. Stopped agents remain present in firmware's existing health cache
+for up to 25 seconds. The display model now reports an attempted launch while
+waiting instead of silently ignoring X. This feedback change is included in the
+corrected build alongside the German redirection fix.
+
+The repeated-install report also confirmed confusing stale-presence feedback:
+the stopped agent remained marked connected until the existing health timeout
+expired. The agent sends keepalives every 10 seconds, and firmware retains
+presence for 25 seconds after the last activity. DTR is intentionally deasserted
+by the current host agent, so it cannot identify that process's close reliably;
+USB endpoint enablement also does not represent application ownership. Shortening
+the timeout alone would cause false disconnections with the current keepalive.
+
+A display-only follow-up now says **Agent recently seen; wait 25s after stop**
+when cached presence blocks a CDC action. When presence expires, the footer
+automatically changes to **Agent not detected; press X to retry**. It does not
+automatically queue an installation or send a control probe into an unowned
+serial stream. The 25-second health policy and serial protocol stay unchanged.
+Validation passed with `cargo test -p pico_rust --lib --no-default-features`
+(30 tests), `cargo clippy -p pico_rust --lib --tests --no-default-features -- -D
+warnings`, the provisioned embedded release build, formatting, and diff checks.
+This follow-up was verified-flashed with `picotool load -u -v -x -t elf
+target/thumbv8m.main-none-eabihf/release/pico_rust` and rebooted. Both provisioned
+CDC names reappeared. The real agent's restricted self-test completed its
+handshake and two keepalive round-trips at the normal 10-second cadence:
+
+```sh
+apps/host-agent/artifacts/aarch64-apple-darwin/host-agent --device-self-test --port /dev/cu.usbmodemP12345673 --self-test-keepalives 2 --self-test-interval-ms 10000
+```
+
+The test exited normally and left no agent running. The new footer transition
+is covered by the display-model tests; physical observation is pending. The
+operator clarified that the command fragments in their message were an
+accidental paste while switching windows, rather than a new HID typing failure.
+
+### German HID correction
+
+The operator's Terminal capture reproduced `exec 3^°$p` and `^&3`/`°&3`. Local
+macOS keyboard-type preferences classify this Pico VID/PID as ANSI (type 40).
+A native Carbon probe of the active German input source translated virtual key
+`0x32` to `<`/`>` and `0x0a` to `^`/`°`; this matches the observed HID failure.
+The shared `mac_de-DE` mapping now sends HID usage `0x35` for `<`/`>` instead of
+`0x64`. Other input sources and the receiver text are unchanged. This assumes
+the tested ANSI classification; ISO-classified Pico behavior remains unverified.
+The probe used Apple's [UCKeyTranslate API](https://developer.apple.com/documentation/coreservices/1390584-uckeytranslate).
+
+The firmware asset fingerprint and Cargo rerun inputs now also include
+`keyboard-core` and `bytecode-constants`, ensuring mapping changes rebuild the
+embedded Worker/frontend instead of retaining a stale Worker bundle. Tests
+cover the redirection lowering and dependency invalidation. The full keyboard
+matrix (4 tests), native and headless-Firefox release wasm Worker suites (11
+tests each), and build-support/executor suites (10 + 9 tests) pass. The corrected
+production build was verified-flashed with `picotool load -u -v -x -t elf
+target/thumbv8m.main-none-eabihf/release/pico_rust` and rebooted normally.
+The physical DE retry passed: the Pico opened Terminal and typed the exact
+96-character command, all 1,487,440 downloaded bytes matched the packaged
+artifact's size and SHA-256, and the installed real agent completed its normal
+TLV handshake. Arm-to-handshake time was 9.407 seconds, including HID launch and
+typing. The agent is installed at `~/pico-agent/HOSTAGNT` and left running on the
+control port. The operator independently confirmed the correctly typed command
+and the installer completion message. The receiver monitor only opened the
+logger port; it did not send HID reports or start a receiver on the control port.
+
+The native shell detects its CDC stdin as a terminal. It currently prints `>`
+continuation prompts while parsing the compound installer and background `dd`
+job notifications during transfer. These are expected output, not failed blocks.
+PTY checks of `/bin/sh +i`, `-s`, and `-t` did not disable that interactive mode;
+the validated 96-character receiver remains unchanged.
+
+Validation commands for this correction all passed:
+
+```sh
+cargo test -p keyboard-core --features 'std layout_win_en_gb layout_win_pt_br layout_win_de_de layout_mac_en_gb layout_mac_pt_br layout_mac_de_de'
+cargo test -p python-worker
+GECKODRIVER=/tmp/pico-geckodriver/geckodriver MOZ_HEADLESS=1 cargo test -p python-worker --release --target wasm32-unknown-unknown
+cargo test -p build-support -p firmware-exec
+cargo clippy -p keyboard-core --all-targets --features 'std layout_win_en_gb layout_win_pt_br layout_win_de_de layout_mac_en_gb layout_mac_pt_br layout_mac_de_de' -- -D warnings
+cargo clippy -p build-support --all-targets -- -D warnings
+PICO_USB_SERIAL=P1234567 cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+PICO_USB_SERIAL=P1234567 cargo clippy -p pico_rust --release --target thumbv8m.main-none-eabihf -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+The GeckoDriver path is local validation tooling, not an installer requirement.
 
 ## Proposed result
 
@@ -10,6 +158,8 @@ Start with native Apple Silicon (`aarch64-apple-darwin`), which is already packa
 
 Keep mass-storage delivery available during initial implementation. Removing MSC or changing its flash reservation is a separate change after this path works.
 
+The 96-character receiver has now downloaded the real 1,487,440-byte packaged agent from the Pico's existing flash image, with matching size/SHA-256 and clean descriptor handoff. The diagnostic firmware exposed only two CDC interfaces: no USB mass-storage function, HID traffic, or Wi-Fi was used. A test helper was launched after verification; the downloaded agent was deleted without being installed or executed. See the hardware results below for the limits of this proof.
+
 ## Recommended first-stage command
 
 The following candidate is **96 ASCII characters**, excluding the final Return:
@@ -18,7 +168,7 @@ The following candidate is **96 ASCII characters**, excluding the final Return:
 (p=(/dev/cu.usbmodemP*3);(($#p==1))&&exec 3<>$p&&stty raw -echo<&3&&echo B1>&3&&exec /bin/sh<&3)
 ```
 
-This is a proposed command, not an installer supported by current firmware. Its prerequisites are a fresh macOS Terminal running zsh, a Pico USB serial identity starting with `P`, and confirmation that the control data interface appears with suffix `3` on the supported macOS versions.
+This command passed against the isolated probe firmware and is now supported by production firmware when built with a validated `PICO_USB_SERIAL` and explicitly armed through a local CDC installation action. Its prerequisites are a fresh macOS Terminal running zsh, a usable Pico USB serial identity starting with `P`, and a control data interface appearing with suffix `3`. That suffix was confirmed on this Mac with logger CDC first and control CDC second. Repeat the check against the full production composite and each supported macOS version.
 
 The subshell contains the temporary variable and descriptor changes. The array collects matching control ports, and the arithmetic check refuses multiple matches. Default zsh also rejects an unmatched glob; with nullglob enabled the zero-length array fails the check. No matching port is opened until the selection succeeds. `exec 3<>$p` opens the port once for reading and writing; `stty` configures that descriptor; `B1\n` requests bootstrap version 1; `/bin/sh` then reads the delivered installer from the same connection. `&&` stops the sequence if opening, configuration, or requesting fails. The array syntax is zsh-specific. [zsh array parameters](https://zsh.sourceforge.io/Doc/Release/Parameters.html#Array-Parameters).
 
@@ -26,30 +176,30 @@ Do not shorten this to an unguarded wildcard: the device exposes two CDC functio
 
 | Candidate | Typed command characters | Condition |
 | --- | ---: | --- |
-| Guarded selector and explicit `/bin/sh`, above | 96 | Recommended production candidate after device-name validation |
+| Guarded selector and explicit `/bin/sh`, above | 96 | Passed on diagnostic and full production firmware; real agent handshake confirmed |
 | Same command using `sh` | 91 | Depends on the user's executable search path |
 | Exact `/dev/cu.usbmodemP12345673` port, compact redirections | 78 | Requires matching per-device preset and firmware identity |
-| Exact `/dev/cu.usbmodemP0123456789ABCDEF3` port, compact redirections | 87 | Long serial naming is unverified on supported systems |
+| Exact `/dev/cu.usbmodemP0123456789ABCDEF3` port, compact redirections | 87 | Rejected design: this 17-character serial fell back to location-based naming on this Mac |
 
 The budget counts command characters, not USB HID reports or physical key transitions. Shifted punctuation, launcher chords, Return, and the eight characters in `Terminal` are additional keyboard actions. Measure the generated KBD1 operations and elapsed time separately; do not advertise the entire launch sequence as fewer than 100 physical keystrokes.
 
-The compact first stage has no independent host watchdog before it receives the installer. If firmware never responds, or delivers an incomplete compound command, the host shell can remain waiting despite a device-side timeout. Document Terminal's Control-C recovery and test it; Y Stop must release device state but is not yet proven to terminate the waiting host shell. Do not claim fully automatic, bounded host recovery until that gap is resolved. If an autonomous first-stage watchdog is mandatory, revise the command and remeasure its budget rather than assuming a serial ZLP or port close supplies EOF.
+The compact first stage has no independent host watchdog before it receives the installer. If firmware never responds, or delivers an incomplete compound command, the host shell can remain waiting despite a device-side timeout. Process-group SIGINT recovery passed on the physical link both before installer delivery and during a stalled binary block: the port reopened and a fresh bootstrap succeeded. Still document and test actual Terminal Control-C; Y Stop is not yet proven to terminate the waiting host shell. Do not claim fully automatic, bounded host recovery until that gap is resolved. If an autonomous first-stage watchdog is mandatory, revise the command and remeasure its budget rather than assuming a serial ZLP or port close supplies EOF.
 
 ## Research findings
 
 ### macOS chooses the serial-device name
 
-Apple's published CDC ACM driver constructs a device suffix from a usable USB serial string, otherwise from USB location, and appends the data-interface number. That historical implementation accepts only short serial strings, so it is evidence for the naming strategy rather than a guarantee for current macOS. Use an ASCII alphanumeric `P`-prefixed serial of at most eight characters for the first experiment and verify the resulting nodes on actual hardware. Manufacturer and product strings do not directly select the BSD device path. [Apple CDC driver, `createSuffix` and `createSerialStream`](https://raw.githubusercontent.com/apple-oss-distributions/AppleUSBCDCDriver/main/AppleUSBCDCACM/DataDriver/Classes/AppleUSBCDCACMData.cpp).
+Apple's published CDC ACM driver constructs a device suffix from a usable USB serial string, otherwise from USB location, and appends the data-interface number. That historical implementation accepts only short serial strings; current behavior must be measured. Manufacturer and product strings do not directly select the BSD device path. [Apple CDC driver, `createSuffix` and `createSerialStream`](https://raw.githubusercontent.com/apple-oss-distributions/AppleUSBCDCDriver/main/AppleUSBCDCACM/DataDriver/Classes/AppleUSBCDCACMData.cpp).
 
-Repository evidence: `firmware/src/usb/task.rs` creates logger CDC first, then control CDC, and currently sets `cfg.serial_number = None`. The expected data interfaces are therefore 1 and 3, but the exact descriptor-to-device-node mapping remains a board-test gate.
+Repository evidence: `firmware/src/usb/task.rs` creates logger CDC first, then control CDC, and originally set `cfg.serial_number = None` (now an optional validated build input). An isolated probe preserved that CDC order. `P1234567` produced `/dev/cu.usbmodemP12345671` for logger and `/dev/cu.usbmodemP12345673` for control; active request/response probing confirmed their roles. On macOS 26.6.2, tested serial lengths 8, 9, 12, and 14 retained their identities in the device name; lengths 15, 16, and 17 fell back to `/dev/cu.usbmodem31101` and `/dev/cu.usbmodem31103`. I/O Registry still reported the long USB serial strings, so descriptor delivery itself worked. Treat 14 as the longest tested working length on this system, not a cross-version guarantee.
 
-For the first implementation, add a build-supplied serial identity, provisioned per device, and validate its alphabet and length. A proposed input is `PICO_USB_SERIAL`; it does not exist today. Track it in Cargo rerun inputs and share its validation/generation between USB configuration and preset construction. Assign distinct identities when provisioning multiple boards. A later device-derived identity can replace provisioning after its macOS naming behavior and initialization path are verified; do not add runtime bytecode patching just to shorten this command.
+For the first implementation, add a build-supplied serial identity, provisioned per device, and validate its alphabet and length. The implemented input is `PICO_USB_SERIAL`; omitting it preserves location-based naming and disables CDC installation entries. Prefer a `P`-prefixed ASCII alphanumeric identity of at most eight characters for compatibility with the historical implementation as well as the tested Mac. Longer identities up to 14 require an explicit supported-macOS matrix. Do not use a full 16-hex-character identifier plus a `P` prefix: that 17-character value demonstrably breaks the selector. Track the input in Cargo rerun hints and share its validation/generation between USB configuration and preset construction. Assign distinct identities when provisioning multiple boards. A later device-derived identity can replace provisioning after its length and initialization path are verified; the generic selector requires no runtime keyboard-program patching.
 
 ### USB connection is not a bootstrap request
 
 The workspace uses `embassy-usb` 0.6.0. Its local source shows that `wait_connection()` waits for the endpoint to be enabled, not for a host application to open the serial port. DTR is separately available. Arm the installer explicitly through the hardware preset and require `B1\n`; neither USB enumeration nor DTR alone should send executable shell text. [Embassy CDC API](https://docs.embassy.dev/embassy-usb/git/default/class/cdc_acm/struct.CdcAcmClass.html).
 
-CDC writes must fit the maximum packet size, currently 64 bytes. A response ending on a full packet boundary needs a short packet or zero-length packet so the host can receive that phase before sending its next request. A ZLP completes a USB transaction; it does **not** provide a serial EOF. [Embassy CDC packet constraints](https://docs.embassy.dev/embassy-usb/git/default/class/cdc_acm/struct.CdcAcmClass.html).
+CDC writes must fit the maximum packet size, currently 64 bytes. Follow Embassy's documented requirement to terminate responses ending on a full packet boundary with a short packet/ZLP. A ZLP completes a USB transaction; it does **not** provide a serial EOF. [Embassy CDC packet constraints](https://docs.embassy.dev/embassy-usb/git/default/class/cdc_acm/struct.CdcAcmClass.html). This Mac delivered complete 64-, 1,024-, and 16,384-byte diagnostic responses even without a ZLP before the next request; do not infer portable behavior or remove explicit response termination from that observation.
 
 ### Shell parsing and binary reception need separate phases
 
@@ -88,7 +238,7 @@ Use full-block reads for complete blocks and an exact remainder read. A portable
 | `firmware/src/capabilities.rs`, frontend status handling | Expose installation state without requiring a running agent; keep display and Web UI status consistent. |
 | `README.md`, `docs/PROTOCOL.md`, `docs/HARDWARE.md`, `docs/ARCHITECTURE.md` | Document the implemented workflow, stream version, identity requirements, bounds, and compatibility. |
 
-Avoid embedding a second copy of the executable. The FAT builder can expose a bounded table of file extents, and the CDC sender can read those slices from the existing 4 MiB image. Generate extents while allocating clusters, and verify that reconstructing the bytes produces the packaged artifact's digest. Do not assume file contiguity or introduce a firmware FAT parser. `firmware/src/usb/msc.rs::image()` already exposes the flash-backed image.
+Avoid embedding a second copy of the executable. The FAT builder can expose a bounded table of file extents, and the CDC sender can read those slices from the existing 4 MiB image. Generate extents while allocating clusters, and verify that reconstructing the bytes produces the packaged artifact's digest. Do not assume file contiguity or introduce a firmware FAT parser. `firmware/src/usb/msc.rs::image()` already exposes the flash-backed image. The physical experiment verified this approach: a host-side FAT metadata walk found the existing agent extent, and the probe streamed that flash range using bounded packet writes, with no duplicate executable in its ELF. Production metadata must be generated from the current image, not copy the experiment's offsets.
 
 For v1, preserve `memory.x`, the 4 MiB MSC region, and persistent configuration slots. Add only small manifests, installer text, and bounded transfer state. Review task-stack placement and linked size. Missing artifacts make the installation preset unavailable; an Intel host must get an explicit unsupported/missing-artifact outcome until an Intel binary is packaged.
 
@@ -110,11 +260,11 @@ Idle -> Armed -> SendInstaller -> AwaitManifestRequest
 1. Accept local installation only when USB and the matching artifact are ready and no host agent, relay, benchmark, or bootstrap owns the control connection. Reserve bootstrap state and submit the HID preset atomically enough to prevent a busy submission leaving installation armed. Use generation-owned cancellation so a stale completion cannot cancel a new install.
 2. `B1\n` requests the installer. Send its complete compound command and terminate the USB response properly. The installer preflights utilities, determines host architecture, creates private staging, and starts its watchdog.
 3. The installer requests a manifest with version and architecture. Return a bounded canonical line containing protocol version, architecture, executable length, transfer block size, and SHA-256. Validate every field; reject missing artifacts before binary transfer.
-4. Transfer **raw binary** in requested blocks, proposed maximum 1,024 bytes. Each bounded text request contains the expected block index. Firmware returns exactly the known block length; the host reads exactly that many bytes, appends them, checks the accumulated size, then requests the next block. There is no binary data until a block request, and no unsolicited trailing status after a block.
+4. Transfer **raw binary** in requested blocks, recommended maximum **16,384 bytes** based on the physical measurements. Each bounded text request contains the expected block index. Firmware returns exactly the known block length; the host reads exactly that many bytes, appends them, checks the accumulated size, then requests the next block. There is no binary data until a block request, and no unsolicited trailing status after a block. The sender streams 64-byte flash slices; a 16 KiB block does not require a 16 KiB firmware buffer.
 5. After the final block, verify exact file length and SHA-256. Send a verification result and consume a final completion line. Firmware returns to normal TLV service before the installer closes all serial handles and launches the agent.
 6. On any failure, abandon the partial file and return a terminal error. Firmware clears decoder/transfer state and invalidates the generation. No partial executable is launched.
 
-Suggested initial bounds, to be measured and enforced: one session, 64-byte request lines, 256-byte manifest/completion lines, 8 KiB installer source, 1,024-byte transfer blocks, artifact length no larger than the packaged image, 30-second arm deadline, 5-second per-phase inactivity deadline, and 120-second total install deadline. Tune deadlines only from measured full-agent transfers. Stream installer text and artifact slices directly from flash; do not put the complete script or executable on a firmware task stack.
+Suggested initial bounds: one session, 64-byte request lines, 256-byte manifest/completion lines, 8 KiB installer source, 16,384-byte transfer blocks, artifact length no larger than the packaged image, 30-second arm deadline, 5-second per-phase inactivity deadline, and 120-second total install deadline. The actual-agent transfer completed in 1.615 seconds on this link with fullblock reads; the timeout budget remains deliberately conservative pending slower-host tests and complete installation integration. Stream installer text and artifact slices directly from flash; do not put the complete script, block, or executable on a firmware task stack.
 
 Bootstrap has its own bounds; the existing TLV maximum remains **2,048 bytes**. The normal TLV parser must be reset at every transition. During active bootstrap, prevent `CTRL_CHAN` traffic, heartbeat probes, or relay responses from being emitted into the installer stream. Define explicit busy outcomes for new host operations, and preserve the existing browser-transfer backpressure outside bootstrap. Additive UI status must be tested across all endpoints that consume it.
 
@@ -135,9 +285,9 @@ SHA-256 detects damaged transfers; a hash delivered by the same device does not 
 
 ### 1. Establish the device-name contract
 
-Test a short alphanumeric serial on the board with logger and control interfaces present. Record actual `/dev/cu.*` names and I/O Registry interface numbers. Test direct ports, hubs, unplug/replug, two Picos, and unrelated serial devices. Gate the 96-character selector on evidence that it selects only the correct control interface. If macOS naming differs, revise the selector and remeasure before implementation proceeds.
+The connected Mac/Pico checks established the short serial and logger/control naming contract. Repeat against the full production composite and supported macOS versions. Extend coverage to alternate ports/hubs, two Picos, and unrelated serial devices. Preserve the 96-character selector's ambiguity guard and reject unsupported serial identities at build time. See the results section for physical reconnect coverage.
 
-Hardware flashing/testing is a separate explicitly authorized activity; it was not performed for this research task.
+The user explicitly authorized the board experiments and waived restoration of the original firmware. The diagnostic firmware has now been replaced by a verified production build with CDC installation support. Historical probe sources/captures remain outside the repository.
 
 ### 2. Build and validate artifact metadata
 
@@ -174,7 +324,7 @@ An explicitly authorized board smoke test must demonstrate installation with MSC
 
 ## Research validation already performed
 
-These checks used synthetic data and temporary files outside the repository; they did not execute or install the real host agent, open a physical USB port, or flash hardware.
+The initial checks below used synthetic data and temporary files outside the repository. They preceded the explicitly authorized physical-board experiments in the next section.
 
 | Local experiment | Result |
 | --- | --- |
@@ -188,4 +338,54 @@ These checks used synthetic data and temporary files outside the repository; the
 | Close serial redirections on the program-launching `exec` | Failed descriptor audit: a saved serial descriptor was inherited |
 | Standalone descriptor-closing `exec`, then program-launching `exec` | Passed audit of descriptors 0–255; no serial descriptor inherited |
 
-The ad hoc harness was run with `python3 /tmp/pico_cdc_bootstrap_research.py`; Python was only a research tool, not an installer dependency. Its scenarios should become maintained integration tests during implementation. PTYs validate shell behavior and fragmented streams, but cannot validate USB device naming, DTR, endpoint backpressure, packet termination, Terminal launch timing, HID layout behavior, or board cancellation. Those remain explicit acceptance gates.
+The ad hoc harness was run with `python3 /tmp/pico_cdc_bootstrap_research.py`; Python was only a research tool, not an installer dependency. Its scenarios should become maintained integration tests during implementation. PTYs alone cannot validate USB naming, DTR, or packet termination; the board results below cover part of that gap. Terminal launch timing, physical HID layout behavior, and production board cancellation remain acceptance gates.
+
+## Physical-board results
+
+The test project and captures are under `/tmp/pico-cdc-board-research.ZexmFw/`, outside the repository. The probe uses RP2350 Embassy USB with logger CDC allocated before control CDC, matching production order. It deliberately omits HID, MSC, Wi-Fi, display, application TLV routing, and persistent writes. Its request handlers are diagnostic scaffolding, not a completed production bootstrap protocol.
+
+Each build used the real embedded release target and each flash used verified `picotool load -u -v -x ... -t elf`. The final ELF contained 28,492 bytes of flash load data, ending at address `0x10006f4c`, below the retained MSC region and final two configuration slots. No persistent configuration slots were written. The user stopped the already-running `HOSTAGNT` process after it was found holding the control port; the tests did not kill it. That conflict confirms that installer admission/port ownership needs an explicit busy outcome.
+
+| Physical check on macOS 26.6.2 | Result |
+| --- | --- |
+| Eight-character serial `P1234567` | Logger `…P12345671`, control `…P12345673`; roles actively probed |
+| Serial lengths 9, 12, 14 | Identity-based names retained |
+| Serial lengths 15, 16, 17 | Location-based `…31101`/`…31103`; long-serial descriptor still visible in I/O Registry |
+| Physical unplug/reconnect to the same USB port | Both names retained with serial `P0123456789ABC`; control health probe and fresh 96-character bootstrap passed |
+| 96-character first-stage receiver | Received and executed the shell stage from the physical Pico |
+| Raw lengths 0, 1, 63, 64, 65, 1,023, 1,024, 1,025, 16,384 | Exact synthetic bytes; subsequent health probe passed |
+| Default open / explicit DTR clear / explicit DTR set | Firmware reported 1 / 0 / 1 |
+| Full packet responses without ZLP | This Mac delivered all requested bytes before a subsequent short response; keep portable ZLP handling |
+| Corrupted 1 MiB synthetic download | Digest failed; launch helper not executed; next bootstrap succeeded |
+| Missing installer and stalled real-binary block | Process-group SIGINT terminated the receiver; port reopened; health probe and fresh bootstrap passed |
+| Launch descriptor audit | Host helper checked descriptors 0–255; none referenced the CDC device |
+| Existing agent bytes streamed directly from retained MSC flash | 1,487,440 bytes; size and SHA-256 matched the local packaged artifact; no agent execution |
+
+The experimental real-file installer was 1,081 bytes delivered over CDC; its source size adds no keyboard keystrokes. It staged and deleted the file using native macOS shell utilities, then executed a locally compiled Rust descriptor-audit helper instead of the downloaded agent. Python orchestrated the tests but was not used by the delivered shell receiver.
+
+Measured shell download times include shell startup, requested blocks, file staging, SHA-256 verification, cleanup, and audit-helper handoff; they exclude keyboard typing, opening Terminal, final installation, and real agent startup. These are individual local measurements, not a supported-host performance guarantee.
+
+| Payload | Block size | Exact reader | Seconds |
+| --- | ---: | --- | ---: |
+| 1,048,641 synthetic bytes | 1 KiB | `dd iflag=fullblock` | 1.885 |
+| 1,048,641 synthetic bytes | 4 KiB | `dd iflag=fullblock` | 1.151 |
+| 1,048,641 synthetic bytes | 16 KiB | `dd iflag=fullblock` | 1.094 |
+| 1,048,641 synthetic bytes | 16 KiB | `dd bs=1` fallback | 1.582 |
+| 1,487,440 actual agent bytes | 1 KiB | `dd iflag=fullblock` | 2.244 |
+| 1,487,440 actual agent bytes | 16 KiB | `dd iflag=fullblock` | 1.615 |
+| 1,487,440 actual agent bytes | 16 KiB | `dd bs=1` fallback | 2.406 |
+| 1,487,440 actual agent bytes, after physical reconnect | 16 KiB | `dd iflag=fullblock` | 1.626 |
+
+The retained image's tested agent was one contiguous extent at flash offset 12,625,408, with SHA-256 `fd29a16a1fcda646474e89177bda88fd8e4972a94dd1c819747113a788ca40f6`. Those are evidence from this image only. The production generator must support bounded multiple extents and regenerate size/digest/offsets whenever artifacts or FAT allocation change.
+
+Research commands and files:
+
+```sh
+python3 /tmp/pico-cdc-board-research.ZexmFw/board_checks.py
+python3 /tmp/pico-cdc-board-research.ZexmFw/bootstrap_checks.py
+python3 /tmp/pico-cdc-board-research.ZexmFw/real_download_checks.py
+```
+
+`bootstrap_checks.py` targeted the earlier synthetic-installer firmware revision. The current probe instead serves the real-file test installer; do not rerun that harness expecting its recorded synthetic payload without rebuilding the matching revision. The current build sources are in `probe/`; JSON captures are `board-results.json`, `bootstrap-results.json`, `real-download-results.json`, and `reconnect-results.json`. These temporary research assets are not a maintained repository test suite.
+
+Remaining integration gates: the full USB composite, HID-driven Terminal opening/typing on US and DE layouts, production arming/admission, correlated cancellation and Y Stop, safe watchdog inheritance, actual Terminal Control-C, unplug during a transfer, atomic installation, real host-agent launch and TLV handshake, multiple attached Picos, alternate USB topology, and other supported macOS versions. The prototype does not prove these behaviors or enforce all planned session/manifest/timeout checks.

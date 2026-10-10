@@ -47,6 +47,14 @@ pub use view::{
     CTRL_CHAN, CTRL_READY, TransferRelayMode, TransferViewState, set_transfer_relay_mode,
     transfer_relay_mode, transfer_view_snapshot,
 };
+
+/// Reject new operations during bootstrap rather than queueing stale commands for handoff.
+pub fn try_command(command: CtrlCommand) -> Result<(), ()> {
+    if super::bootstrap::active() {
+        return Err(());
+    }
+    CTRL_CHAN.try_send(command).map_err(|_| ())
+}
 use view::{
     TRANSFER_CHUNK_COUNT, TRANSFER_FINISHED_CHUNKS, TRANSFER_ID, TRANSFER_RECEIVED_SIZE,
     TRANSFER_TOTAL_SIZE, set_transfer_view_state,
@@ -388,6 +396,47 @@ where
     let mut raw_benchmark = RawUsbBenchmarkState::new();
 
     loop {
+        if let Some((generation, armed_at)) = super::bootstrap::armed() {
+            let result = super::bootstrap::run(&mut class, generation, armed_at).await;
+            decoder = TlvStreamDecoder::new();
+            while CTRL_CHAN.try_receive().is_ok() {}
+            super::bootstrap::finish(
+                generation,
+                if result.is_ok() {
+                    super::bootstrap::Phase::Verified
+                } else {
+                    super::bootstrap::Phase::Failed
+                },
+            );
+            if result.is_err() {
+                // A failed shell reader may still be waiting. Keep the stream
+                // quiet until its owner closes the port, then return to TLV.
+                while class.dtr() {
+                    if matches!(
+                        class
+                            .read_packet(&mut packet)
+                            .with_timeout(Duration::from_millis(100))
+                            .await,
+                        Ok(Err(_))
+                    ) {
+                        break;
+                    }
+                }
+            }
+            super::bootstrap::release();
+            continue;
+        }
+        super::bootstrap::CAN_ARM.store(
+            decoder.header_len == 0
+                && !decoder.reading_payload
+                && relay.is_idle()
+                && !benchmark.active
+                && !raw_benchmark.active
+                && CTRL_CHAN.is_empty()
+                && !class.dtr()
+                && !crate::capabilities::host_agent_present(),
+            Ordering::Release,
+        );
         if raw_benchmark.active {
             match class
                 .read_packet(&mut packet)
@@ -434,14 +483,31 @@ where
             continue;
         }
 
-        match select(CTRL_CHAN.receive(), class.read_packet(&mut packet)).await {
+        let event = match select(
+            super::bootstrap::WAKE.wait(),
+            select(
+                CTRL_CHAN.receive(),
+                class
+                    .read_packet(&mut packet)
+                    .with_timeout(Duration::from_millis(100)),
+            ),
+        )
+        .await
+        {
+            Either::First(_) => continue,
+            Either::Second(event) => event,
+        };
+        match event {
             Either::First(cmd) => {
+                super::bootstrap::CAN_ARM.store(false, Ordering::Release);
                 if let Err(err) = handle_command(&mut class, max_packet, cmd).await {
                     log::warn!("usb: control send error: {:?}", err);
                 }
             }
             Either::Second(result) => match result {
-                Ok(count) => {
+                Err(_) => continue,
+                Ok(Ok(count)) => {
+                    super::bootstrap::CAN_ARM.store(false, Ordering::Release);
                     if count == 0 {
                         continue;
                     }
@@ -459,8 +525,14 @@ where
                         log::warn!("usb: control rx error: {:?}", err);
                     }
                 }
-                Err(err) => {
+                Ok(Err(err)) => {
+                    super::bootstrap::CAN_ARM.store(false, Ordering::Release);
+                    CTRL_READY.store(false, Ordering::Release);
+                    crate::capabilities::clear_host_agent();
                     log::warn!("usb: control read error: {:?}", err);
+                    class.wait_connection().await;
+                    decoder = TlvStreamDecoder::new();
+                    CTRL_READY.store(true, Ordering::Release);
                 }
             },
         }

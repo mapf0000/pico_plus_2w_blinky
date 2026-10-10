@@ -198,6 +198,13 @@ Default USB descriptor values:
 | Descriptor max power | 100 mA |
 | EP0 max packet | 64 bytes |
 
+On the tested Mac, the generic Pico keyboard is cached as ANSI (type 40), even
+with the German input source selected. The `mac_de-DE` mapping uses HID usage
+`0x35` for `<`/`>` under that classification. Usage `0x64` produced `^`/`°` and
+broke shell redirections in the CDC installation command. This distinction is
+about how macOS identifies the USB keyboard, independently of the host's built-in
+keyboard or input language; ISO-classified Pico behavior remains unverified.
+
 The volume label defaults to `PICO_AGENT` and can be overridden at build time with `PICO_MSC_LABEL` (maximum 11 valid FAT-label characters after normalization). Expected contents:
 
 ```text
@@ -395,3 +402,21 @@ Use this checklist for changes to startup, pins, memory, network, USB, transfer,
 - [ ] Physical BOOTSEL mode is reachable with the current enclosure/cabling.
 - [ ] `picotool info` recognizes the ROM device.
 - [ ] A known-good release can be reflashed from BOOTSEL and returns to normal boot.
+## CDC installer identity and flash use
+
+`PICO_USB_SERIAL` is an optional build input: provision a unique 2–8 character
+ASCII alphanumeric value starting with `P`. It becomes a static USB serial
+descriptor and enables the CDC installation presets when the Apple Silicon agent
+is packaged. Omitting it preserves location-derived port names and disables
+those presets. Logger/control interface order remains unchanged. On the tested
+Mac, serial `P1234567` names logger `…P12345671` and control `…P12345673`; naming
+on other supported macOS versions remains an acceptance check.
+
+The installer reads generated, bounded file extents from the same 4 MiB FAT
+image used by MSC. Installer source and the small manifest live in ordinary
+flash; no second agent copy, new flash reservation, or persistent writes are
+introduced. Build-time SHA-256 uses the existing host-side `sha2` version;
+firmware adds no hashing dependency. New CDC block buffers remain 64 bytes and
+request storage 64 bytes. WebSocket text temporaries grow to 1,024 bytes, while
+transfer queue payloads/depths stay unchanged. Verify the final embedded link
+and memory use whenever changing these bounds.

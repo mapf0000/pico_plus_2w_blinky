@@ -883,11 +883,17 @@ pub(crate) fn app() -> Html {
         && capabilities
             .as_ref()
             .is_some_and(|snapshot| snapshot.supports_feature("usb_control"));
+    let installing = capabilities
+        .as_ref()
+        .and_then(|hello| hello.cdc_bootstrap.as_ref())
+        .is_some_and(api::CdcBootstrapInfo::active);
     let script_ready = device_ready
+        && !installing
         && capabilities
             .as_ref()
             .is_some_and(|snapshot| snapshot.supports_keyboard_feature("script_effect_v1"));
     let transfer_capable = device_ready
+        && !installing
         && capabilities.as_ref().is_some_and(|snapshot| {
             snapshot.transfer_compatible()
                 && snapshot.host_agent.present
@@ -918,6 +924,7 @@ pub(crate) fn app() -> Html {
         );
     }
     let filesystem_ready = device_ready
+        && !installing
         && capabilities.as_ref().is_some_and(|snapshot| {
             snapshot.filesystem_compatible()
                 && snapshot.host_agent.present

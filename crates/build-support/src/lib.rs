@@ -33,6 +33,7 @@ pub fn run() -> Result<()> {
         env_consts::PYTHON_MAX_BYTES,
         env_consts::MSC_LABEL,
         env_consts::FIRMWARE_BUILD,
+        env_consts::USB_SERIAL,
     ]);
 
     // Re-run when these files change (build-support itself lives in its own crate)
@@ -53,6 +54,14 @@ pub fn run() -> Result<()> {
         bail!("PICO_FIRMWARE_BUILD must contain at least one build identifier character");
     }
     cargo::rustc_env(env_consts::FIRMWARE_BUILD, &firmware_build);
+    if let Ok(serial) = env::var(env_consts::USB_SERIAL) {
+        bootstrap::validate_serial(&serial)?;
+        cargo::rustc_env(env_consts::USB_SERIAL, &serial);
+    }
+    cargo::rerun_if_changed(
+        cfg.repo_root
+            .join("crates/build-support/src/cdc_installer.sh"),
+    );
 
     // 1) Linker script
     linker::install_memory_x(&cfg)?;
@@ -101,6 +110,7 @@ mod env_consts {
     pub const PYTHON_MAX_BYTES: &str = "PICO_PYTHON_WASM_MAX_BYTES";
     pub const MSC_LABEL: &str = "PICO_MSC_LABEL";
     pub const FIRMWARE_BUILD: &str = "PICO_FIRMWARE_BUILD";
+    pub const USB_SERIAL: &str = "PICO_USB_SERIAL";
 }
 
 impl Config {
@@ -207,4 +217,5 @@ mod frontend;
 
 mod msc_image;
 
+mod bootstrap;
 mod presets;

@@ -5,6 +5,7 @@ use super::{input::*, model::*, renderer::*, scene::*};
 
 fn preset() -> Preset {
     Preset {
+        action: PresetAction::Keyboard,
         name: "Keyboard test",
         layout: "US",
         launches_agent: false,
@@ -115,6 +116,94 @@ fn selections_wrap_and_empty_catalogs_are_safe() {
     buttons.insert(Button::B);
     buttons.insert(Button::X);
     assert!(controller.handle_input(buttons, &[]).is_none());
+}
+
+#[test]
+fn cdc_install_reports_cached_presence_then_becomes_ready_without_auto_launch() {
+    for action in [PresetAction::CdcArm, PresetAction::CdcInstall] {
+        let mut controller = Controller::default();
+        controller.navigation.selected = Selection(0);
+        let mut install = preset();
+        install.action = action;
+        install.launches_agent = true;
+        let catalog = [install];
+        let mut activate = ButtonMask::default();
+        activate.insert(Button::X);
+        let mut state = snapshot(1_000);
+        state.agent_present = true;
+        controller.update(state, None);
+        assert!(controller.handle_input(activate, &catalog).is_none());
+        assert_eq!(
+            controller.payloads.status.text,
+            "Agent recently seen; wait 25s after stop"
+        );
+        assert_eq!(controller.payloads.status.severity, Severity::Warning);
+        let mut state = snapshot(2_000);
+        state.agent_present = true;
+        assert!(!controller.update(state, None));
+        assert!(
+            controller
+                .handle_input(ButtonMask::default(), &catalog)
+                .is_none()
+        );
+        assert!(controller.update(snapshot(26_001), None));
+        assert_eq!(
+            controller.payloads.status.text,
+            "Agent not detected; press X to retry"
+        );
+        assert!(!controller.update(snapshot(26_002), None));
+        assert!(
+            controller
+                .handle_input(ButtonMask::default(), &catalog)
+                .is_none()
+        );
+        assert!(matches!(
+            controller.handle_input(activate, &catalog),
+            Some(Intent::RunPreset(0))
+        ));
+    }
+}
+
+#[test]
+fn manual_cdc_arm_blocks_another_launch_with_visible_feedback_and_recovers() {
+    let mut controller = Controller::default();
+    controller.navigation.selected = Selection(0);
+    let mut arm = preset();
+    arm.action = PresetAction::CdcArm;
+    arm.launches_agent = true;
+    let mut install = preset();
+    install.action = PresetAction::CdcInstall;
+    install.launches_agent = true;
+    let catalog = [arm, install];
+    let mut activate = ButtonMask::default();
+    activate.insert(Button::X);
+    assert!(matches!(
+        controller.handle_input(activate, &catalog),
+        Some(Intent::RunPreset(0))
+    ));
+    controller.payloads.installation_status(
+        "CDC armed; enter command within 30s",
+        false,
+        true,
+        1_000,
+    );
+    controller.payloads.selected = Selection(1);
+    assert!(controller.handle_input(activate, &catalog).is_none());
+    assert_eq!(
+        controller.payloads.status.text,
+        "Installation pending; wait for completion"
+    );
+    assert_eq!(controller.payloads.status.severity, Severity::Warning);
+    controller.payloads.installation_status(
+        "CDC failed; retry or use Control-C",
+        true,
+        false,
+        31_000,
+    );
+    assert!(matches!(
+        controller.handle_input(activate, &catalog),
+        Some(Intent::RunPreset(1))
+    ));
 }
 
 #[test]
