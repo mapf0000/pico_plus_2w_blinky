@@ -34,6 +34,30 @@ The browser never accesses the host filesystem directly. For filesystem and tran
 
 ## Workspace components
 
+### Native companion prototype
+
+Package: `pico-companion`, under `apps/companion/`; client state lives in
+`crates/companion-core`. The prototype currently supports only an explicit mock
+transport and does not communicate with Pico hardware. It runs a native egui
+window without a browser or local HTTP server. The existing WLAN frontend and
+firmware services remain the production paths.
+
+The UI sends bounded commands to a dedicated Tokio backend: 16 normal commands
+and four urgent cancellation/disconnect commands. A watch channel coalesces
+presentation snapshots rather than queueing every status update. The client
+owns request IDs, connection incarnations, deadlines, control admission, and a
+128-entry diagnostic ring containing static messages, never typed text. Both
+transport replies and queued UI commands are checked against the current
+connection incarnation; reconnection does not replay effects or acquire control.
+Shutdown interrupts pending work and joins the backend thread.
+
+The mock validates the existing correlated `script-protocol` envelope and KBD1
+through `firmware-exec`. It simulates discovery, status, control and execution;
+it does not implement or validate BLE pairing, packet transport, or USB timing.
+Python remains in the browser Worker. See the
+[companion README](../apps/companion/README.md) and
+[BLE implementation plan](../NATIVE_COMPANION_BLE_PLAN.md).
+
 ### Firmware
 
 Package: `pico_rust`, source under `firmware/`.

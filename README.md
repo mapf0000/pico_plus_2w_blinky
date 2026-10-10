@@ -82,6 +82,21 @@ The firmware build is wired so a single `cargo run -p pico_rust --release` build
 - Frontend only (release build):
   - `cd apps/frontend && trunk build --release` (outputs to `apps/frontend/dist/`)
 
+## Native companion prototype
+
+An experimental Rust/egui companion is available alongside the WLAN UI. Its
+first milestone uses an explicit mock device; Bluetooth and Pico control are
+not implemented yet. Launch it from the root:
+
+```sh
+cargo run -p pico-companion -- --mock
+```
+
+Connect to the simulated device, acquire mock control, and try the keyboard
+effect and cancellation controls. For a headless lifecycle check, add
+`--self-test`. See [companion commands and scenarios](apps/companion/README.md)
+and [the native/BLE implementation plan](NATIVE_COMPANION_BLE_PLAN.md).
+
 ## Hardware keyboard payloads
 
 The display's **Payloads** page works without a browser or a running host agent.

@@ -139,8 +139,42 @@ library tests (30), build-support and firmware library/embedded Clippy,
 provisioned embedded release build, shell syntax/help, formatting, and diff
 checks. Static SRAM is 251,036 bytes, 224 fewer than the preceding build. The
 image remains exactly 4 MiB and no ELF section overlaps persistent configuration.
-This build is ready; verified flashing, no-MSC enumeration, and CDC delivery on
-this composite are pending physical BOOTSEL and exclusive control-port access.
+The build was verified-flashed and rebooted with:
+
+```sh
+picotool load -u -v -x -t elf target/thumbv8m.main-none-eabihf/release/pico_rust
+```
+
+macOS IORegistry reports exactly five USB interfaces: logger CDC control/data
+(classes 2/10, interfaces 0/1), agent CDC control/data (classes 2/10, interfaces
+2/3), and HID keyboard (class 3, interface 4). No class-8 mass-storage interface
+or `/Volumes/PICO_AGENT` mount remains. Both provisioned serial names are
+unchanged. The existing agent reconnected after reboot and held the control port;
+the first `scripts/device-test --port /dev/cu.usbmodemP12345673` attempt therefore
+failed at exclusive open with `Device or resource busy`, before protocol checks.
+After the operator stopped the agent, the same command passed all 11 raw control
+checks, the real restricted agent handshake, and both keepalive round-trips at
+the production 10-second cadence. The test exited normally and did not terminate
+another process. The operator subsequently verified the result and reported
+that it works. A fresh download was not separately instrumented in this removal
+follow-up; the prior measured DE installation remains recorded above. The
+temporary logger-only observer exited when its USB device became unavailable;
+it never opened the control port and is no longer running.
+
+Software validation commands for this removal all passed:
+
+```sh
+cargo test -p build-support -p firmware-exec
+cargo test -p pico_rust --lib --no-default-features
+cargo clippy -p build-support --all-targets -- -D warnings
+cargo clippy -p pico_rust --lib --tests --no-default-features -- -D warnings
+PICO_USB_SERIAL=P1234567 cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+PICO_USB_SERIAL=P1234567 cargo clippy -p pico_rust --release --target thumbv8m.main-none-eabihf -- -D warnings
+bash -n scripts/device-test
+scripts/device-test --help
+cargo fmt --all -- --check
+git diff --check
+```
 
 ### German HID correction
 

@@ -1,6 +1,9 @@
 # Native Rust companion and BLE feasibility plan
 
-Status: proposed implementation plan. No companion app or BLE service is implemented by this document.
+Status: milestone 1 implemented: native egui shell, bounded client/backend,
+deterministic mock, failure scenarios, KBD1 demonstration and headless lifecycle
+check. The app requires `--mock`; hardware BLE and Pico changes remain planned.
+See [run instructions](apps/companion/README.md).
 
 ## Objective and scope
 

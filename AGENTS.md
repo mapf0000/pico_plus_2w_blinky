@@ -82,6 +82,19 @@ The crate is always built for `wasm32-unknown-unknown`. It uses browser APIs and
 
 The host agent must remain portable unless code is explicitly target-gated. The macOS e2e suite is gated with `cfg(target_os = "macos")` and is skipped elsewhere.
 
+### Native companion: `apps/companion/`
+
+- `src/app.rs`: native egui rendering and controls.
+- `src/backend.rs`: bounded UI commands, Tokio backend and shutdown.
+- `src/smoke.rs`: deterministic headless mock lifecycle check.
+- `crates/companion-core`: platform-independent client state, keyboard lowering,
+  correlation, deadlines and mock transport.
+
+The package is `pico-companion`. It currently requires `--mock` and does not
+access Bluetooth or USB. Native builds must remain independent of firmware asset
+generation and browser tooling. Keep device work out of UI callbacks, bound
+queues/diagnostics, and scope commands/results to a connection incarnation.
+
 ### Shared crates: `crates/`
 
 - `keyboard-core`: portable, language-neutral layouts, key parsing, lowering, and KBD1 encoding. It is `no_std` by default.
@@ -197,6 +210,19 @@ cargo fmt --all -- --check
 ```
 
 Use targeted checks while iterating. Do not rely on bare `cargo test` at the workspace root: `default-members` points at firmware, whose normal target and build script are embedded-specific.
+
+### Native companion changes
+
+```sh
+cargo test -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo build -p pico-companion --release
+```
+
+Launch the actual native window for rendering/input changes. Mock tests do not
+replace real BLE pairing, radio coexistence, hardware HID, or platform checks.
+Also run the layout/executor suites when keyboard lowering changes.
 
 ### Host agent changes
 
