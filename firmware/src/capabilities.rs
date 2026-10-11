@@ -118,6 +118,15 @@ pub fn host_agent_present() -> bool {
         && Instant::now().as_millis().saturating_sub(last_seen) <= HOST_AGENT_STALE_AFTER_MS
 }
 
+/// Age is sampled from the same heartbeat used by presence; None means unseen.
+pub fn host_agent_age_ms() -> Option<u64> {
+    HOST_AGENT_SEEN.load(Ordering::Acquire).then(|| {
+        Instant::now()
+            .as_millis()
+            .saturating_sub(HOST_AGENT_LAST_SEEN_MS.load(Ordering::Acquire))
+    })
+}
+
 pub fn host_agent_snapshot() -> HostAgentSnapshot {
     HOST_AGENT_STATE.lock(|cell| {
         let state = cell.borrow();

@@ -432,3 +432,86 @@ release companion was opened using that backup. The wire writes
 always fit MTU 23; host integration tests prove that bound without establishing
 radio throughput. OS credential-store import/profile selection, remote atomic
 rotation and native Python/filesystem/file receipt remain unfinished.
+
+## Stable controls and protected overview slice — 2026-10-11
+
+Status/overview reads now use background state rather than the user-operation
+busy flag. One bounded user intent waits behind a read, is revalidated after it,
+and is discarded on disconnect, failure or timeout (including a late read reply).
+Queued text can be cancelled before submission. Diagnostics remain capped at 128
+static messages and now carry timestamps, session/operation/error context, with
+filtering, errors-only, clear and optional autoscroll. Text, bytecode and keys are
+never diagnostic data. The stale BLE v2 label is corrected.
+
+Overview v1 adds a negotiated Info flag and acquired, encrypted ReadOverview.
+It reuses host heartbeat/metadata and CDC bootstrap state and reports full build,
+execution/USB limits and retained filesystem/transfer versions. The finite response
+bound grows from 48 to 304 bytes; ordinary snapshots stay 48. No USB TLV change,
+streaming relay, new connection or increased packet/queue pool is introduced.
+The companion targets one-second status and ten-second overview polling while
+idle. Heartbeat age is sampled at overview time. Older v3 companions reject the
+new flag; update both ends. New companions can omit overview on earlier v3 firmware.
+
+The user's existing flash/test authorization was used on the supplied BOOTSEL
+device. Flash verification completed before reboot; the key reservation was not
+rewritten. Commands:
+
+```sh
+picotool load -u -v target/thumbv8m.main-none-eabihf/release/pico_rust -t elf
+picotool reboot
+```
+
+The updated native self-test was run with the private provisioning backup in the
+control user's application-support directory, outside `target/`. First discovery
+immediately after reboot found no advertiser; a later scan passed. Apple Silicon
+macOS/Pico results:
+
+- Fresh authentication, acquired encrypted overview readback and advancing live
+  status passed. Readback reported the full `0.1.0-release` build, 4,096-byte KBD1
+  bound, idle CDC stage and absent agent. Latest status read was 395 ms.
+- Release sent during an in-flight background read completed successfully;
+  the read did not mark UI controls busy or reject the command as queue-full.
+- Disconnect and fresh reauthentication/reacquisition/release passed without
+  Pico interaction or HID effects; the provisioned key survived this ELF deployment.
+
+Automated checks passed (47 native/protocol/session tests and 31 portable firmware
+tests; doc tests excluded):
+
+```sh
+cargo test -p ble-protocol -p ble-session -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol -p ble-session --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo build -p pico-companion --release
+cargo test -p pico_rust --lib --no-default-features
+cargo clippy -p pico_rust --lib --tests --no-default-features -- -D warnings
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+cargo fmt --all -- --check
+git diff --check
+```
+
+Regression cases cover stable availability over repeated reads, queued single
+submission, queue saturation, cancel before upload, fresh USB-state revalidation,
+timeout/disconnect/stale results, late completion past deadline, clear during I/O,
+bounded diagnostics without typed text, acquired-only/throttled overview and
+incompatible metadata discarding queued work. Codec tests cover old/new v3 flags,
+absent/stale/maximal metadata, truncation, malformed flags/versions/strings,
+trailing data and maximum response read framing at 20-byte ATT values.
+
+Linked flash including initialized-data load is 4,810,592 bytes, an increase of
+1,916. Static SRAM is 95,280 bytes, an increase of 252; its aligned end is
+`0x2001743C`, leaving 428,996 bytes in striped SRAM before runtime stacks.
+Application flash load ends at `0x10096764`; no load segment overlaps control keys
+or USB identity. Native release size is 7,999,424 bytes. Increased response/snapshot
+scratch is fixed-capacity; linked size does not establish runtime stack headroom.
+The existing upstream `proc-macro-error2` future-incompatibility notice remains.
+
+The actual native window was launched and an application-only screenshot inspected
+for the diagnostic controls and basic layout. The release window was opened with
+the private profile for connected visual acceptance. The user subsequently confirmed
+“Buttons stay steady” after connecting and acquiring control across several refreshes.
+Connected button flicker acceptance passed. Interactive diagnostic filtering/scrolling,
+populated or stale real agent metadata and CDC installation transitions remain
+unconfirmed. No v3 HID/physical
+Stop, maximum radio upload, USB detach/toggle, independent power-cycle, soak or
+Linux/Windows acceptance is claimed here. USB identity editing/persistence remains
+the next implementation slice in the updated plan.

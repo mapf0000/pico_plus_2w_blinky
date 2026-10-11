@@ -1,7 +1,7 @@
 use crate::{
-    Action, CANCEL_TIMEOUT, Connection, Event, Failure, Job, MAX_DEVICES, MAX_DIAGNOSTICS,
-    Operation, Outcome, REQUEST_TIMEOUT, Reply, Request, STATUS_INTERVAL, Snapshot, Tag, Transport,
-    keyboard,
+    Action, CANCEL_TIMEOUT, CONNECT_TIMEOUT, Connection, Diagnostic, DiagnosticContext, Event,
+    Failure, Job, MAX_DEVICES, MAX_DIAGNOSTICS, OVERVIEW_INTERVAL, Operation, Outcome,
+    REQUEST_TIMEOUT, Reply, Request, STATUS_INTERVAL, Snapshot, Tag, Transport, keyboard,
 };
 use std::time::Duration;
 
@@ -12,6 +12,7 @@ enum Kind {
     Acquire,
     Release,
     Status,
+    Overview,
     Usb,
     Effect(script_protocol::EffectId),
 }
@@ -29,7 +30,12 @@ pub struct Client<T> {
     epoch: u64,
     next_request: u64,
     pending: Option<Pending>,
+    queued: Option<Action>,
     next_status: Duration,
+    next_overview: Duration,
+    now: Duration,
+    context: DiagnosticContext,
+    next_diagnostic: u64,
 }
 
 impl<T: Transport> Client<T> {
@@ -40,7 +46,12 @@ impl<T: Transport> Client<T> {
             epoch: 0,
             next_request: 0,
             pending: None,
+            queued: None,
             next_status: Duration::ZERO,
+            next_overview: Duration::ZERO,
+            now: Duration::ZERO,
+            context: DiagnosticContext::Connection,
+            next_diagnostic: 0,
         }
     }
 
@@ -61,9 +72,31 @@ impl<T: Transport> Client<T> {
     }
 
     pub fn dispatch(&mut self, action: Action, now: Duration) {
+        self.now = now;
+        self.context = match &action {
+            Action::Scan => DiagnosticContext::Discovery,
+            Action::Acquire | Action::Release => DiagnosticContext::Control,
+            Action::SetUsbEnabled(_) => DiagnosticContext::Usb,
+            Action::SendText { .. } | Action::Cancel => DiagnosticContext::Keyboard,
+            _ => DiagnosticContext::Connection,
+        };
         match action {
+            Action::ClearDiagnostics => {
+                self.snapshot.diagnostics.clear();
+                self.snapshot.discarded_diagnostics = 0;
+                self.changed();
+            }
             Action::Disconnect => self.disconnect(None),
             Action::Cancel => self.cancel(now),
+            action
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|p| matches!(p.kind, Kind::Status | Kind::Overview))
+                    && self.queued.is_none() =>
+            {
+                self.queue_behind_refresh(action)
+            }
             _ if self.pending.is_some() => self.reject(Failure::QueueFull),
             Action::Scan => {
                 self.disconnect(None);
@@ -95,7 +128,7 @@ impl<T: Transport> Client<T> {
                     Operation::Connect(device),
                     Kind::Connect,
                     now,
-                    REQUEST_TIMEOUT,
+                    CONNECT_TIMEOUT,
                 );
             }
             Action::Acquire | Action::Release | Action::SendText { .. }
@@ -204,6 +237,42 @@ impl<T: Transport> Client<T> {
         }
     }
 
+    fn queue_behind_refresh(&mut self, mut action: Action) {
+        // Exactly one intent, bounded before retention. Revalidate device state
+        // when the read finishes; its result may have changed USB availability.
+        match &mut action {
+            Action::Acquire | Action::Release | Action::SetUsbEnabled(_) => {}
+            Action::SendText {
+                text,
+                layout,
+                delay_ms,
+            } => {
+                if layout.len() > crate::MAX_METADATA_BYTES {
+                    self.reject(Failure::UnsupportedLayout);
+                    return;
+                }
+                if text.len() > keyboard::MAX_TEXT_BYTES {
+                    self.reject(Failure::InvalidText);
+                    return;
+                }
+                if let Err(error) = keyboard::text_effect(text.clone(), layout, *delay_ms) {
+                    self.reject(error);
+                    return;
+                }
+                text.shrink_to_fit();
+                layout.shrink_to_fit();
+                self.snapshot.job = Job::Queued;
+            }
+            _ => {
+                self.reject(Failure::QueueFull);
+                return;
+            }
+        }
+        self.queued = Some(action);
+        self.snapshot.pending = true;
+        self.note("Command waiting for the current status read");
+    }
+
     fn connected_compatible(&self) -> bool {
         self.snapshot.connection == Connection::Connected && self.snapshot.compatible()
     }
@@ -245,14 +314,18 @@ impl<T: Transport> Client<T> {
     }
 
     fn start(&mut self, request: Request, kind: Kind, now: Duration, timeout: Duration) {
-        self.snapshot.last_error = None;
+        let background = matches!(kind, Kind::Status | Kind::Overview);
+        if !background {
+            self.snapshot.last_error = None;
+        }
         self.pending = Some(Pending {
             tag: request.tag,
             kind,
             started: now,
             deadline: now + timeout,
         });
-        self.snapshot.pending = true;
+        self.snapshot.pending = !background;
+        self.snapshot.refreshing = background;
         self.changed();
         if let Err(error) = self.transport.submit(request, now) {
             self.disconnect(Some(error));
@@ -260,6 +333,13 @@ impl<T: Transport> Client<T> {
     }
 
     fn cancel(&mut self, now: Duration) {
+        if matches!(self.queued, Some(Action::SendText { .. })) {
+            self.queued = None;
+            self.snapshot.pending = false;
+            self.snapshot.job = Job::Finished(Outcome::Cancelled);
+            self.note("Queued effect cancelled before submission");
+            return;
+        }
         let Some(pending) = self.pending.as_mut() else {
             self.reject(Failure::NotReady);
             return;
@@ -291,6 +371,7 @@ impl<T: Transport> Client<T> {
     }
 
     pub fn tick(&mut self, now: Duration) {
+        self.now = now;
         // Bound work even if a faulty adapter floods stale events.
         for _ in 0..32 {
             let Some(event) = self.transport.poll(now) else {
@@ -306,13 +387,33 @@ impl<T: Transport> Client<T> {
             self.disconnect(Some(Failure::Timeout));
             return;
         }
-        if self.connected_compatible() && self.pending.is_none() && now >= self.next_status {
+        if self.connected_compatible()
+            && self.pending.is_none()
+            && self.snapshot.control_acquired
+            && now >= self.next_overview
+            && self
+                .snapshot
+                .capabilities
+                .as_ref()
+                .is_some_and(|c| c.overview_supported)
+        {
+            self.next_overview = now + OVERVIEW_INTERVAL;
+            self.context = DiagnosticContext::Status;
+            self.issue(
+                Operation::Overview,
+                Kind::Overview,
+                now,
+                Duration::from_secs(8),
+            );
+        } else if self.connected_compatible() && self.pending.is_none() && now >= self.next_status {
             self.next_status = now + STATUS_INTERVAL;
+            self.context = DiagnosticContext::Status;
             self.issue(Operation::Status, Kind::Status, now, REQUEST_TIMEOUT);
         }
     }
 
     fn receive(&mut self, event: Event, now: Duration) {
+        self.now = now;
         let (tag, reply) = match event {
             Event::Lost { epoch } => {
                 if epoch == self.epoch
@@ -334,6 +435,19 @@ impl<T: Transport> Client<T> {
             return;
         }
         let kind = pending.kind;
+        let deadline = pending.deadline;
+        self.context = match kind {
+            Kind::Scan => DiagnosticContext::Discovery,
+            Kind::Connect => DiagnosticContext::Connection,
+            Kind::Acquire | Kind::Release => DiagnosticContext::Control,
+            Kind::Status | Kind::Overview => DiagnosticContext::Status,
+            Kind::Usb => DiagnosticContext::Usb,
+            Kind::Effect(_) => DiagnosticContext::Keyboard,
+        };
+        if now >= deadline {
+            self.disconnect(Some(Failure::Timeout));
+            return;
+        }
         match (kind, reply) {
             (Kind::Scan, Reply::Devices(devices)) => {
                 if devices.len() > MAX_DEVICES
@@ -362,6 +476,7 @@ impl<T: Transport> Client<T> {
                 let compatible = caps.compatible();
                 self.snapshot.capabilities = Some(caps);
                 self.snapshot.connection = Connection::Connected;
+                self.snapshot.last_status_update = Some(now);
                 self.next_status = now + STATUS_INTERVAL;
                 self.note(
                     if self
@@ -381,6 +496,7 @@ impl<T: Transport> Client<T> {
             }
             (Kind::Acquire, Reply::Acquired) => {
                 self.snapshot.control_acquired = true;
+                self.next_overview = now;
                 self.note("Control acquired");
             }
             (Kind::Release, Reply::Released) => {
@@ -391,6 +507,22 @@ impl<T: Transport> Client<T> {
                 if let Some(caps) = self.snapshot.capabilities.as_mut() {
                     caps.status = status;
                 }
+                self.snapshot.last_status_update = Some(now);
+            }
+            (Kind::Overview, Reply::Overview(overview)) => {
+                let value = overview.value();
+                if value.script_version != script_protocol::VERSION
+                    || usize::from(value.max_bytecode) < script_protocol::MAX_BYTECODE
+                {
+                    self.disconnect(Some(Failure::Incompatible));
+                    return;
+                }
+                if let Some(caps) = self.snapshot.capabilities.as_mut() {
+                    caps.firmware = value.firmware.into();
+                    caps.script_version = value.script_version;
+                    caps.overview = Some(overview);
+                }
+                self.snapshot.last_overview_update = Some(now);
             }
             (Kind::Effect(expected), Reply::Accepted(id)) if id == expected => {
                 if self.snapshot.job != Job::Cancelling {
@@ -401,24 +533,29 @@ impl<T: Transport> Client<T> {
             }
             (Kind::Effect(expected), Reply::Finished { id, outcome }) if id == expected => {
                 self.snapshot.job = Job::Finished(outcome);
-                self.note(match outcome {
-                    Outcome::Completed => "Effect completed",
-                    Outcome::Cancelled => "Effect cancelled",
-                    Outcome::Rejected => "Effect rejected",
-                    Outcome::UsbUnavailable => "USB keyboard is unavailable",
-                    Outcome::Disconnected => "Effect ended on disconnect",
-                });
+                self.record(
+                    match outcome {
+                        Outcome::Completed => "Effect completed",
+                        Outcome::Cancelled => "Effect cancelled",
+                        Outcome::Rejected => "Effect rejected",
+                        Outcome::UsbUnavailable => "USB keyboard is unavailable",
+                        Outcome::Disconnected => "Effect ended on disconnect",
+                    },
+                    match outcome {
+                        Outcome::Rejected => Some(Failure::Rejected),
+                        Outcome::UsbUnavailable => Some(Failure::UsbUnavailable),
+                        _ => None,
+                    },
+                );
             }
             (_, Reply::Error(error)) => {
-                if matches!(kind, Kind::Scan | Kind::Connect | Kind::Status)
-                    || !matches!(
-                        error,
-                        Failure::Busy
-                            | Failure::UsbUnavailable
-                            | Failure::NotReady
-                            | Failure::ReadOnly
-                    )
-                {
+                if matches!(
+                    kind,
+                    Kind::Scan | Kind::Connect | Kind::Status | Kind::Overview
+                ) || !matches!(
+                    error,
+                    Failure::Busy | Failure::UsbUnavailable | Failure::NotReady | Failure::ReadOnly
+                ) {
                     self.disconnect(Some(error));
                     return;
                 }
@@ -436,13 +573,24 @@ impl<T: Transport> Client<T> {
             self.snapshot.last_rtt = Some(now.saturating_sub(pending.started));
         }
         self.snapshot.pending = false;
+        self.snapshot.refreshing = false;
         self.changed();
+        if let Some(action) = self.queued.take() {
+            if self.snapshot.job == Job::Queued {
+                self.snapshot.job = Job::Idle;
+            }
+            self.dispatch(action, now);
+        }
     }
 
     fn disconnect(&mut self, error: Option<Failure>) {
         self.transport.close();
         self.pending = None;
+        self.queued = None;
         self.snapshot.pending = false;
+        self.snapshot.refreshing = false;
+        self.snapshot.last_status_update = None;
+        self.snapshot.last_overview_update = None;
         self.snapshot.control_acquired = false;
         self.snapshot.capabilities = None;
         self.snapshot.last_rtt = None;
@@ -451,24 +599,39 @@ impl<T: Transport> Client<T> {
         }
         self.snapshot.connection = error.map_or(Connection::Disconnected, Connection::Failed);
         self.snapshot.last_error = error;
-        self.note(error.map_or(
-            "Disconnected; no pending command will be replayed",
-            Failure::message,
-        ));
+        self.record(
+            error.map_or(
+                "Disconnected; no pending command will be replayed",
+                Failure::message,
+            ),
+            error,
+        );
     }
 
     fn reject(&mut self, error: Failure) {
         self.snapshot.last_error = Some(error);
-        self.note(error.message());
+        self.record(error.message(), Some(error));
     }
 
     fn note(&mut self, message: &'static str) {
+        self.record(message, None);
+    }
+
+    fn record(&mut self, message: &'static str, error: Option<Failure>) {
         if self.snapshot.diagnostics.len() == MAX_DIAGNOSTICS {
             self.snapshot.diagnostics.pop_front();
             self.snapshot.discarded_diagnostics =
                 self.snapshot.discarded_diagnostics.saturating_add(1);
         }
-        self.snapshot.diagnostics.push_back(message);
+        self.next_diagnostic = self.next_diagnostic.saturating_add(1);
+        self.snapshot.diagnostics.push_back(Diagnostic {
+            sequence: self.next_diagnostic,
+            at: self.now,
+            epoch: self.epoch,
+            context: self.context,
+            error,
+            message,
+        });
         self.changed();
     }
 

@@ -36,8 +36,9 @@ Pico **Y** provides device-wide Stop. Disconnect cancels this companion's job.
 Pending effects are never replayed after reconnect. USB enable/disable controls
 require acquired control and an idle keyboard executor.
 
-The companion currently supports status, control acquisition/release, USB
-on/off and bounded text effects. Python, filesystem browsing, credentials and
+The companion currently supports live status, an encrypted device/agent overview,
+control acquisition/release, USB on/off, bounded text effects and filterable
+diagnostics. Background polling keeps controls available. Python, filesystem browsing, credentials and
 Bluetooth file transfer are not implemented. The host-agent USB protocol and
 local display presets remain. Browser-dependent bulk requests fail closed:
 chunks cannot be acknowledged without a receiver.

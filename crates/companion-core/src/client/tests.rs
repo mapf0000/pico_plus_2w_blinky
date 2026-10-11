@@ -153,14 +153,14 @@ fn queued_ui_send_and_cancel_from_an_old_epoch_are_discarded() {
 fn timed_out_connect_fails_closed_and_can_be_scanned_again() {
     let (mut client, now) = connected(Scenario::Timeout);
     assert_eq!(client.snapshot().connection, Connection::Connecting);
-    client.tick(now + REQUEST_TIMEOUT);
+    client.tick(now + CONNECT_TIMEOUT);
     assert_eq!(
         client.snapshot().connection,
         Connection::Failed(Failure::Timeout)
     );
     assert!(!client.snapshot().pending);
-    client.dispatch(Action::Scan, now + REQUEST_TIMEOUT);
-    client.tick(now + REQUEST_TIMEOUT + LATENCY);
+    client.dispatch(Action::Scan, now + CONNECT_TIMEOUT);
+    client.tick(now + CONNECT_TIMEOUT + LATENCY);
     assert_eq!(client.snapshot().devices.len(), 1);
 }
 
@@ -259,6 +259,8 @@ fn rejects_unbounded_metadata_and_mismatched_reply_kinds() {
                 script_version: 1,
                 layouts: vec!["win_en-US".into()],
                 status: Status::default(),
+                overview_supported: false,
+                overview: None,
             }),
         },
         LATENCY,
@@ -291,7 +293,7 @@ fn diagnostics_stay_bounded_and_never_contain_typed_text() {
             .snapshot()
             .diagnostics
             .iter()
-            .all(|message| !message.contains(secret))
+            .all(|entry| !entry.message.contains(secret))
     );
     assert!(client.snapshot().job.active());
 }
@@ -396,4 +398,273 @@ fn usb_controls_require_control_and_block_keyboard_until_ready() {
     client.dispatch(Action::SetUsbEnabled(true), now + LATENCY);
     client.tick(now + LATENCY * 2);
     assert!(client.snapshot().can_send());
+}
+
+#[test]
+fn background_reads_keep_controls_stable_and_preserve_actionable_errors() {
+    let (mut client, mut now) = ready();
+    client.dispatch(Action::Acquire, now);
+    assert_eq!(client.snapshot().last_error, Some(Failure::NotReady));
+    for _ in 0..5 {
+        now += STATUS_INTERVAL;
+        client.tick(now);
+        assert!(client.snapshot().refreshing);
+        assert!(!client.snapshot().pending);
+        assert!(client.snapshot().can_send());
+        assert_eq!(client.snapshot().last_error, Some(Failure::NotReady));
+        now += LATENCY;
+        client.tick(now);
+        assert!(!client.snapshot().refreshing);
+        assert!(client.snapshot().can_send());
+        assert_eq!(client.snapshot().last_status_update, Some(now));
+    }
+}
+
+#[test]
+fn one_user_command_waits_for_refresh_and_runs_exactly_once() {
+    let (mut client, now) = ready();
+    let now = now + STATUS_INTERVAL;
+    client.tick(now);
+    let read_tag = client.pending.as_ref().unwrap().tag;
+    client.dispatch(text(0), now);
+    assert_eq!(client.snapshot().job, Job::Queued);
+    assert!(client.snapshot().pending && client.snapshot().refreshing);
+    client.dispatch(Action::SetUsbEnabled(false), now);
+    assert_eq!(client.snapshot().last_error, Some(Failure::QueueFull));
+    assert_eq!(client.pending.as_ref().unwrap().tag, read_tag);
+    client.tick(now + LATENCY);
+    assert_eq!(client.snapshot().job, Job::Sending);
+    assert!(!client.snapshot().refreshing);
+    assert!(client.queued.is_none());
+    client.tick(now + LATENCY * 3);
+    assert_eq!(client.snapshot().job, Job::Finished(Outcome::Completed));
+    assert!(
+        client
+            .snapshot()
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .status
+            .usb_enabled
+    );
+    client.tick(now + LATENCY * 4);
+    assert_eq!(client.snapshot().job, Job::Finished(Outcome::Completed));
+}
+
+#[test]
+fn cancel_discards_queued_text_without_interrupting_read_or_sending_hid() {
+    let (mut client, now) = ready();
+    let now = now + STATUS_INTERVAL;
+    client.tick(now);
+    let read_tag = client.pending.as_ref().unwrap().tag;
+    client.dispatch(text(5000), now);
+    client.dispatch(Action::Cancel, now);
+    assert!(client.queued.is_none());
+    assert_eq!(client.pending.as_ref().unwrap().tag, read_tag);
+    assert_eq!(client.snapshot().job, Job::Finished(Outcome::Cancelled));
+    assert!(!client.snapshot().pending);
+    client.tick(now + LATENCY * 3);
+    assert_eq!(client.snapshot().job, Job::Finished(Outcome::Cancelled));
+    assert!(client.snapshot().can_send());
+}
+
+#[test]
+fn queued_text_is_revalidated_against_fresh_usb_status_and_is_bounded() {
+    let (mut client, now) = ready();
+    let now = now + STATUS_INTERVAL;
+    client.tick(now);
+    client.dispatch(
+        Action::SendText {
+            text: "a".repeat(keyboard::MAX_TEXT_BYTES + 1),
+            layout: "win_en-US".into(),
+            delay_ms: 0,
+        },
+        now,
+    );
+    assert_eq!(client.snapshot().last_error, Some(Failure::InvalidText));
+    assert!(client.queued.is_none());
+    client.dispatch(text(0), now);
+    let tag = client.pending.as_ref().unwrap().tag;
+    client.transport.events_for_test_clear();
+    client.receive(
+        Event::Reply {
+            tag,
+            reply: Reply::Status(Status::default()),
+        },
+        now + LATENCY,
+    );
+    assert_eq!(client.snapshot().last_error, Some(Failure::UsbUnavailable));
+    assert!(!client.snapshot().job.active());
+    assert!(!client.snapshot().pending);
+}
+
+#[test]
+fn disconnect_timeout_and_stale_events_never_replay_queued_work() {
+    for timeout in [false, true] {
+        let (mut client, now) = ready();
+        let now = now + STATUS_INTERVAL;
+        client.tick(now);
+        let tag = client.pending.as_ref().unwrap().tag;
+        client.dispatch(text(5000), now);
+        client.transport.events_for_test_clear();
+        if timeout {
+            client.tick(now + REQUEST_TIMEOUT);
+            assert_eq!(
+                client.snapshot().connection,
+                Connection::Failed(Failure::Timeout)
+            );
+        } else {
+            client.dispatch(Action::Disconnect, now);
+        }
+        assert!(client.queued.is_none());
+        assert_eq!(client.snapshot().job, Job::Finished(Outcome::Disconnected));
+        client.receive(
+            Event::Reply {
+                tag,
+                reply: Reply::Status(Status::default()),
+            },
+            now,
+        );
+        client.dispatch(Action::Connect("mock-pico-1".into()), now);
+        client.tick(now + LATENCY);
+        client.dispatch_for_epoch(tag.epoch, text(0), now + LATENCY);
+        assert!(!client.snapshot().control_acquired);
+        assert!(!client.snapshot().job.active());
+    }
+}
+
+#[test]
+fn diagnostics_have_time_session_error_context_and_can_be_cleared_during_io() {
+    let (mut client, now) = ready();
+    client.dispatch(Action::Acquire, now);
+    let entry = client.snapshot().diagnostics.back().unwrap();
+    assert_eq!(entry.context, DiagnosticContext::Control);
+    assert_eq!(entry.error, Some(Failure::NotReady));
+    assert_eq!(entry.at, now);
+    assert_eq!(entry.epoch, client.snapshot().epoch);
+    let sequence = entry.sequence;
+    let now = now + STATUS_INTERVAL;
+    client.tick(now);
+    let tag = client.pending.as_ref().unwrap().tag;
+    client.dispatch(Action::ClearDiagnostics, now);
+    assert!(client.snapshot().diagnostics.is_empty());
+    assert_eq!(client.snapshot().discarded_diagnostics, 0);
+    assert_eq!(client.pending.as_ref().unwrap().tag, tag);
+    client.receive(
+        Event::Reply {
+            tag,
+            reply: Reply::Error(Failure::LinkLost),
+        },
+        now,
+    );
+    let entry = client.snapshot().diagnostics.back().unwrap();
+    assert_eq!(entry.context, DiagnosticContext::Status);
+    assert_eq!(entry.error, Some(Failure::LinkLost));
+    assert!(entry.sequence > sequence);
+}
+
+fn overview_reply(script_version: u8) -> Reply {
+    let wire = ble_protocol::Overview {
+        request: 1,
+        bootstrap: ble_protocol::BootstrapPhase::Idle,
+        bootstrap_available: false,
+        script_version,
+        filesystem_version: 1,
+        transfer_version: 2,
+        max_bytecode: 4096,
+        max_usb_payload: 2048,
+        agent_age_ms: None,
+        max_delay_ms: 5000,
+        max_total_delay_ms: 300000,
+        firmware: "0.1.0-full-build",
+        agent_version: "",
+        host_os: "",
+        hostname: "",
+    };
+    let mut bytes = [0; ble_protocol::MAX_OVERVIEW_LEN];
+    let length = wire.encode(&mut bytes).unwrap();
+    Reply::Overview(crate::Overview::from_bytes(&bytes[..length]).unwrap())
+}
+
+#[test]
+fn protected_overview_requires_control_refreshes_slowly_and_keeps_user_queue() {
+    let (mut client, now) = connected(Scenario::Normal);
+    client
+        .snapshot
+        .capabilities
+        .as_mut()
+        .unwrap()
+        .overview_supported = true;
+    client.tick(now);
+    assert!(client.pending.is_none());
+    client.dispatch(Action::Acquire, now);
+    let now = now + LATENCY;
+    client.tick(now);
+    assert_eq!(client.pending.as_ref().unwrap().kind, Kind::Overview);
+    assert!(client.snapshot().can_send());
+    let tag = client.pending.as_ref().unwrap().tag;
+    client.transport.events_for_test_clear();
+    client.dispatch(Action::Release, now);
+    client.receive(
+        Event::Reply {
+            tag,
+            reply: overview_reply(1),
+        },
+        now + LATENCY,
+    );
+    assert_eq!(
+        client.snapshot().capabilities.as_ref().unwrap().firmware,
+        "0.1.0-full-build"
+    );
+    assert_eq!(client.snapshot().last_overview_update, Some(now + LATENCY));
+    assert_eq!(client.pending.as_ref().unwrap().kind, Kind::Release);
+    client.tick(now + LATENCY * 2);
+    assert!(!client.snapshot().control_acquired);
+    client.tick(now + OVERVIEW_INTERVAL * 2);
+    assert_eq!(client.pending.as_ref().unwrap().kind, Kind::Status);
+}
+
+#[test]
+fn incompatible_overview_discards_queued_effect_without_execution() {
+    let (mut client, now) = ready();
+    client
+        .snapshot
+        .capabilities
+        .as_mut()
+        .unwrap()
+        .overview_supported = true;
+    client.tick(now);
+    let tag = client.pending.as_ref().unwrap().tag;
+    client.transport.events_for_test_clear();
+    client.dispatch(text(0), now);
+    client.receive(
+        Event::Reply {
+            tag,
+            reply: overview_reply(2),
+        },
+        now + LATENCY,
+    );
+    assert_eq!(
+        client.snapshot().connection,
+        Connection::Failed(Failure::Incompatible)
+    );
+    assert!(client.queued.is_none());
+    assert_eq!(client.snapshot().job, Job::Finished(Outcome::Disconnected));
+}
+
+#[test]
+fn late_status_completion_cannot_start_a_queued_effect_after_deadline() {
+    let (mut client, now) = ready();
+    let now = now + STATUS_INTERVAL;
+    client.tick(now);
+    client.dispatch(text(0), now);
+    // Leave the transport's reply queued: receive must check the deadline
+    // before releasing queued work, even when a tick arrives late.
+    client.tick(now + REQUEST_TIMEOUT);
+    assert_eq!(
+        client.snapshot().connection,
+        Connection::Failed(Failure::Timeout)
+    );
+    assert_eq!(client.snapshot().job, Job::Finished(Outcome::Disconnected));
+    assert!(client.queued.is_none());
 }

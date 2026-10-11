@@ -16,6 +16,14 @@ numbers, including Cancel and Poll. Reconnect changes keys and never replays
 keyboard effects. Public Info/Status are unauthenticated diagnostics and must not
 be treated as peer identity or authority. See PROTOCOL.md for exact framing.
 
+Detailed overview v1 (build/limits, agent version/OS/hostname/heartbeat age and CDC
+stage) requires encrypted acquired control. Strings are bounded and validated as
+printable ASCII; unknown/truncated/trailing fields are rejected. Host metadata
+still originates on the potentially hostile USB target: encryption protects the
+BLE path, not the truth of the claimed host OS/version/name. These values are
+display data and never grant control, enable code execution or reveal the PSK.
+The finite metadata response introduces no file-stream ACK or transfer credit.
+
 Key possession authorizes the device, rather than identifying a particular PC.
 The prototype stores keys in private profile files on the trusted control PC and
 plaintext dedicated Pico flash; CRC only detects corruption. Unix loaders reject

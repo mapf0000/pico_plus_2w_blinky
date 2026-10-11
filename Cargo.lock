@@ -1071,6 +1071,7 @@ dependencies = [
 name = "companion-core"
 version = "0.1.0"
 dependencies = [
+ "ble-protocol",
  "firmware-exec",
  "keyboard-core",
  "script-protocol",

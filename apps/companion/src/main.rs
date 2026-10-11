@@ -99,6 +99,7 @@ fn ble_smoke(
         Connect,
         Acquire,
         Samples(usize),
+        ReleaseOnRefresh,
         Release,
         ReAcquire,
         ReRelease,
@@ -116,6 +117,7 @@ fn ble_smoke(
     let mut revision = 0;
     let mut device_id = None;
     let mut initial_uptime = None;
+    let mut last_sample = None;
     loop {
         let snapshot = backend.snapshots.borrow().clone();
         if let Some(error) = snapshot.last_error {
@@ -147,8 +149,12 @@ fn ble_smoke(
                     phase = Phase::Samples(0);
                 }
                 Phase::Samples(count)
-                    if snapshot.connection == Connection::Connected && !snapshot.pending =>
+                    if snapshot.connection == Connection::Connected
+                        && !snapshot.pending
+                        && !snapshot.refreshing
+                        && snapshot.last_status_update != last_sample =>
                 {
+                    last_sample = snapshot.last_status_update;
                     let status = snapshot
                         .capabilities
                         .as_ref()
@@ -171,8 +177,24 @@ fn ble_smoke(
                             snapshot.last_rtt.unwrap_or_default().as_millis()
                         );
                         if authenticated {
-                            backend.send(snapshot.epoch, Action::Release)?;
-                            phase = Phase::Release;
+                            let caps = snapshot
+                                .capabilities
+                                .as_ref()
+                                .ok_or("Missing capabilities")?;
+                            if caps.overview_supported {
+                                let overview = caps
+                                    .overview
+                                    .as_ref()
+                                    .ok_or("Protected overview was not received")?
+                                    .value();
+                                println!(
+                                    "Encrypted overview: firmware={} bytecode={} CDC={}",
+                                    overview.firmware,
+                                    overview.max_bytecode,
+                                    overview.bootstrap.label()
+                                );
+                            }
+                            phase = Phase::ReleaseOnRefresh;
                         } else {
                             backend.send(snapshot.epoch, Action::Disconnect)?;
                             phase = Phase::Disconnect;
@@ -180,6 +202,13 @@ fn ble_smoke(
                     } else {
                         phase = Phase::Samples(count + 1);
                     }
+                }
+                Phase::ReleaseOnRefresh if snapshot.refreshing => {
+                    if snapshot.pending {
+                        return Err("Background refresh disabled the controls".into());
+                    }
+                    backend.send(snapshot.epoch, Action::Release)?;
+                    phase = Phase::Release;
                 }
                 Phase::Release if !snapshot.control_acquired && !snapshot.pending => {
                     backend.send(snapshot.epoch, Action::Disconnect)?;
@@ -209,7 +238,7 @@ fn ble_smoke(
                 }
                 Phase::ReRelease if !snapshot.control_acquired && !snapshot.pending => {
                     println!(
-                        "Authenticated BLE smoke passed: fresh sessions, acquire/release, encrypted live status and reconnect. No Pico interaction or HID effects."
+                        "Authenticated BLE smoke passed: fresh sessions, acquire/release, encrypted live status, a command during background refresh and reconnect. No Pico interaction or HID effects."
                     );
                     return Ok(());
                 }

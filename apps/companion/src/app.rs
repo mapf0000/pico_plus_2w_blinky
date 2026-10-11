@@ -13,6 +13,9 @@ pub struct CompanionApp {
     text: String,
     delay_ms: u32,
     enqueue_error: Option<&'static str>,
+    diagnostic_filter: String,
+    errors_only: bool,
+    autoscroll: bool,
 }
 
 impl CompanionApp {
@@ -31,6 +34,9 @@ impl CompanionApp {
             text: DEMO_TEXT.into(),
             delay_ms: 0,
             enqueue_error: None,
+            diagnostic_filter: String::new(),
+            errors_only: false,
+            autoscroll: true,
         })
     }
 
@@ -119,12 +125,56 @@ impl CompanionApp {
                         if self.mode.is_mock() {
                             "Compatible (mock)"
                         } else {
-                            "BLE control v2"
+                            "BLE control v3"
                         }
                     } else {
                         "Incompatible"
                     });
                     ui.end_row();
+                    ui.label("Companion layouts");
+                    ui.label(caps.layouts.join(", "));
+                    ui.end_row();
+                    if let Some(overview) = &caps.overview {
+                        let overview = overview.value();
+                        for (label, value) in [
+                            ("Agent version", overview.agent_version),
+                            ("Host OS", overview.host_os),
+                            ("Hostname", overview.hostname),
+                        ] {
+                            ui.label(label);
+                            ui.label(if value.is_empty() { "Unknown" } else { value });
+                            ui.end_row();
+                        }
+                        ui.label("Heartbeat age at overview");
+                        ui.label(overview.agent_age_ms.map_or_else(
+                            || "Never seen".into(),
+                            |age| format!("{:.1} s", age as f64 / 1000.0),
+                        ));
+                        ui.end_row();
+                        ui.label("CDC installer");
+                        ui.label(if overview.bootstrap_available {
+                            overview.bootstrap.label()
+                        } else {
+                            "Not packaged"
+                        });
+                        ui.end_row();
+                        ui.label("Device effect limits");
+                        ui.label(format!(
+                            "{} bytes · {} ms per delay · {} s total delays",
+                            overview.max_bytecode,
+                            overview.max_delay_ms,
+                            overview.max_total_delay_ms / 1000
+                        ));
+                        ui.end_row();
+                        ui.label("USB agent protocols");
+                        ui.label(format!(
+                            "Filesystem v{} · transfer v{} · {} byte payloads",
+                            overview.filesystem_version,
+                            overview.transfer_version,
+                            overview.max_usb_payload
+                        ));
+                        ui.end_row();
+                    }
                     ui.label("USB keyboard");
                     ui.label(if caps.status.usb_ready {
                         "Ready"
@@ -211,6 +261,15 @@ impl CompanionApp {
                 self.send(Action::SetUsbEnabled(!enabled));
             }
         });
+        if let Some(caps) = &self.snapshot.capabilities {
+            if !caps.overview_supported {
+                ui.small("This firmware does not advertise a detailed overview.");
+            } else if caps.overview.is_none() {
+                ui.small("Acquire control to read the protected device overview.");
+            } else {
+                ui.small("Overview refreshes every 10 seconds while control is acquired. USB status refreshes every second.");
+            }
+        }
         if !self.mode.is_mock() {
             ui.small("Uses the provisioned device key. No Pico button press is required.");
         }
@@ -258,6 +317,10 @@ impl CompanionApp {
             self.text.chars().count(),
             keyboard::MAX_TEXT_CHARS
         ));
+        ui.small(format!(
+            "Effect limit: {} bytes of KBD1",
+            script_protocol::MAX_BYTECODE
+        ));
         // Validation stays bounded; typed text never goes to diagnostic output.
         let validation = keyboard::text_effect(self.text.clone(), &self.layout, self.delay_ms);
         let layout_supported = self
@@ -300,6 +363,7 @@ impl CompanionApp {
         }
         ui.label(match self.snapshot.job {
             Job::Idle => "No effect submitted",
+            Job::Queued => "Waiting for status read…",
             Job::Sending => "Submitting effect…",
             Job::Running => "Effect running",
             Job::Cancelling => "Cancelling current effect…",
@@ -311,6 +375,63 @@ impl CompanionApp {
                 "Effect ended on disconnect; it will not be replayed"
             }
         });
+    }
+
+    fn diagnostics(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Diagnostics");
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Filter");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.diagnostic_filter)
+                    .char_limit(128)
+                    .desired_width(180.0),
+            );
+            ui.checkbox(&mut self.errors_only, "Errors only");
+            ui.checkbox(&mut self.autoscroll, "Autoscroll");
+            if ui.button("Clear").clicked() {
+                self.send(Action::ClearDiagnostics);
+            }
+        });
+        let filter = self.diagnostic_filter.to_lowercase();
+        let entries: Vec<_> = self
+            .snapshot
+            .diagnostics
+            .iter()
+            .filter(|entry| {
+                (!self.errors_only || entry.error.is_some())
+                    && (entry.message.to_lowercase().contains(&filter)
+                        || entry.context.label().to_lowercase().contains(&filter))
+            })
+            .collect();
+        ui.small(format!(
+            "Showing {} of {} entries; {} earlier entries discarded",
+            entries.len(),
+            self.snapshot.diagnostics.len(),
+            self.snapshot.discarded_diagnostics
+        ));
+        egui::ScrollArea::vertical()
+            .id_salt("diagnostics")
+            .max_height(180.0)
+            .stick_to_bottom(self.autoscroll)
+            .show(ui, |ui| {
+                for entry in entries {
+                    let label = format!(
+                        "{:>7.2}s · session {} · {} · {}",
+                        entry.at.as_secs_f64(),
+                        entry.epoch,
+                        entry.context.label(),
+                        entry.message
+                    );
+                    if entry.error.is_some() {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            egui::RichText::new(label).monospace(),
+                        );
+                    } else {
+                        ui.monospace(label);
+                    }
+                }
+            });
     }
 }
 
@@ -353,21 +474,7 @@ impl eframe::App for CompanionApp {
                 ui.separator();
                 self.keyboard(ui);
                 ui.separator();
-                ui.heading("Diagnostics");
-                ui.small(format!(
-                    "Last {} entries; {} earlier entries discarded",
-                    self.snapshot.diagnostics.len(),
-                    self.snapshot.discarded_diagnostics
-                ));
-                egui::ScrollArea::vertical()
-                    .id_salt("diagnostics")
-                    .max_height(140.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for message in &self.snapshot.diagnostics {
-                            ui.monospace(*message);
-                        }
-                    });
+                self.diagnostics(ui);
             });
         });
     }

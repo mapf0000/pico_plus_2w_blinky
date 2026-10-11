@@ -8,6 +8,9 @@ pub const STATUS_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000003;
 pub const INFO_LEN: usize = 20;
 pub const STATUS_LEN: usize = 12;
 const CONTROL: u8 = 4; // PSK-protected control; incompatible with v2 pairing
+const OVERVIEW_FLAG: u8 = 8;
+mod overview;
+pub use overview::{BootstrapPhase, MAX_OVERVIEW_LEN, Overview};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -20,11 +23,15 @@ pub enum Error {
 pub struct Info {
     /// ASCII build label, truncated to 12 bytes and zero padded. Not device identity.
     pub build: [u8; 12],
+    pub overview: bool,
 }
 
 impl Info {
     pub fn new(build: &str) -> Self {
-        let mut value = Self { build: [0; 12] };
+        let mut value = Self {
+            build: [0; 12],
+            overview: true,
+        };
         for (out, input) in value.build.iter_mut().zip(build.bytes()) {
             *out = if input.is_ascii_graphic() {
                 input
@@ -43,7 +50,7 @@ impl Info {
         let mut bytes = [0; INFO_LEN];
         bytes[..4].copy_from_slice(b"PBLE");
         bytes[4] = VERSION;
-        bytes[5] = CONTROL;
+        bytes[5] = CONTROL | if self.overview { OVERVIEW_FLAG } else { 0 };
         bytes[8..].copy_from_slice(&self.build);
         bytes
     }
@@ -55,12 +62,19 @@ impl Info {
         if bytes[4] != VERSION {
             return Err(Error::Version);
         }
-        if &bytes[..4] != b"PBLE" || bytes[5] != CONTROL || bytes[6..8] != [0, 0] {
+        if &bytes[..4] != b"PBLE"
+            || bytes[5] & CONTROL == 0
+            || bytes[5] & !(CONTROL | OVERVIEW_FLAG) != 0
+            || bytes[6..8] != [0, 0]
+        {
             return Err(Error::Invalid);
         }
         let mut build = [0; 12];
         build.copy_from_slice(&bytes[8..]);
-        let label = Self { build };
+        let label = Self {
+            build,
+            overview: bytes[5] & OVERVIEW_FLAG != 0,
+        };
         let end = label.build.iter().position(|b| *b == 0).unwrap_or(12);
         if end == 0
             || !label.build[..end].iter().all(u8::is_ascii_graphic)
@@ -129,6 +143,10 @@ mod tests {
         let info = Info::new("0123456789abcdef");
         assert_eq!(info.build_label(), "0123456789ab");
         assert_eq!(Info::decode(&info.encode()), Ok(info));
+        let mut legacy = info;
+        legacy.overview = false;
+        assert_eq!(Info::decode(&legacy.encode()), Ok(legacy));
+        assert_eq!(legacy.encode()[5], 4);
         for flags in 0..8 {
             let status = Status {
                 usb_enabled: flags & 1 != 0,
@@ -188,8 +206,10 @@ pub const RELEASE: u8 = 1;
 pub const USB_ON: u8 = 2;
 pub const USB_OFF: u8 = 3;
 pub const POLL: u8 = 4;
+/// Optional, acquired-control-only encrypted overview v1. Does not alter Run results.
+pub const READ_OVERVIEW: u8 = 5;
 pub const SNAPSHOT_LEN: usize = FRAME_LEN + STATUS_LEN;
-pub const MAX_RESPONSE_LEN: usize = SNAPSHOT_LEN + 16;
+pub const MAX_RESPONSE_LEN: usize = MAX_OVERVIEW_LEN + 16;
 
 /// ATT characteristic storage is fixed at 20 bytes. Validate zero padding on the
 /// final outgoing fragment before passing its exact bytes to Receiver.

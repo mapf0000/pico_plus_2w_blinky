@@ -26,7 +26,8 @@ All integers are little-endian; reserved bytes must be zero.
 | suffix `00000005` | Command | encrypted-record fragment write with response, 9–20 bytes |
 | suffix `00000006` | Result | sequential response-fragment reads, fixed 20 bytes |
 
-Info: bytes 0–3 `PBLE`, byte 4 version `3`, byte 5 control flag `4`,
+Info: bytes 0–3 `PBLE`, byte 4 version `3`, byte 5 mandatory control flag `4`
+plus optional overview-v1 flag `8` (current value `12`),
 bytes 6–7 zero, bytes 8–19 printable ASCII build label with zero padding.
 Status: byte 0 version, byte 1 flags (bit 0 USB enabled, bit 1 USB ready,
 bit 2 agent recently present), bytes 2–3 zero, bytes 4–11 uptime seconds `u64`.
@@ -70,7 +71,8 @@ Five-second partial-upload expiry prevents resuming abandoned fragments. The
 companion uses one token space for its handshake and records. The server's record
 sequence is independent of the echoed handshake token.
 
-Result holds one finite response of at most 48 bytes. Each ATT read advances its
+Result holds one finite response of at most 304 bytes. Handshakes and ordinary
+snapshots remain 48 bytes; overview ciphertext uses up to 304. Each ATT read advances its
 fragment cursor; reading past the end fails. A new completed authenticated command
 or Poll replaces the previous response at offset zero. This permits cancellation
 of a partially read response. ATT acknowledgement confirms a fragment, not an
@@ -78,13 +80,14 @@ authenticated record, effect admission or HID completion.
 
 Encrypted command plaintext is one inner kind byte plus its payload: control
 `1`, script `2`. Control payload is exactly one opcode: Acquire `0`, Release `1`,
-USB on `2`, USB off `3`, Poll `4`. Except Poll and Acquire, controls require the
+USB on `2`, USB off `3`, Poll `4`, ReadOverview `5` when Info advertises flag `8`.
+Except Poll and Acquire, controls require the
 lease; Release/USB off require no reserved HID job. Script retains the existing
 version-1 29-byte envelope, full request/process/effect `u64` IDs, leading kind
 byte `8`, and up to 4,096 KBD1 bytes. Maximum plaintext is therefore 4,126 bytes,
 plus the 16-byte tag. No USB tag, script version or KBD1 limit changes.
 
-Encrypted response plaintext is exactly 32 bytes: ResultValue (20) followed by
+Ordinary encrypted response plaintext is exactly 32 bytes: ResultValue (20) followed by
 Status (12). ResultValue: byte 0 version, byte 1 code, bytes 2–3 command token,
 bytes 4–19 zero. Codes: idle `0` (token zero only), acquired `1`, released `2`,
 admitted `3`, completed `4`, cancelled `5`, rejected `6`, USB unavailable `7`,
@@ -92,6 +95,46 @@ busy `8`, USB changed `9`. Poll preserves this result token and terminal state.
 The server encrypts a fresh snapshot for every completed command/Poll; the client
 polls until a correlated response, timeout or disconnect. Snapshot record sequence
 and contained command/result token are different fields.
+
+### Protected overview v1
+
+ReadOverview requires an authenticated, acquired connection. Its response is a
+finite record and preserves the active effect's ResultValue. It uses the same
+directional encryption, sequences, fragmentation and read cursor as snapshots.
+No streaming, notification, credit or USB TLV format is introduced. The companion
+reads it after acquiring control and targets a ten-second refresh interval while
+idle; USB status targets one second. Only one request runs at a time.
+
+| Plaintext offset | Field |
+| --- | --- |
+| 0–3 | ASCII `POV1` |
+| 4 | overview schema version `1` |
+| 5 | CDC stage: idle `0`, armed `1`, downloading `2`, verified `3`, failed `4`, cancelled `5` |
+| 6 | flags: bit 0 installer packaged/available, bit 1 agent heartbeat seen; others zero |
+| 7 | script envelope version |
+| 8–9 / 10–11 | USB filesystem / transfer protocol versions, `u16` |
+| 12–13 / 14–15 | maximum KBD1 / USB TLV payload bytes, nonzero `u16` |
+| 16–23 | age in milliseconds of agent heartbeat, `u64`; zero if never seen |
+| 24–27 / 28–31 | maximum single / total device delay milliseconds, `u32` |
+| 32–35 | four string byte lengths, `u8`: build, agent version, OS, hostname |
+| 36–37 | echoed authenticated ReadOverview command token, nonzero `u16` |
+| 38–39 | reserved zero |
+| 40 onward | strings in the stated order, printable ASCII, no padding/trailing data |
+
+String bounds are 96/32/24/96 bytes, respectively; build is nonempty, empty agent
+fields mean unknown. Plaintext is at most 288 bytes, ciphertext 304, read in at
+most 26 default-MTU fragments. The client validates the echoed command token
+after authentication. Presence still expires after 25 seconds using the existing
+heartbeat; age is sampled at overview time, not a continuously advancing value.
+USB protocol versions describe retained agent formats, not implemented native
+filesystem/download workflows. Layouts belong to the companion's lowering library;
+the device executes language/layout-independent KBD1.
+
+New companions accept earlier v3 Info without the overview flag and omit this
+request. Earlier v3 companions require the old exact flag value and will reject
+the new firmware; update companion and firmware together. V1/v2, unknown Info
+flags, unknown overview versions and malformed metadata remain incompatible;
+there is no plaintext or physical-pairing fallback.
 
 Cancel uses a newer encrypted record to abandon an incomplete Run, then targets
 its full IDs if already admitted. Run completion retains its Run token; cancelling

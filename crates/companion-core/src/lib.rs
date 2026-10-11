@@ -16,8 +16,28 @@ pub const MAX_DEVICES: usize = 16;
 pub const MAX_DIAGNOSTICS: usize = 128;
 pub const MAX_METADATA_BYTES: usize = 96;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
 pub const STATUS_INTERVAL: Duration = Duration::from_secs(1);
+pub const OVERVIEW_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Validated finite wire metadata; private storage preserves decode invariants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Overview {
+    bytes: Vec<u8>,
+}
+impl Overview {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Failure> {
+        ble_protocol::Overview::decode(bytes).map_err(|_| Failure::InvalidData)?;
+        Ok(Self {
+            bytes: bytes.to_vec(),
+        })
+    }
+    pub fn value(&self) -> ble_protocol::Overview<'_> {
+        // Storage is private and every constructor validates the full record.
+        ble_protocol::Overview::decode(&self.bytes).expect("validated overview")
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
@@ -38,6 +58,7 @@ pub enum Failure {
     AdapterUnavailable,
     BluetoothUnavailable,
     ReadOnly,
+    Rejected,
 }
 
 impl Failure {
@@ -61,6 +82,7 @@ impl Failure {
                 "Bluetooth unavailable; enable the adapter and check permissions"
             }
             Self::ReadOnly => "This BLE service supports status only",
+            Self::Rejected => "Command rejected by device",
             Self::IdExhausted => "Session identifiers exhausted; restart the companion",
         }
     }
@@ -97,6 +119,8 @@ pub struct Capabilities {
     pub firmware: String,
     pub layouts: Vec<String>,
     pub status: Status,
+    pub overview_supported: bool,
+    pub overview: Option<Overview>,
     /// Extra budget for BLE fragmentation; mock transports need none.
     pub upload_timeout: Duration,
 }
@@ -154,6 +178,7 @@ pub enum Outcome {
 pub enum Job {
     #[default]
     Idle,
+    Queued,
     Sending,
     Running,
     Cancelling,
@@ -162,8 +187,44 @@ pub enum Job {
 
 impl Job {
     pub fn active(self) -> bool {
-        matches!(self, Self::Sending | Self::Running | Self::Cancelling)
+        matches!(
+            self,
+            Self::Queued | Self::Sending | Self::Running | Self::Cancelling
+        )
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticContext {
+    Connection,
+    Discovery,
+    Control,
+    Usb,
+    Keyboard,
+    Status,
+}
+
+impl DiagnosticContext {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Connection => "connection",
+            Self::Discovery => "discovery",
+            Self::Control => "control",
+            Self::Usb => "USB",
+            Self::Keyboard => "keyboard",
+            Self::Status => "status",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Diagnostic {
+    pub sequence: u64,
+    pub at: Duration,
+    pub epoch: u64,
+    pub context: DiagnosticContext,
+    pub error: Option<Failure>,
+    pub message: &'static str,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -176,11 +237,16 @@ pub struct Snapshot {
     pub capabilities: Option<Capabilities>,
     /// Granted by this connection after transport authentication.
     pub control_acquired: bool,
+    /// A user operation is active or waiting behind a background read.
     pub pending: bool,
+    /// Background I/O never disables the controls by itself.
+    pub refreshing: bool,
+    pub last_status_update: Option<Duration>,
+    pub last_overview_update: Option<Duration>,
     pub job: Job,
     pub last_error: Option<Failure>,
     pub last_rtt: Option<Duration>,
-    pub diagnostics: VecDeque<&'static str>,
+    pub diagnostics: VecDeque<Diagnostic>,
     pub discarded_diagnostics: u64,
 }
 
@@ -206,6 +272,7 @@ impl Snapshot {
 
 #[derive(Clone, Debug)]
 pub enum Action {
+    ClearDiagnostics,
     Scan,
     Connect(String),
     Acquire,
@@ -234,6 +301,7 @@ pub enum Operation {
     Release,
     SetUsbEnabled(bool),
     Status,
+    Overview,
     Run(Vec<u8>),
     Cancel(Vec<u8>),
 }
@@ -251,6 +319,7 @@ pub enum Reply {
     Acquired,
     Released,
     Status(Status),
+    Overview(Overview),
     Accepted(script_protocol::EffectId),
     Finished {
         id: script_protocol::EffectId,

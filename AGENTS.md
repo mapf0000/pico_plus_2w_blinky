@@ -97,7 +97,7 @@ a connection incarnation.
 - `keyboard-core`: portable, language-neutral layouts, key parsing, lowering, and KBD1 encoding. It is `no_std` by default.
 - `firmware-exec`: strict, two-pass `no_std` KBD1 validator/executor.
 - `script-protocol`: versioned correlated companion-to-firmware effect envelopes.
-- `ble-protocol`: `no_std` v3 information/status/snapshot codecs, UUIDs and MTU-23
+- `ble-protocol`: `no_std` v3 information/status/snapshot/overview-v1 codecs, UUIDs and MTU-23
   handshake/encrypted-record fragmentation.
 - `bytecode-constants`: cross-target bytecode limits.
 - `ble-session`: allocation-free Noise PSK sessions and versioned key provisioning.

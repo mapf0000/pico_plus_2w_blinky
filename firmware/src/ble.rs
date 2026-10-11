@@ -8,6 +8,7 @@ use static_cell::StaticCell;
 use trouble_host::prelude::*;
 const _: () = assert!(ble_protocol::MAX_MESSAGE_LEN == ble_session::MAX_CIPHERTEXT);
 const _: () = assert!(ble_protocol::VERSION == 3 && ble_protocol::KIND_RECORD == 4);
+const _: () = assert!(ble_protocol::MAX_RESPONSE_LEN <= ble_session::MAX_CIPHERTEXT);
 
 const SERVICE_UUID: Uuid = Uuid::new_long(ble_protocol::SERVICE_UUID.to_le_bytes());
 const INFO_UUID: Uuid = Uuid::new_long(ble_protocol::INFO_UUID.to_le_bytes());
@@ -42,6 +43,36 @@ fn status() -> [u8; ble_protocol::STATUS_LEN] {
         uptime_secs: Instant::now().as_secs(),
     }
     .encode()
+}
+
+fn overview(token: u16, out: &mut [u8]) -> Result<usize, ble_protocol::Error> {
+    use crate::usb::bootstrap::Phase;
+    let agent = crate::capabilities::host_agent_snapshot();
+    ble_protocol::Overview {
+        request: token,
+        bootstrap: match crate::usb::bootstrap::phase() {
+            Phase::Idle => ble_protocol::BootstrapPhase::Idle,
+            Phase::Armed => ble_protocol::BootstrapPhase::Armed,
+            Phase::Downloading => ble_protocol::BootstrapPhase::Downloading,
+            Phase::Verified => ble_protocol::BootstrapPhase::Verified,
+            Phase::Failed => ble_protocol::BootstrapPhase::Failed,
+            Phase::Cancelled => ble_protocol::BootstrapPhase::Cancelled,
+        },
+        bootstrap_available: crate::usb::bootstrap::available(),
+        script_version: script_protocol::VERSION,
+        filesystem_version: crate::capabilities::FILESYSTEM_PROTOCOL_VERSION,
+        transfer_version: transfer_protocol::TRANSFER_PROTOCOL_VERSION,
+        max_bytecode: script_protocol::MAX_BYTECODE as u16,
+        max_usb_payload: transfer_protocol::TLV_MAX_PAYLOAD as u16,
+        agent_age_ms: crate::capabilities::host_agent_age_ms(),
+        max_delay_ms: bytecode_constants::MAX_DEVICE_DELAY_MS,
+        max_total_delay_ms: bytecode_constants::MAX_EFFECT_DELAY_TOTAL_MS as u32,
+        firmware: env!("PICO_FIRMWARE_BUILD"),
+        agent_version: &agent.version,
+        host_os: &agent.host_os,
+        hostname: &agent.hostname,
+    }
+    .encode(out)
 }
 
 #[embassy_executor::task]
@@ -244,8 +275,11 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                                         };
                                         // No authority is derived from the unprotected fragment headers.
                                         authenticated = true;
+                                        let wants_overview = kind == ble_protocol::KIND_CONTROL
+                                            && body == [ble_protocol::READ_OVERVIEW]
+                                            && acquired;
                                         if kind == ble_protocol::KIND_CONTROL
-                                            && body == [ble_protocol::POLL]
+                                            && (body == [ble_protocol::POLL] || wants_overview)
                                         {
                                             // Poll preserves the active Run's result token and completion.
                                         } else if matches!(
@@ -271,14 +305,25 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                                             break;
                                         };
                                         response_sequence = next;
-                                        let mut snapshot = [0; ble_protocol::SNAPSHOT_LEN];
-                                        snapshot[..20]
-                                            .copy_from_slice(&crate::ble_control::result());
-                                        snapshot[20..].copy_from_slice(&status());
+                                        let mut snapshot = [0; ble_protocol::MAX_OVERVIEW_LEN];
+                                        let snapshot_len = if wants_overview {
+                                            match overview(message.token, &mut snapshot) {
+                                                Ok(length) => length,
+                                                Err(_) => break,
+                                            }
+                                        } else {
+                                            snapshot[..20]
+                                                .copy_from_slice(&crate::ble_control::result());
+                                            snapshot[20..ble_protocol::SNAPSHOT_LEN]
+                                                .copy_from_slice(&status());
+                                            ble_protocol::SNAPSHOT_LEN
+                                        };
                                         let mut encrypted = [0; ble_protocol::MAX_RESPONSE_LEN];
-                                        let Ok(length) =
-                                            session.seal(next, &snapshot, &mut encrypted)
-                                        else {
+                                        let Ok(length) = session.seal(
+                                            next,
+                                            &snapshot[..snapshot_len],
+                                            &mut encrypted,
+                                        ) else {
                                             break;
                                         };
                                         if response

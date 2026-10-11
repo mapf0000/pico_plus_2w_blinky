@@ -11,3 +11,4 @@ keyboard-core = { path = "../keyboard-core", features = [
 ] }
 script-protocol = { path = "../script-protocol" }
 firmware-exec = { path = "../firmware-exec" }
+ble-protocol = { path = "../ble-protocol" }

@@ -1,6 +1,6 @@
 # Native companion: remaining feature-parity plan
 
-Updated 2026-10-10. This is the active backlog for replacing the former Web UI
+Updated 2026-10-11. This is the active backlog for replacing the former Web UI
 with the native Rust/egui Bluetooth companion. Completed implementation and test
 history belong in [DEVICE_TESTING.md](docs/DEVICE_TESTING.md); remove completed
 items from this backlog as milestones land.
@@ -13,6 +13,14 @@ confirmed the previous v2 pairing, real USB keyboard output and delayed cancella
 on hardware. BLE v3 now has host/embedded validation plus macOS/Pico acceptance
 for unattended control/status/reconnect, wrong-key rejection and unauthenticated
 command/continuous-read timeout rejection. V3 HID acceptance remains separate.
+Background reads no longer mark controls busy; one bounded command can wait
+behind them, with queued-text cancellation and fail-closed timeout/disconnect.
+Timestamped/contextual diagnostics now have filtering, errors-only, clear and
+autoscroll. An acquired, encrypted overview reports the full build, execution
+limits, agent metadata/freshness and CDC stage. Pico readback and commands during
+refresh have passed. The user confirmed steady buttons across repeated refreshes
+while connected with control acquired; populated-agent/CDC tests remain pending.
+See DEVICE_TESTING.md for the completed slice.
 WLAN, HTTP/WebSocket, the Yew frontend and browser Python Worker have been removed.
 The target computer still connects to the Pico through USB HID/CDC and runs the
 host agent. The control computer runs the companion and connects through BLE.
@@ -40,7 +48,7 @@ Bluetooth-only removal (`2f6579c`). Historical sources can be read with
 | Former workflow | Current companion / reusable code | Remaining work |
 | --- | --- | --- |
 | Unattended authorization (new deployment requirement) | BLE v3 Noise PSK, private provisioning profile, encrypted control/snapshots and no physical gate implemented | Board acceptance, OS credential-store import/profile selection and authenticated atomic rotation |
-| Overview: USB state, firmware version/build, host OS, agent presence/version, CDC installation stage, compatibility errors | Basic build/protocol/USB/presence/uptime/RTT; `firmware/src/capabilities.rs` and `usb/bootstrap.rs` retain richer state | Versioned capability/metadata response, freshness and agent compatibility, bootstrap progress and actionable errors |
+| Overview: USB state, firmware version/build, host OS, agent presence/version, CDC installation stage, compatibility errors | Protected overview v1, full build/limits, version/OS/hostname/heartbeat age and CDC stage reuse existing firmware state | Populated/stale-agent and CDC-stage acceptance; installation byte progress/specific failure reasons if needed; gate future workflows by actual BLE support |
 | Start/stop USB | Implemented; fault cases remain unverified | Hardware acceptance for enable/disable, detach and job contention |
 | USB manufacturer/product editing and persistent save | `device_config.rs` still reads the two existing flash slots; mutation/save code was removed | Restore validated, transactional saving while USB is off; native editor and readback |
 | Python editor, generator execution, Start/Stop and errors | Text demo only; keyboard lowering, script envelopes and strict HID execution remain | Supervised interpreter, editor, generator send/throw, deadlines, local waits and capability checks |
@@ -48,7 +56,6 @@ Bluetooth-only removal (`2f6579c`). Historical sources can be read with
 | Host filesystem navigation | Agent listing/pagination and firmware page validation remain | BLE request/page relay; Home/Root/Up, breadcrumbs, hidden files, metadata, selection, pagination and errors |
 | Encrypted path/default-path transfer initiation and session reconnect | Agent session/crypto/sender and shared `transfer-crypto` / `transfer-protocol` remain | Native session client, authenticated BLE relay and transfer controls |
 | Downloads: queue, progress, rate/ETA, verification, save | No native receiver; `usb/events.rs` deliberately rejects delivery | Bounded stream-to-disk receiver, verification/receipt, safe saving and transfer activity UI |
-| Diagnostics: connection activity, filtering, errors-only, clear and autoscroll | Bounded static-message diagnostics | Bounded structured entries, operation/error context and equivalent viewing controls |
 | Connection loss and reconnect | Explicit reconnect and incarnation checks exist | Convenient recovery with fresh secret-authenticated sessions, stale-response rejection and no execution replay; platform acceptance |
 
 Historical evidence: `apps/frontend/src/app.rs`, `ui/overview.rs`, `ui/scripts.rs`,
@@ -116,32 +123,30 @@ route. The hostile USB target/agent never receives this key. Firmware flash is n
 encrypted at rest; physical extraction/firmware compromise is outside the boundary.
 The prototype bounds unauthenticated occupancy and disconnect rate, not radio DoS.
 
-## 1. Stable controls, complete overview and USB identity
+## 1. USB identity and overview acceptance
 
-Implement in small changes: polling/UI state first, metadata next, identity last.
-Use milestone 0's protected record path for metadata/configuration requests and
-responses; milestone 2 extends it with streamed pages/events and receiver credit.
-The flicker fix can land independently of authentication.
+The polling/diagnostics/finite-overview slice is implemented and flashed. It uses
+the existing protected records, with a negotiated overview-v1 Info flag, a
+288-byte plaintext bound and a 304-byte finite response slot. Ordinary snapshots
+remain 48-byte ciphertext. No streaming relay or USB format changed. Detailed
+metadata requires acquired control; layouts are companion lowering choices,
+because firmware executes layout-independent KBD1. Completed checks belong in
+DEVICE_TESTING.md; this milestone is not yet complete.
 
-- **Button flicker:** the user sees flicker roughly every second. Code inspection
-  shows `Client::tick()` creates a global pending Status request and buttons gate
-  on `snapshot.pending`; this is a likely cause, not a confirmed rendering diagnosis.
-  Separate background refresh from user-operation busy state. Queue a bounded
-  user intent behind an in-flight read without allowing conflicting mutations;
-  retain immediate Cancel/Disconnect priority. Verify appearance and clicks in
-  the actual connected window over multiple polling cycles.
-- Expose firmware version/build, supported layouts/limits, agent version/OS and
-  presence freshness, filesystem/transfer versions, and CDC bootstrap stage/error.
-  Reuse `capabilities.rs` and `usb/bootstrap.rs`; avoid parallel copies of state.
-  Gate workflows by advertised support and agent availability. Keep sensitive
-  metadata behind authenticated control; existing public discovery stays minimal.
+Remaining, with USB identity as the next implementation slice:
+
 - Restore configuration mutation and persistence using the current printable
   ASCII bounds (manufacturer 32 bytes, product 48). Reject edits while USB is
   active, report flash failures, and acknowledge success only after persistence.
   Preserve the existing slot/schema/layout and apply identity on next USB start.
   Review flash-write safety while the BLE stack is running.
-- Add operation context, filtering, errors-only, clear and autoscroll to bounded
-  diagnostics. Host data remains text; omit secrets, script text and file contents.
+- Exercise diagnostic filtering, clear and manual scrolling with a populated view.
+- Accept populated/stale/legacy agent metadata and CDC installer stages on hardware.
+  Heartbeat age is sampled at overview time; live presence still expires at
+  25 seconds. Decide whether byte progress and specific failure reasons are needed
+  beyond the stage/retry guidance before calling the overview fully accepted.
+  Gate future filesystem/download/Python workflows by their own advertised BLE
+  support and current agent availability, not just retained USB protocol versions.
 
 Acceptance: refresh never flashes controls or swallows clicks; unsupported or
 absent-agent features explain why they are unavailable; identity validation and
@@ -153,8 +158,9 @@ Record pending and completed board checks in DEVICE_TESTING.md.
 ## 2. Bounded BLE responses/events and filesystem browsing
 
 This is the shared prerequisite for filesystem pages, Python button events and
-file streaming. Today's finite 48-byte encrypted response carries control/status snapshots;
-it cannot stream directory pages or file records. `usb/events.rs` is an unavailable
+file streaming. Today's finite response slot is 304 bytes: ordinary control/status
+ciphertext is 48 bytes, and protected overview v1 uses up to 304. It cannot stream
+directory pages or file records. `usb/events.rs` is an unavailable
 sink, so a new screen alone cannot restore these workflows.
 
 - Extend `ble-protocol` with explicitly versioned request/response/event framing,

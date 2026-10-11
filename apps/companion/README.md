@@ -66,8 +66,26 @@ use separate coalescing priority signals. One message/effect is outstanding;
 connection generations suppress stale commands/results. BLE writes are at most
 20 bytes and require ATT responses; completion is read from an encrypted correlated
 snapshot. Authentication has a 10-second actor budget, upload has an additional 60-second
-budget, ordinary requests five seconds, and cancellation two seconds before
-client disconnect. Diagnostics retain 128 entries and omit text/bytecode/keys.
+budget, ordinary requests five seconds, protected overview eight seconds, and
+cancellation two seconds before client disconnect. Connect allows ten seconds
+including rediscovery and authentication. Diagnostics retain 128 timestamped
+entries with session/operation/error context and omit text/bytecode/keys. Filter,
+Errors only, Clear and Autoscroll control the diagnostic view.
+
+Background status polling leaves buttons enabled. One bounded command can wait
+behind a status/overview read; further commands receive a queue-full error.
+Cancel removes queued text before any upload; Disconnect discards all queued work.
+Commands are revalidated against the completed read and never replay after timeout
+or reconnect. The protected overview adds the full firmware build, agent version,
+OS/hostname/heartbeat age, CDC installer stage and execution/USB limits after
+control acquisition, targeting a ten-second refresh while idle. Heartbeat age is
+sampled at overview time; live presence/USB status targets a one-second interval.
+Displayed layouts are the companion's compiled lowering choices. USB protocol
+versions do not imply available native filesystem/download screens.
+
+Update both app and firmware for the overview extension: older v3 companions
+reject its newly advertised Info flag. New companions can use older v3 firmware
+without the detailed overview. USB identity editing remains planned.
 
 `cargo run -p pico-companion --example auth_boundary` performs explicit board
 acceptance for plaintext-command rejection and the unauthenticated connection

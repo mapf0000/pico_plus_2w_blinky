@@ -224,6 +224,8 @@ impl Transport for MockTransport {
                         firmware: "mock / no radio or USB".into(),
                         layouts: layouts().iter().map(|layout| (*layout).into()).collect(),
                         status: self.status(),
+                        overview_supported: false,
+                        overview: None,
                     }),
                 )
             }

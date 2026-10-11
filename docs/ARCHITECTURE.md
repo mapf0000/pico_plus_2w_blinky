@@ -16,6 +16,12 @@ Tokio backend owns `companion-core::Client`; the btleplug actor owns all radio
 objects and asynchronous I/O. Connection incarnation plus request IDs scope
 commands and replies. Scan/connect/status, authentication/control, USB controls,
 KBD1 text execution and cancellation share one pending-request state machine.
+Status/overview reads are background work and do not disable controls. One bounded
+user intent may wait behind a read and is revalidated on completion. Queued text
+can be cancelled before submission; disconnect, failure and timeout discard it.
+The UI busy state covers user work only. Diagnostics retain bounded static messages
+with monotonic timestamps, connection incarnation, operation context and errors;
+filter/clear/autoscroll are native UI controls.
 Reset and cancel bypass the four-slot normal command queue. No device I/O runs
 in egui callbacks. Reconnect is explicit; effects are never replayed.
 
@@ -23,7 +29,7 @@ in egui callbacks. Reconnect is explicit; effects are never replayed.
 PSRAM diagnostics, persistent USB identity and CYW43 once. Its mandatory
 `new_with_bluetooth` driver uses the board's existing RM2 PIO pins/divider/DMA.
 No network stack, CLM/AP initialization, DHCP, TCP or asset-serving task starts.
-`firmware/src/ble.rs` runs one TrouBLE peripheral with signalling, ATT and SMP.
+`firmware/src/ble.rs` runs one TrouBLE peripheral with signalling and ATT; SMP is disabled.
 
 Info/status are public bounded diagnostics. Auth writes and sequential Result reads
 carry empty-payload `Noise_NNpsk0_25519_ChaChaPoly_SHA256` handshake messages.
@@ -31,10 +37,15 @@ carry empty-payload `Noise_NNpsk0_25519_ChaChaPoly_SHA256` handshake messages.
 provisioned key/device ID binds the prologue. SMP pairing is not built or required.
 Connect authenticates when a profile is supplied; an encrypted Acquire grants the
 lease. Commands and result/status snapshots remain encrypted for the connection.
+Acquired ReadOverview reuses `capabilities.rs` heartbeat/version/OS state and
+`usb/bootstrap.rs` phase/availability. A finite versioned record reports those
+alongside full build and execution/USB limits. It refreshes separately at ten
+seconds while idle; the public discovery values and ordinary snapshots stay small.
+USB filesystem/transfer format versions do not advertise a native streaming relay.
 An unauthenticated connection has a fixed 30-second lifetime, even under traffic.
 
 Each BLE connection owns one fixed 4,142-byte ciphertext receiver, a 4,126-byte
-plaintext scratch buffer, a 48-byte finite response slot, independent 16-bit
+plaintext scratch buffer, a 304-byte finite response slot, independent 16-bit
 record sequences and a control lease. A newer token drops a partial upload,
 allowing Cancel to bypass it without nonce reuse. Partial uploads expire after
 five seconds. Authenticated Poll replaces any partially read response and retains
@@ -77,10 +88,11 @@ credential-store import and runtime key rotation are not implemented.
 | Shared BLE packet pool | 8 × 128 bytes, plus fixed metadata |
 | GATT command write | 20 bytes maximum; 8-byte header, 12-byte payload |
 | Reassembly | 1 × 4,142 ciphertext bytes + 4,126-byte plaintext scratch |
-| Response | 1 × 48 bytes, sequential 20-byte reads; one active effect correlation |
+| Response | 1 × 304 bytes; ordinary snapshot 48; sequential 20-byte reads; one active effect correlation |
 | HID program/queued command | 4,096-byte maximum; one reservation |
 | Companion radio requests/events | 4 / 16 |
 | Companion device list/diagnostics | 16 / 128 |
+| Companion intent waiting behind background read | 1; text at most 4,096 bytes / 1,024 characters |
 | Persistent bond storage | none; fresh application-layer authentication each connection |
 
 The CYW43 vendor firmware and driver still contain combined radio support;

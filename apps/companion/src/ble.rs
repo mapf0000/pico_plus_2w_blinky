@@ -243,6 +243,8 @@ impl RadioIo for Radio {
                         .map(|layout| (*layout).into())
                         .collect(),
                     status,
+                    overview_supported: info.overview,
+                    overview: None,
                 }))
             }
             Operation::Status => {
@@ -267,6 +269,23 @@ impl RadioIo for Radio {
                 } else {
                     Err(code_failure(code))
                 }
+            }
+            Operation::Overview => {
+                let token = self.next_token()?;
+                self.upload(
+                    ble_protocol::KIND_CONTROL,
+                    token,
+                    &[ble_protocol::READ_OVERVIEW],
+                )
+                .await?;
+                let plaintext = self.protected_response().await?;
+                let value = ble_protocol::Overview::decode(&plaintext).map_err(protocol_failure)?;
+                if value.request != token {
+                    return Err(Failure::InvalidData);
+                }
+                Ok(Reply::Overview(companion_core::Overview::from_bytes(
+                    &plaintext,
+                )?))
             }
             Operation::Release => {
                 let code = self.control(ble_protocol::RELEASE).await?;
@@ -430,7 +449,7 @@ impl Radio {
         let peripheral = self.connected.as_ref().ok_or(Failure::LinkLost)?;
         let characteristic = characteristic(peripheral, RESULT)?;
         let mut receiver = ble_protocol::Receiver::new();
-        // At most four default-MTU reads for a handshake or encrypted snapshot.
+        // Finite metadata is at most 26 default-MTU reads; snapshots still use four.
         for _ in 0..ble_protocol::MAX_RESPONSE_LEN.div_ceil(ble_protocol::PAYLOAD_LEN) {
             let bytes = peripheral.read(&characteristic).await.map_err(failure)?;
             let frame = ble_protocol::read_fragment(&bytes).map_err(protocol_failure)?;
@@ -448,24 +467,29 @@ impl Radio {
         let token = self.next_token()?;
         self.upload(ble_protocol::KIND_CONTROL, token, &[ble_protocol::POLL])
             .await?;
-        let (kind, sequence, encrypted) = self.read_response().await?;
-        if kind != ble_protocol::KIND_RECORD {
-            return Err(Failure::Authentication);
-        }
-        let mut plaintext = zeroize::Zeroizing::new([0; ble_protocol::SNAPSHOT_LEN]);
-        let length = self
-            .crypto
-            .as_mut()
-            .ok_or(Failure::Authentication)?
-            .open(sequence, &encrypted, &mut *plaintext)
-            .map_err(|_| Failure::Authentication)?;
-        if length != ble_protocol::SNAPSHOT_LEN {
+        let plaintext = self.protected_response().await?;
+        if plaintext.len() != ble_protocol::SNAPSHOT_LEN {
             return Err(Failure::InvalidData);
         }
         let result =
             ble_protocol::ResultValue::decode(&plaintext[..20]).map_err(protocol_failure)?;
         let status = ble_protocol::Status::decode(&plaintext[20..]).map_err(protocol_failure)?;
         Ok((result, status_model(status)))
+    }
+    async fn protected_response(&mut self) -> Result<zeroize::Zeroizing<Vec<u8>>, Failure> {
+        let (kind, sequence, encrypted) = self.read_response().await?;
+        if kind != ble_protocol::KIND_RECORD {
+            return Err(Failure::Authentication);
+        }
+        let mut plaintext = zeroize::Zeroizing::new(vec![0; ble_protocol::MAX_OVERVIEW_LEN]);
+        let length = self
+            .crypto
+            .as_mut()
+            .ok_or(Failure::Authentication)?
+            .open(sequence, &encrypted, &mut plaintext)
+            .map_err(|_| Failure::Authentication)?;
+        plaintext.truncate(length);
+        Ok(plaintext)
     }
     async fn wait_result(
         &mut self,
@@ -614,6 +638,7 @@ async fn run(
         }
         let timeout = match &command.request.operation {
             Operation::Acquire | Operation::Connect(_) => Duration::from_secs(10),
+            Operation::Overview => Duration::from_secs(8),
             Operation::Run(_) => Duration::from_secs(300),
             _ => IO_TIMEOUT,
         };
