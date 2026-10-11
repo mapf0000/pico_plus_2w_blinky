@@ -169,8 +169,11 @@ async fn main(spawner: Spawner) {
 
 mod ble;
 mod ble_control;
+mod ble_relay;
+mod ble_relay_core;
 mod capabilities;
 mod device_config;
+mod device_config_core;
 mod display;
 mod display_core;
 mod health;

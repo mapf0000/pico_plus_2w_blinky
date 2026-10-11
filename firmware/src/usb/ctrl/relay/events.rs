@@ -31,21 +31,7 @@ async fn forward_binary(kind: u8, payload: &[u8]) -> bool {
 }
 
 pub(in crate::usb::ctrl) fn forward_filesystem_page(payload: &[u8]) -> bool {
-    if payload.len() < 10 {
-        return false;
-    }
-    let version = u16::from_le_bytes([payload[0], payload[1]]);
-    if version != FS_PROTOCOL_VERSION {
-        return false;
-    }
-
-    let mut out: Vec<u8, { transfer::TRANSFER_BINARY_MAX }> = Vec::new();
-    if out.push(transfer::WS_BINARY_KIND_FILESYSTEM).is_err()
-        || out.extend_from_slice(payload).is_err()
-    {
-        return false;
-    }
-    transfer::queue_binary(out).is_ok()
+    crate::ble_relay::page(payload)
 }
 
 pub(super) async fn emit_transfer_progress(state: &RelayTransferState) {

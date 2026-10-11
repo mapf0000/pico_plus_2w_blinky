@@ -1,8 +1,10 @@
 mod app;
 mod backend;
 mod ble;
+mod identity_smoke;
 mod profile;
 mod smoke;
+mod stream_smoke;
 
 use clap::Parser;
 use companion_core::mock::Scenario;
@@ -18,7 +20,7 @@ struct Args {
     #[arg(long, conflicts_with_all = ["mock", "create_profile"])]
     profile: Option<std::path::PathBuf>,
     /// Generate a private profile and matching .flash.bin; exits without device access.
-    #[arg(long, conflicts_with_all = ["mock", "ble", "self_test"])]
+    #[arg(long, conflicts_with_all = ["mock", "ble", "self_test", "identity_self_test", "stream_self_test"])]
     create_profile: Option<std::path::PathBuf>,
     /// Use an in-memory device.
     #[arg(long, conflicts_with = "ble")]
@@ -33,6 +35,15 @@ struct Args {
     /// Run a headless mock lifecycle or real BLE discovery/status/reconnect check.
     #[arg(long)]
     self_test: bool,
+    /// Temporarily edit USB names, test save/read/toggles, and restore them. Requires --profile.
+    #[arg(long, requires = "profile", conflicts_with_all = ["mock", "self_test"])]
+    identity_self_test: bool,
+    /// Test encrypted maximum-size notifications and fresh reconnect; never sends HID.
+    #[arg(long, requires = "profile", conflicts_with_all = ["mock", "self_test", "identity_self_test"])]
+    stream_self_test: bool,
+    /// Additionally browse this host-agent directory and test pagination/error/cancel.
+    #[arg(long, requires = "stream_self_test")]
+    test_directory: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -54,6 +65,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         backend::Mode::Mock(args.mock_scenario)
     };
+    if args.stream_self_test {
+        return stream_smoke::run(profile.ok_or("--profile is required")?, args.test_directory);
+    }
+    if args.identity_self_test {
+        return identity_smoke::run(profile.ok_or("--profile is required")?);
+    }
     if args.self_test {
         if args.ble {
             return ble_smoke(profile);
@@ -63,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         smoke::run()?;
         println!(
-            "Mock self-test passed: discovery, connect, control, KBD1 completion, cancel, release, reconnect. No Bluetooth or USB access."
+            "Mock self-test passed: discovery, connect, control, KBD1 completion, cancel, USB identity save/readback, filesystem listing/cancel, release, reconnect. No Bluetooth or USB access."
         );
         return Ok(());
     }
@@ -193,6 +210,9 @@ fn ble_smoke(
                                     overview.max_bytecode,
                                     overview.bootstrap.label()
                                 );
+                            }
+                            if caps.identity_supported && caps.identity.is_none() {
+                                return Err("Protected USB identity was not received".into());
                             }
                             phase = Phase::ReleaseOnRefresh;
                         } else {

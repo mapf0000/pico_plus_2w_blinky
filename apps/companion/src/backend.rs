@@ -132,7 +132,10 @@ impl Backend {
     }
 
     pub fn send(&self, epoch: u64, action: Action) -> Result<(), &'static str> {
-        let sender = if matches!(action, Action::Cancel | Action::Disconnect) {
+        let sender = if matches!(
+            action,
+            Action::Cancel | Action::CancelDirectory | Action::Disconnect
+        ) {
             &self.urgent
         } else {
             &self.commands

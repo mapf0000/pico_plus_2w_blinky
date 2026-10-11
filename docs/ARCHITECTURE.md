@@ -41,7 +41,8 @@ Acquired ReadOverview reuses `capabilities.rs` heartbeat/version/OS state and
 `usb/bootstrap.rs` phase/availability. A finite versioned record reports those
 alongside full build and execution/USB limits. It refreshes separately at ten
 seconds while idle; the public discovery values and ordinary snapshots stay small.
-USB filesystem/transfer format versions do not advertise a native streaming relay.
+Info flag 32 separately negotiates native filesystem/button streaming; USB version
+numbers alone do not advertise it.
 An unauthenticated connection has a fixed 30-second lifetime, even under traffic.
 
 Each BLE connection owns one fixed 4,142-byte ciphertext receiver, a 4,126-byte
@@ -67,13 +68,30 @@ cannot retain the HID reservation forever.
 USB CDC control framing, host-agent dispatcher, encrypted bulk formats and
 bootstrap remain compatible. Browser bulk delivery is unavailable:
 `usb/events.rs` explicitly refuses relay delivery, so firmware aborts instead
-of acknowledging chunks without a receiver. A BLE status/control connection
+of acknowledging chunks without a receiver. Filesystem pages use a separate
+`ble_relay_core` ownership/queue policy and `ble_relay` CDC adapter; generic binary
+queues stay unavailable. One page and eight released buttons feed one 2,070-byte
+encrypted ciphertext sender with four application credits. The native radio actor
+subscribes, validates/decrypts and acknowledges bounded batches; it also pumps
+notifications between HID polls. Finite results have separate nonce/replay state.
+`companion-core::filesystem` owns the bounded native browser model. A BLE status/control connection
 never counts as a bulk receiver. Native bulk workflows require a separate design.
 
 The build helper installs `memory.x`, embeds the internal four-MiB FAT16 agent
 artifact and generates typed keyboard presets. It has no subprocess browser
 build or interpreter assets. The internal image is not a USB mass-storage drive.
-Persistent USB identity remains readable at the original two flash slots.
+`device_config_core` owns the portable USB identity validation, legacy schema,
+CRC/sequence selection and verified inactive-slot transaction. `device_config.rs`
+adapts it to the single Embassy flash driver and RAM configuration. Encrypted
+acquired BLE requests read or save identity; the shared USB lifecycle mutex blocks
+start/stop while saving. The USB task removes the hardware pull-up and stops
+controller/interrupt sources before acknowledging shutdown or releasing session
+buffers; this compensates for the pinned driver's empty disable hook.
+Saving requires fully stopped USB and no reserved HID/CDC
+work. Descriptors consume the committed configuration on the next USB start.
+The native core owns bounded commands and save/readback results; egui owns the
+draft fields and queues operations. Background reads preserve drafts, and disconnect never replays
+persistent writes. The original two identity flash slots retain their addresses.
 A separate two-slot 8-KiB control-key reservation precedes the unchanged image.
 Firmware reads it through the shared flash driver at BLE startup. The companion
 creates private factory provisioning files; no BLE/USB key export exists. OS
@@ -89,6 +107,8 @@ credential-store import and runtime key rotation are not implemented.
 | GATT command write | 20 bytes maximum; 8-byte header, 12-byte payload |
 | Reassembly | 1 × 4,142 ciphertext bytes + 4,126-byte plaintext scratch |
 | Response | 1 × 304 bytes; ordinary snapshot 48; sequential 20-byte reads; one active effect correlation |
+| Stream sender / relay queue | 1 × 2,070 ciphertext bytes / 1 × 2,048-byte page + 8 buttons; 4 fragment credits |
+| Native filesystem / button history | 512 entries / 32 releases; reset on disconnect |
 | HID program/queued command | 4,096-byte maximum; one reservation |
 | Companion radio requests/events | 4 / 16 |
 | Companion device list/diagnostics | 16 / 128 |

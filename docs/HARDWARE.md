@@ -207,16 +207,41 @@ Safe, no-Wi-Fi automated coverage for enumeration, CDC framing, encrypted-transf
 rejection, and restricted production host-agent handshake/keepalive behavior is
 provided by `scripts/device-test`. See [DEVICE_TESTING.md](DEVICE_TESTING.md).
 
-USB starts automatically during boot in the current implementation. Disabling USB detaches the entire composite device; re-registration rebuilds all classes and descriptors. Descriptors are fixed for the active USB session; existing persisted identity is loaded at startup. Remote identity editing is not currently exposed.
+USB starts automatically during boot in the current implementation. Disabling USB detaches the entire composite device; re-registration rebuilds all classes and descriptors. Descriptors are fixed for the active USB session; existing persisted identity is loaded at startup. The acquired companion can edit manufacturer/product over encrypted BLE; disable USB before saving, then enable USB to rebuild descriptors.
 
 Implementation:
 
 - Composite builder/session: `firmware/src/usb/task.rs`
 - Start/stop lifecycle: `firmware/src/usb/usb_supervisor.rs`
+- Physical detach: `usb/task.rs::disconnect_bus` removes the USB pull-up, masks
+  controller interrupt sources and disables the controller after stopping its
+  futures and notifying device handlers. A ten-millisecond disconnect interval
+  precedes the stopped acknowledgement. The pinned
+  [Embassy RP 0.10.0 driver](https://github.com/embassy-rs/embassy/blob/embassy-rp-v0.10.0/embassy-rp/src/usb.rs)
+  has an empty `Bus::disable`, so `UsbDevice::disable` alone does not detach. The
+  existing driver initialization restores registers on each subsequent start.
 - HID: `firmware/src/usb/hid.rs`, `crates/firmware-exec`
 - Control CDC: `firmware/src/usb/ctrl.rs`
 - Internal agent image: `firmware/src/usb/agent_image.rs`
 - Internal FAT image generator: `crates/build-support/src/msc_image.rs`
+
+USB identity saving preserves the two existing 4-KiB slots and version-1 format.
+The inactive slot is erased and staged without magic, verified, committed and
+verified again. No valid current slot is erased and unchanged records avoid wear.
+The same lifecycle mutex excludes USB start/stop during saving; a timed-out stop
+still counts as running, and stale stop notifications are cleared before reuse.
+VID/PID and static serial remain unchanged. Control-key slots are read-only through
+this adapter. Flash failures require an explicit native reload before retry.
+
+Flash-write safety was reviewed against the installed
+[Embassy RP 0.10.0 driver](https://github.com/embassy-rs/embassy/blob/embassy-rp-v0.10.0/embassy-rp/src/flash.rs).
+The erase/program helpers execute from ROM/RAM with interrupts disabled, core 1
+paused and XiP-reading DMA drained. Write buffers live in SRAM; the project does
+not start core 1. One transaction has one 4-KiB erase and two 256-byte programs;
+it is synchronous and the BLE executor resumes afterwards. USB/HID/installer
+activity is excluded first. Board save/readback/reconnect passed while BLE was
+running, but this is not a worst-case radio blackout or runtime-stack measurement.
+The six-second watchdog and bounded BLE deadlines remain unchanged.
 
 ## Bluetooth and build prerequisites
 
@@ -226,6 +251,11 @@ NVRAM and Bluetooth patch are still loaded using the unchanged board pins/RM2
 divider. One peripheral connection advertises the project service as Pico BLE.
 TrouBLE 0.6 / CYW43 0.7 share bt-hci 0.8. The packet pool has eight 128-byte
 packets and three reserved L2CAP channels; signalling/ATT are used, SMP is disabled.
+Encrypted notifications retain 20-byte ATT values at every negotiated MTU. Four
+application credits reserve packet headroom for ATT commands/replies. The linked
+stream sender owns 2,070 bytes, with a separate 2,048-byte filesystem page queue
+and eight best-effort button entries; no packet-pool or flash-layout growth.
+`--stream-self-test` reports negotiated MTU, throughput and queue high-water marks.
 
 BLE v3 uses provisioned-secret Noise authentication and encrypted records, without
 Pico confirmation, display access or OS pairing. The PC supplies a private profile;
@@ -298,7 +328,7 @@ Normal ELF flashing writes the sections present in the ELF. The persistent-confi
 | Display is blank | Confirm the Pico Display 2.8 is seated correctly; verify GP16–GP20; inspect ST7789 initialization logs. Buttons/LED should remain functional on display init failure. |
 | PSRAM is not detected | Verify this is the Pico Plus 2 W variant and internal GPIO47/QMI CS1 wiring; firmware should fall back to SRAM and log the condition. |
 | CDC installer is unavailable | Package the Apple Silicon agent, provision `PICO_USB_SERIAL`, and rebuild; confirm the artifact target path. |
-| USB identity change does not appear | Detach/re-register USB or power-cycle so descriptors are rebuilt; remote identity editing is currently unavailable. |
+| USB identity change does not appear | Detach/re-register USB or power-cycle so descriptors are rebuilt; disable USB, save in the companion, then enable USB. |
 | Persistent config appears corrupt | Firmware should choose the other valid CRC-checked slot or defaults. Avoid erasing flash until both slots and linker boundaries have been checked. |
 
 ## Hardware smoke-test checklist

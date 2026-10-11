@@ -53,7 +53,8 @@ Detailed references:
 - `src/usb/`: USB HID, CDC control/relay protocol, internal agent image, and USB supervision.
 - `src/display/`: on-device pages, including standalone Payloads, input, rendering, and status views.
 - `src/display_core/`: hardware-independent button routing, page models, bounded row scenes, and incremental rendering. `src/display/` owns GPIO/SPI/ADC and service adapters.
-- `src/device_config.rs`: persistent flash-backed configuration. Its constants must agree with `memory.x`.
+- `src/device_config_core.rs`: portable identity validation, existing flash schema and verified two-slot transaction.
+- `src/device_config.rs`: bounded hardware flash adapter and USB-off save gate. Its constants must agree with `memory.x`.
 - `src/psram_pool.rs`: board-specific PSRAM initialization for diagnostics.
 - `memory.x`: 16 MiB flash layout, including two persistent 4 KiB USB-identity slots and two separate control-key slots.
 - `build.rs`: delegates the build pipeline to `crates/build-support`.
@@ -78,15 +79,19 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 - `src/app.rs`: native egui rendering and controls.
 - `src/backend.rs`: bounded UI commands, Tokio backend and shutdown.
 - `src/smoke.rs`: deterministic headless mock lifecycle check.
+- `src/identity_smoke.rs`: explicit reversible BLE/flash/USB identity hardware check (`--identity-self-test`, requires a private profile).
 - `src/ble.rs`: bounded native BLE worker, discovery/status, authenticated control,
-  keyboard upload/cancellation and cleanup.
+  keyboard upload/cancellation, credit-controlled encrypted notifications and cleanup.
+- `src/stream_smoke.rs`: read-only maximum-record and filesystem board acceptance.
 - `crates/companion-core`: platform-independent client state, keyboard lowering,
   correlation, deadlines and mock transport.
 
 The package is `pico-companion`. Bluetooth is the default; `--ble` is an explicit
 alias and `--mock` selects the deterministic mock. The default firmware supports
-BLE v3 provisioned-secret authentication, acquired control, USB on/off and bounded
-keyboard effects. Filesystem/file reception and Python scripting remain planned
+BLE v3 provisioned-secret authentication, acquired control, USB on/off, verified
+USB identity saving and bounded
+keyboard effects, bounded host filesystem browsing and released-button events.
+File reception and Python scripting remain planned
 in `NATIVE_COMPANION_BLE_PLAN.md`. Native builds must remain independent of firmware
 asset generation and browser tooling. Require an authenticated session before control. Keep device
 work out of UI callbacks, bound queues/diagnostics, and scope commands/results to
@@ -97,7 +102,7 @@ a connection incarnation.
 - `keyboard-core`: portable, language-neutral layouts, key parsing, lowering, and KBD1 encoding. It is `no_std` by default.
 - `firmware-exec`: strict, two-pass `no_std` KBD1 validator/executor.
 - `script-protocol`: versioned correlated companion-to-firmware effect envelopes.
-- `ble-protocol`: `no_std` v3 information/status/snapshot/overview-v1 codecs, UUIDs and MTU-23
+- `ble-protocol`: `no_std` v3 information/status/snapshot/overview-v1/identity-v1 codecs, UUIDs and MTU-23
   handshake/encrypted-record fragmentation.
 - `bytecode-constants`: cross-target bytecode limits.
 - `ble-session`: allocation-free Noise PSK sessions and versioned key provisioning.

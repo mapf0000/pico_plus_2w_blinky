@@ -270,6 +270,11 @@ impl Inputs {
         let mut dirty = controller.update(snapshot, services::take_completion());
         dirty |= services::refresh_installation(controller);
         let routing = controller.route(events, reserved);
+        for button in crate::display_core::input::Button::ALL {
+            if routing.remote.contains(button) {
+                crate::ble_relay::button(button as u8);
+            }
+        }
         if routing.stop {
             crate::usb::hid::stop_device();
             diagnostics.stop(Instant::now().duration_since(sampled_at).as_micros());

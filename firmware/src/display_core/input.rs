@@ -149,6 +149,7 @@ pub struct Navigation {
 #[derive(Default)]
 pub struct Routing {
     pub page: ButtonMask,
+    pub remote: ButtonMask,
     pub stop: bool,
     pub cycle_led: bool,
 }
@@ -196,8 +197,16 @@ impl Navigation {
             // Stop wins over Run even when both releases arrive in one sample.
             page.remove(Button::X);
         }
+        let mut remote = page;
+        if payloads {
+            remote = ButtonMask::default();
+        }
+        if stop {
+            remote.remove(Button::Y);
+        }
         Routing {
             page,
+            remote,
             stop,
             cycle_led: releases.contains(Button::Y) && !stop && !payloads,
         }

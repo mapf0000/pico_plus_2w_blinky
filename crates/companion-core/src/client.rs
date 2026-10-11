@@ -1,7 +1,7 @@
 use crate::{
     Action, CANCEL_TIMEOUT, CONNECT_TIMEOUT, Connection, Diagnostic, DiagnosticContext, Event,
-    Failure, Job, MAX_DEVICES, MAX_DIAGNOSTICS, OVERVIEW_INTERVAL, Operation, Outcome,
-    REQUEST_TIMEOUT, Reply, Request, STATUS_INTERVAL, Snapshot, Tag, Transport, keyboard,
+    Failure, IdentityUpdate, Job, MAX_DEVICES, MAX_DIAGNOSTICS, OVERVIEW_INTERVAL, Operation,
+    Outcome, REQUEST_TIMEOUT, Reply, Request, STATUS_INTERVAL, Snapshot, Tag, Transport, keyboard,
 };
 use std::time::Duration;
 
@@ -13,8 +13,20 @@ enum Kind {
     Release,
     Status,
     Overview,
+    IdentityRead(bool), // true = automatic background read
+    IdentitySave,
     Usb,
+    Filesystem { cursor: u32, hidden: bool },
     Effect(script_protocol::EffectId),
+}
+
+impl Kind {
+    fn background(self) -> bool {
+        matches!(
+            self,
+            Self::Status | Self::Overview | Self::IdentityRead(true)
+        )
+    }
 }
 
 struct Pending {
@@ -76,7 +88,9 @@ impl<T: Transport> Client<T> {
         self.context = match &action {
             Action::Scan => DiagnosticContext::Discovery,
             Action::Acquire | Action::Release => DiagnosticContext::Control,
-            Action::SetUsbEnabled(_) => DiagnosticContext::Usb,
+            Action::SetUsbEnabled(_) | Action::ReadIdentity | Action::SaveIdentity(_) => {
+                DiagnosticContext::Usb
+            }
             Action::SendText { .. } | Action::Cancel => DiagnosticContext::Keyboard,
             _ => DiagnosticContext::Connection,
         };
@@ -88,11 +102,33 @@ impl<T: Transport> Client<T> {
             }
             Action::Disconnect => self.disconnect(None),
             Action::Cancel => self.cancel(now),
-            action
+            Action::SelectPath(path) => {
+                if crate::filesystem::valid_path(&path) {
+                    self.snapshot.filesystem.selected = Some(path);
+                    self.changed();
+                } else {
+                    self.reject(Failure::InvalidData);
+                }
+            }
+            Action::CancelDirectory => self.cancel_directory(now),
+            action @ Action::Browse { .. }
                 if self
                     .pending
                     .as_ref()
-                    .is_some_and(|p| matches!(p.kind, Kind::Status | Kind::Overview))
+                    .is_some_and(|p| matches!(p.kind, Kind::Filesystem { .. }))
+                    && self.queued.is_none() =>
+            {
+                if let Action::Browse { path, .. } = &action
+                    && !crate::filesystem::valid_path(path)
+                {
+                    self.reject(Failure::InvalidData);
+                    return;
+                }
+                self.cancel_directory(now);
+                self.queued = Some(action);
+            }
+            action
+                if self.pending.as_ref().is_some_and(|p| p.kind.background())
                     && self.queued.is_none() =>
             {
                 self.queue_behind_refresh(action)
@@ -233,6 +269,71 @@ impl<T: Transport> Client<T> {
                             .map_or(Duration::ZERO, |caps| caps.upload_timeout),
                 );
             }
+            Action::Browse {
+                path,
+                cursor,
+                hidden,
+            } => {
+                if !crate::filesystem::valid_path(&path) {
+                    self.reject(Failure::InvalidData);
+                    return;
+                }
+                if !self.snapshot.can_browse() {
+                    self.reject(Failure::AgentUnavailable);
+                    return;
+                }
+                if cursor != 0
+                    && (cursor != self.snapshot.filesystem.cursor
+                        || path != self.snapshot.filesystem.directory
+                        || hidden != self.snapshot.filesystem.hidden
+                        || !self.snapshot.filesystem.more)
+                {
+                    self.reject(Failure::InvalidData);
+                    return;
+                }
+                self.snapshot.filesystem.loading = true;
+                self.snapshot.filesystem.error = None;
+                self.issue(
+                    Operation::ListDirectory {
+                        path,
+                        cursor,
+                        hidden,
+                    },
+                    Kind::Filesystem { cursor, hidden },
+                    now,
+                    Duration::from_secs(35),
+                );
+            }
+            Action::ReadIdentity if self.snapshot.can_read_identity() => {
+                self.issue(
+                    Operation::ReadIdentity,
+                    Kind::IdentityRead(false),
+                    now,
+                    REQUEST_TIMEOUT,
+                );
+            }
+            Action::SaveIdentity(identity) => {
+                if !self.snapshot.can_save_identity() {
+                    self.reject(if self.snapshot.can_read_identity() {
+                        if self.snapshot.identity_update
+                            == IdentityUpdate::Failed(Failure::Persistence)
+                        {
+                            Failure::Persistence
+                        } else {
+                            Failure::UsbActive
+                        }
+                    } else {
+                        Failure::NotReady
+                    });
+                    return;
+                }
+                self.issue(
+                    Operation::SaveIdentity(identity),
+                    Kind::IdentitySave,
+                    now,
+                    REQUEST_TIMEOUT,
+                );
+            }
             _ => self.reject(Failure::NotReady),
         }
     }
@@ -241,7 +342,12 @@ impl<T: Transport> Client<T> {
         // Exactly one intent, bounded before retention. Revalidate device state
         // when the read finishes; its result may have changed USB availability.
         match &mut action {
-            Action::Acquire | Action::Release | Action::SetUsbEnabled(_) => {}
+            Action::Browse { path, .. } if crate::filesystem::valid_path(path) => {}
+            Action::Acquire
+            | Action::Release
+            | Action::SetUsbEnabled(_)
+            | Action::ReadIdentity
+            | Action::SaveIdentity(_) => {}
             Action::SendText {
                 text,
                 layout,
@@ -314,7 +420,7 @@ impl<T: Transport> Client<T> {
     }
 
     fn start(&mut self, request: Request, kind: Kind, now: Duration, timeout: Duration) {
-        let background = matches!(kind, Kind::Status | Kind::Overview);
+        let background = kind.background();
         if !background {
             self.snapshot.last_error = None;
         }
@@ -332,6 +438,28 @@ impl<T: Transport> Client<T> {
         }
     }
 
+    fn cancel_directory(&mut self, now: Duration) {
+        if matches!(self.queued, Some(Action::Browse { .. })) {
+            self.queued = None;
+            self.snapshot.pending = false;
+            self.note("Queued directory request cancelled");
+            return;
+        }
+        let Some(pending) = self.pending.as_mut() else {
+            return;
+        };
+        if !matches!(pending.kind, Kind::Filesystem { .. }) {
+            return;
+        }
+        pending.deadline = now + crate::REQUEST_TIMEOUT;
+        let request = Request {
+            tag: pending.tag,
+            operation: Operation::CancelDirectory,
+        };
+        if let Err(error) = self.transport.submit(request, now) {
+            self.disconnect(Some(error));
+        }
+    }
     fn cancel(&mut self, now: Duration) {
         if matches!(self.queued, Some(Action::SendText { .. })) {
             self.queued = None;
@@ -387,7 +515,22 @@ impl<T: Transport> Client<T> {
             self.disconnect(Some(Failure::Timeout));
             return;
         }
-        if self.connected_compatible()
+        if self.snapshot.can_read_identity()
+            && self.pending.is_none()
+            && self
+                .snapshot
+                .capabilities
+                .as_ref()
+                .is_some_and(|c| c.identity.is_none())
+        {
+            self.context = DiagnosticContext::Usb;
+            self.issue(
+                Operation::ReadIdentity,
+                Kind::IdentityRead(true),
+                now,
+                REQUEST_TIMEOUT,
+            );
+        } else if self.connected_compatible()
             && self.pending.is_none()
             && self.snapshot.control_acquired
             && now >= self.next_overview
@@ -415,6 +558,18 @@ impl<T: Transport> Client<T> {
     fn receive(&mut self, event: Event, now: Duration) {
         self.now = now;
         let (tag, reply) = match event {
+            Event::Button { epoch, button } => {
+                if epoch == self.epoch && self.snapshot.control_acquired && button < 4 {
+                    if self.snapshot.buttons.len() == 32 {
+                        self.snapshot.buttons.pop_front();
+                        self.snapshot.dropped_buttons =
+                            self.snapshot.dropped_buttons.saturating_add(1);
+                    }
+                    self.snapshot.buttons.push_back(button);
+                    self.changed();
+                }
+                return;
+            }
             Event::Lost { epoch } => {
                 if epoch == self.epoch
                     && matches!(
@@ -442,13 +597,30 @@ impl<T: Transport> Client<T> {
             Kind::Acquire | Kind::Release => DiagnosticContext::Control,
             Kind::Status | Kind::Overview => DiagnosticContext::Status,
             Kind::Usb => DiagnosticContext::Usb,
+            Kind::IdentityRead(_) | Kind::IdentitySave => DiagnosticContext::Usb,
             Kind::Effect(_) => DiagnosticContext::Keyboard,
+            Kind::Filesystem { .. } => DiagnosticContext::Status,
         };
         if now >= deadline {
             self.disconnect(Some(Failure::Timeout));
             return;
         }
         match (kind, reply) {
+            (Kind::Filesystem { cursor, hidden }, Reply::Directory(bytes)) => {
+                let path = self.snapshot.filesystem.directory.clone();
+                if let Err(error) =
+                    self.snapshot
+                        .filesystem
+                        .apply(&bytes, tag.request, cursor, &path, hidden)
+                {
+                    self.disconnect(Some(error));
+                    return;
+                }
+            }
+            (Kind::Filesystem { .. }, Reply::DirectoryCancelled) => {
+                self.snapshot.filesystem.loading = false;
+                self.snapshot.filesystem.error = Some("Directory request cancelled".into());
+            }
             (Kind::Scan, Reply::Devices(devices)) => {
                 if devices.len() > MAX_DEVICES
                     || devices.iter().any(|device| !device.valid())
@@ -474,6 +646,11 @@ impl<T: Transport> Client<T> {
                     return;
                 }
                 let compatible = caps.compatible();
+                if caps.identity.is_some() {
+                    self.snapshot.identity_update = IdentityUpdate::Loaded;
+                    self.snapshot.identity_revision =
+                        self.snapshot.identity_revision.saturating_add(1);
+                }
                 self.snapshot.capabilities = Some(caps);
                 self.snapshot.connection = Connection::Connected;
                 self.snapshot.last_status_update = Some(now);
@@ -501,6 +678,8 @@ impl<T: Transport> Client<T> {
             }
             (Kind::Release, Reply::Released) => {
                 self.snapshot.control_acquired = false;
+                self.snapshot.filesystem = crate::filesystem::Browser::default();
+                self.snapshot.buttons.clear();
                 self.note("Control released");
             }
             (Kind::Status | Kind::Usb, Reply::Status(status)) => {
@@ -523,6 +702,22 @@ impl<T: Transport> Client<T> {
                     caps.overview = Some(overview);
                 }
                 self.snapshot.last_overview_update = Some(now);
+            }
+            (Kind::IdentityRead(_) | Kind::IdentitySave, Reply::Identity { identity, error }) => {
+                if let Some(caps) = self.snapshot.capabilities.as_mut() {
+                    caps.identity = Some(identity);
+                }
+                self.snapshot.identity_revision = self.snapshot.identity_revision.saturating_add(1);
+                self.snapshot.identity_update = if let Some(error) = error {
+                    self.reject(error);
+                    IdentityUpdate::Failed(error)
+                } else if kind == Kind::IdentitySave {
+                    self.note("USB identity persisted and verified; applies on next USB start");
+                    IdentityUpdate::Saved
+                } else {
+                    self.note("USB identity read from flash");
+                    IdentityUpdate::Loaded
+                };
             }
             (Kind::Effect(expected), Reply::Accepted(id)) if id == expected => {
                 if self.snapshot.job != Job::Cancelling {
@@ -554,13 +749,21 @@ impl<T: Transport> Client<T> {
                     Kind::Scan | Kind::Connect | Kind::Status | Kind::Overview
                 ) || !matches!(
                     error,
-                    Failure::Busy | Failure::UsbUnavailable | Failure::NotReady | Failure::ReadOnly
+                    Failure::Busy
+                        | Failure::UsbUnavailable
+                        | Failure::NotReady
+                        | Failure::ReadOnly
+                        | Failure::AgentUnavailable
                 ) {
                     self.disconnect(Some(error));
                     return;
                 }
                 if matches!(kind, Kind::Effect(_)) {
                     self.snapshot.job = Job::Finished(Outcome::Rejected);
+                }
+                if matches!(kind, Kind::Filesystem { .. }) {
+                    self.snapshot.filesystem.loading = false;
+                    self.snapshot.filesystem.error = Some(error.message().into());
                 }
                 self.reject(error);
             }
@@ -591,8 +794,11 @@ impl<T: Transport> Client<T> {
         self.snapshot.refreshing = false;
         self.snapshot.last_status_update = None;
         self.snapshot.last_overview_update = None;
+        self.snapshot.identity_update = IdentityUpdate::Unknown;
         self.snapshot.control_acquired = false;
         self.snapshot.capabilities = None;
+        self.snapshot.filesystem = crate::filesystem::Browser::default();
+        self.snapshot.buttons.clear();
         self.snapshot.last_rtt = None;
         if self.snapshot.job.active() {
             self.snapshot.job = Job::Finished(Outcome::Disconnected);

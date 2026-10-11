@@ -2,7 +2,7 @@
 
 use crate::{
     Capabilities, Device, Event, Failure, Operation, Outcome, Reply, Request, Status, Tag,
-    Transport, layouts,
+    Transport, UsbIdentity, layouts,
 };
 use std::{collections::VecDeque, time::Duration};
 
@@ -74,6 +74,7 @@ pub struct MockTransport {
     acquired: bool,
     usb_enabled: bool,
     active: Option<Active>,
+    identity: UsbIdentity,
 }
 
 impl MockTransport {
@@ -85,6 +86,8 @@ impl MockTransport {
             acquired: false,
             usb_enabled: true,
             active: None,
+            identity: UsbIdentity::new("Pico 2W", "Logger + Keyboard")
+                .expect("static printable identity fits the wire limits"),
         }
     }
 
@@ -226,6 +229,9 @@ impl Transport for MockTransport {
                         status: self.status(),
                         overview_supported: false,
                         overview: None,
+                        identity_supported: true,
+                        filesystem_supported: true,
+                        identity: Some(self.identity.clone()),
                     }),
                 )
             }
@@ -249,6 +255,56 @@ impl Transport for MockTransport {
                 self.usb_enabled = enabled;
                 self.reply(tag, now, Reply::Status(self.status()))
             }
+            Operation::ReadIdentity if self.connected && self.acquired => self.reply(
+                tag,
+                now,
+                Reply::Identity {
+                    identity: self.identity.clone(),
+                    error: None,
+                },
+            ),
+            Operation::SaveIdentity(identity)
+                if self.connected && self.acquired && self.active.is_none() =>
+            {
+                let error = if self.usb_enabled {
+                    Some(Failure::UsbActive)
+                } else {
+                    None
+                };
+                if error.is_none() {
+                    self.identity = identity;
+                }
+                self.reply(
+                    tag,
+                    now,
+                    Reply::Identity {
+                        identity: self.identity.clone(),
+                        error,
+                    },
+                )
+            }
+            Operation::ListDirectory {
+                path,
+                cursor,
+                hidden,
+            } if self.connected && self.acquired => {
+                let bytes = mock_directory(tag.request, &path, cursor, hidden);
+                self.reply(tag, now, Reply::Directory(bytes))
+            }
+            Operation::CancelDirectory => {
+                self.events.retain(|e|!matches!(&e.event,Event::Reply {tag:other,reply:Reply::Directory(_)} if *other==tag));
+                self.reply(tag, now, Reply::DirectoryCancelled)
+            }
+            Operation::StreamProbe => self.reply(
+                tag,
+                now,
+                Reply::StreamMeasured {
+                    bytes: 2048,
+                    elapsed: LATENCY,
+                    att_mtu: 23,
+                    queue_high_water: [4, 0, 1],
+                },
+            ),
             Operation::Run(frame) => self.run(tag, &frame, now),
             Operation::Cancel(frame) => {
                 let script_protocol::Message::Cancel { id } =
@@ -295,4 +351,32 @@ impl Transport for MockTransport {
         self.connected = false;
         self.acquired = false;
     }
+}
+
+/// Wire fixture exercises the same decoder as real host pages.
+pub(crate) fn mock_directory(id: u64, path: &str, cursor: u32, hidden: bool) -> Vec<u8> {
+    let dir = if path.is_empty() { "/mock" } else { path };
+    let names = [("Documents", 1), ("hello.txt", 0), (".hidden", 0)];
+    let selected: Vec<_> = names
+        .into_iter()
+        .filter(|(name, _)| hidden || !name.starts_with('.'))
+        .skip(cursor as usize)
+        .collect();
+    let mut b = Vec::new();
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&id.to_le_bytes());
+    b.extend_from_slice(&[0, 0]);
+    b.extend_from_slice(&(cursor + selected.len() as u32).to_le_bytes());
+    b.extend_from_slice(&(dir.len() as u16).to_le_bytes());
+    b.extend_from_slice(dir.as_bytes());
+    b.extend_from_slice(&0u16.to_le_bytes());
+    b.extend_from_slice(&(selected.len() as u16).to_le_bytes());
+    for (name, kind) in selected {
+        b.extend_from_slice(&[kind, 2]);
+        b.extend_from_slice(&42u64.to_le_bytes());
+        b.extend_from_slice(&u64::MAX.to_le_bytes());
+        b.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        b.extend_from_slice(name.as_bytes());
+    }
+    b
 }

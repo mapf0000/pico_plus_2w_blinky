@@ -80,12 +80,12 @@ or reconnect. The protected overview adds the full firmware build, agent version
 OS/hostname/heartbeat age, CDC installer stage and execution/USB limits after
 control acquisition, targeting a ten-second refresh while idle. Heartbeat age is
 sampled at overview time; live presence/USB status targets a one-second interval.
-Displayed layouts are the companion's compiled lowering choices. USB protocol
-versions do not imply available native filesystem/download screens.
+Displayed layouts are the companion's compiled lowering choices. USB protocol versions do not imply native workflows; Info flag 32 negotiates
+filesystem/button streaming, while downloads remain unavailable.
 
 Update both app and firmware for the overview extension: older v3 companions
 reject its newly advertised Info flag. New companions can use older v3 firmware
-without the detailed overview. USB identity editing remains planned.
+without the detailed overview. USB identity editing is implemented.
 
 `cargo run -p pico-companion --example auth_boundary` performs explicit board
 acceptance for plaintext-command rejection and the unauthenticated connection
@@ -93,7 +93,31 @@ deadline under continuous public reads. Run with exactly one Pico in range and
 other controllers disconnected; it takes about 35 seconds and sends no valid
 encrypted command or HID effect.
 
-Python, bulk transfer, filesystem browsing and credentials remain future work.
+Python, bulk transfer and credentials remain future work.
 macOS is the hardware test target; Linux/Windows radio operation is unverified.
 See [the plan](../../NATIVE_COMPANION_BLE_PLAN.md) and
 [wire reference](../../docs/PROTOCOL.md).
+
+## Filesystem and event streaming
+
+Connect/acquire, enable USB and start the host agent on the USB computer. Use
+**Host filesystem** Home/Root/Up, path input or breadcrumbs; double-click a folder,
+select/copy a path, toggle hidden files or Load more. Errors and Cancel listing
+leave the connection usable. Each page is at most 2,048 bytes; displayed entries
+are capped at 512. No file content is read or downloaded by browsing. The last
+eligible released Pico button is displayed; menu/Payloads/Stop gestures are excluded.
+
+Read-only stream acceptance (requires the board and exclusive companion connection):
+
+```sh
+cargo run -p pico-companion -- --profile /private/path/pico.json --stream-self-test
+# Optional real host-agent pagination/error/cancel checks, against a chosen directory:
+cargo run -p pico-companion -- --profile /private/path/pico.json --stream-self-test --test-directory /target/computer/path
+```
+
+The first command sends deterministic maximum-size records, measures throughput,
+reports negotiated MTU/queue high-water marks, and reconnects with a fresh session.
+The optional directory check lists metadata, tests a missing child path, cancels
+queued and active lists, and immediately starts fresh listings. Neither command saves flash, toggles USB, executes shell commands or sends
+HID. Values remain 20 bytes at all MTUs, with four application credits and strict
+validation. Hardware acceptance and pending platforms are in DEVICE_TESTING.md.

@@ -6,6 +6,8 @@ use btleplug::{
 use companion_core::{
     Capabilities, Device, Event, Failure, MAX_DEVICES, Operation, Reply, Request, Status, Transport,
 };
+use futures_util::{FutureExt, StreamExt};
+use std::pin::Pin;
 use std::time::Duration;
 use tokio::{
     sync::{mpsc, oneshot, watch},
@@ -21,6 +23,7 @@ const INFO: Uuid = Uuid::from_u128(ble_protocol::INFO_UUID);
 const AUTH: Uuid = Uuid::from_u128(ble_protocol::AUTH_UUID);
 const COMMAND: Uuid = Uuid::from_u128(ble_protocol::COMMAND_UUID);
 const RESULT: Uuid = Uuid::from_u128(ble_protocol::RESULT_UUID);
+const EVENTS: Uuid = Uuid::from_u128(ble_protocol::EVENTS_UUID);
 const STATUS: Uuid = Uuid::from_u128(ble_protocol::STATUS_UUID);
 const _: () = assert!(ble_protocol::MAX_MESSAGE_LEN == ble_session::MAX_CIPHERTEXT);
 const _: () = assert!(ble_protocol::VERSION == 3 && ble_protocol::KIND_RECORD == 4);
@@ -75,7 +78,10 @@ impl BleTransport {
 
 impl Transport for BleTransport {
     fn submit(&mut self, request: Request, _: Duration) -> Result<(), Failure> {
-        if matches!(request.operation, Operation::Cancel(_)) {
+        if matches!(
+            request.operation,
+            Operation::Cancel(_) | Operation::CancelDirectory
+        ) {
             self.cancel.send_replace(Some(Command {
                 generation: *self.reset.borrow(),
                 request,
@@ -103,8 +109,15 @@ impl Transport for BleTransport {
     }
 }
 
-#[derive(Default)]
 struct Radio {
+    notifications:
+        Option<Pin<Box<dyn futures_util::Stream<Item = btleplug::api::ValueNotification> + Send>>>,
+    receiver: ble_protocol::Receiver,
+    fragments: u8,
+    ack: Option<(u16, u16)>,
+    streams: bool,
+    epoch: u64,
+    events: Option<mpsc::Sender<Event>>,
     profile: Option<ble_session::provisioning::Profile>,
     crypto: Option<ble_session::Session>,
     adapter: Option<Adapter>,
@@ -115,7 +128,35 @@ struct Radio {
     active: Option<(script_protocol::EffectId, u16)>,
 }
 
+impl Default for Radio {
+    fn default() -> Self {
+        Self {
+            notifications: None,
+            receiver: ble_protocol::Receiver::new_stream(),
+            fragments: 0,
+            ack: None,
+            streams: false,
+            epoch: 0,
+            events: None,
+            profile: None,
+            crypto: None,
+            adapter: None,
+            devices: Vec::new(),
+            connected: None,
+            scanning: false,
+            token: 0,
+            active: None,
+        }
+    }
+}
 trait RadioIo {
+    fn idle(
+        &mut self,
+        _: &mpsc::Sender<Event>,
+    ) -> impl std::future::Future<Output = Result<(), Failure>> + Send {
+        std::future::pending()
+    }
+
     fn cleanup(&mut self) -> impl std::future::Future<Output = ()> + Send;
     fn request(
         &mut self,
@@ -125,8 +166,23 @@ trait RadioIo {
 }
 
 impl RadioIo for Radio {
+    async fn idle(&mut self, events: &mpsc::Sender<Event>) -> Result<(), Failure> {
+        match self.next_stream(events).await {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let _ = events.try_send(Event::Lost { epoch: self.epoch });
+                Err(error)
+            }
+        }
+    }
+
     async fn cleanup(&mut self) {
         self.active = None;
+        self.notifications = None;
+        self.receiver = ble_protocol::Receiver::new_stream();
+        self.fragments = 0;
+        self.ack = None;
+        self.streams = false;
         self.crypto = None;
         self.token = 0;
         if let Some(peripheral) = self.connected.take() {
@@ -146,6 +202,7 @@ impl RadioIo for Radio {
         events: &mpsc::Sender<Event>,
     ) -> Result<Reply, Failure> {
         let tag = request.tag;
+        self.events = Some(events.clone());
         match request.operation {
             Operation::Scan => {
                 self.devices.clear();
@@ -227,6 +284,22 @@ impl RadioIo for Radio {
                 let info = characteristic(&peripheral, INFO)?;
                 let bytes = peripheral.read(&info).await.map_err(failure)?;
                 let info = ble_protocol::Info::decode(&bytes).map_err(protocol_failure)?;
+                self.epoch = tag.epoch;
+                self.streams = info.streams;
+                if info.streams {
+                    let events_char = peripheral
+                        .characteristics()
+                        .into_iter()
+                        .find(|c| {
+                            c.service_uuid == SERVICE
+                                && c.uuid == EVENTS
+                                && c.properties.contains(CharPropFlags::NOTIFY)
+                        })
+                        .ok_or(Failure::Incompatible)?;
+                    self.notifications = Some(peripheral.notifications().await.map_err(failure)?);
+                    peripheral.subscribe(&events_char).await.map_err(failure)?;
+                }
+
                 let status = if self.profile.is_some() {
                     self.authenticate().await?;
                     self.snapshot().await?.1
@@ -245,6 +318,9 @@ impl RadioIo for Radio {
                     status,
                     overview_supported: info.overview,
                     overview: None,
+                    identity_supported: info.identity,
+                    filesystem_supported: info.streams,
+                    identity: None,
                 }))
             }
             Operation::Status => {
@@ -265,6 +341,9 @@ impl RadioIo for Radio {
                 }
                 let code = self.control(ble_protocol::ACQUIRE).await?;
                 if code == ble_protocol::Code::Acquired {
+                    if self.streams {
+                        self.flow(ble_protocol::stream::Flow::Start).await?;
+                    }
                     Ok(Reply::Acquired)
                 } else {
                     Err(code_failure(code))
@@ -294,6 +373,66 @@ impl RadioIo for Radio {
                 } else {
                     Err(code_failure(code))
                 }
+            }
+            Operation::ListDirectory {
+                path,
+                cursor,
+                hidden,
+            } => {
+                if !self.streams {
+                    return Err(Failure::Incompatible);
+                }
+                let mut body = [0; 2 + 19 + ble_protocol::filesystem::PATH_MAX];
+                body[0] = 1;
+                body[1] = 0;
+                let n = ble_protocol::filesystem::Request {
+                    id: tag.request,
+                    cursor,
+                    hidden,
+                    path: &path,
+                }
+                .encode(&mut body[2..])
+                .map_err(protocol_failure)?;
+                self.filesystem_command(&body[..n + 2], ble_protocol::Code::DirectoryAccepted)
+                    .await?;
+                loop {
+                    let (kind, body) = self.next_record(events).await?;
+                    if kind == ble_protocol::stream::FILESYSTEM
+                        && ble_protocol::filesystem::Page::decode(&body)
+                            .map_err(protocol_failure)?
+                            .id
+                            == tag.request
+                    {
+                        return Ok(Reply::Directory(body));
+                    }
+                }
+            }
+            Operation::CancelDirectory => {
+                let mut body = [1, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+                body[2..].copy_from_slice(&tag.request.to_le_bytes());
+                self.filesystem_command(&body, ble_protocol::Code::DirectoryCancelled)
+                    .await?;
+                Ok(Reply::DirectoryCancelled)
+            }
+            Operation::StreamProbe => {
+                let started = std::time::Instant::now();
+                self.flow(ble_protocol::stream::Flow::Probe).await?;
+                loop {
+                    let (kind, body) = self.next_record(events).await?;
+                    if kind == ble_protocol::stream::PROBE {
+                        return Ok(Reply::StreamMeasured {
+                            bytes: body.len(),
+                            elapsed: started.elapsed(),
+                            att_mtu: u16::from_le_bytes([body[2040], body[2041]]),
+                            queue_high_water: [body[2042], body[2043], body[2044]],
+                        });
+                    }
+                }
+            }
+            Operation::ReadIdentity => self.identity(ble_protocol::identity::Command::Read).await,
+            Operation::SaveIdentity(identity) => {
+                self.identity(ble_protocol::identity::Command::Save(identity.value()))
+                    .await
             }
             Operation::SetUsbEnabled(enabled) => {
                 let code = self
@@ -364,6 +503,136 @@ impl RadioIo for Radio {
 }
 
 impl Radio {
+    async fn flow(&mut self, flow: ble_protocol::stream::Flow) -> Result<(), Failure> {
+        let (body, n) = flow.encode();
+        let token = self.next_token()?;
+        self.upload(ble_protocol::KIND_FLOW, token, &body[..n])
+            .await
+    }
+    async fn flush_ack(&mut self) -> Result<(), Failure> {
+        if let Some((sequence, offset)) = self.ack {
+            self.flow(ble_protocol::stream::Flow::Ack { sequence, offset })
+                .await?;
+            self.ack = None;
+        }
+        Ok(())
+    }
+    async fn filesystem_command(
+        &mut self,
+        body: &[u8],
+        expected: ble_protocol::Code,
+    ) -> Result<(), Failure> {
+        let token = self.next_token()?;
+        self.upload(ble_protocol::KIND_FILESYSTEM, token, body)
+            .await?;
+        let plain = self.protected_response().await?;
+        if plain.len() != ble_protocol::SNAPSHOT_LEN {
+            return Err(Failure::InvalidData);
+        }
+        let value = ble_protocol::ResultValue::decode(&plain[..20]).map_err(protocol_failure)?;
+        if value.token != token {
+            return Err(Failure::InvalidData);
+        }
+        if value.code == expected {
+            Ok(())
+        } else {
+            Err(code_failure(value.code))
+        }
+    }
+    async fn next_stream(
+        &mut self,
+        events: &mpsc::Sender<Event>,
+    ) -> Result<Option<(u8, Vec<u8>)>, Failure> {
+        self.flush_ack().await?;
+        let Some(notifications) = self.notifications.as_mut() else {
+            return std::future::pending().await;
+        };
+        let packet = notifications.next().await.ok_or(Failure::LinkLost)?;
+        self.consume_notification(packet, events).await
+    }
+    async fn next_record(
+        &mut self,
+        events: &mpsc::Sender<Event>,
+    ) -> Result<(u8, Vec<u8>), Failure> {
+        loop {
+            if let Some(record) = self.next_stream(events).await? {
+                return Ok(record);
+            }
+        }
+    }
+    async fn consume_notification(
+        &mut self,
+        packet: btleplug::api::ValueNotification,
+        events: &mpsc::Sender<Event>,
+    ) -> Result<Option<(u8, Vec<u8>)>, Failure> {
+        if packet.uuid != EVENTS {
+            return Ok(None);
+        }
+        let frame = ble_protocol::read_fragment(&packet.value).map_err(protocol_failure)?;
+        let sequence = u16::from_le_bytes([frame[2], frame[3]]);
+        let offset = u16::from_le_bytes([frame[4], frame[5]]) as usize + frame.len() - 8;
+        let complete = self.receiver.push(frame).map_err(protocol_failure)?;
+        self.fragments += 1;
+        let record = if let Some(message) = complete {
+            let mut plain = zeroize::Zeroizing::new(vec![0; ble_protocol::stream::PLAINTEXT_MAX]);
+            let n = self
+                .crypto
+                .as_mut()
+                .ok_or(Failure::Authentication)?
+                .open_stream(message.token, message.payload, &mut plain)
+                .map_err(|_| Failure::Authentication)?;
+            let (kind, body) =
+                ble_protocol::stream::decode(&plain[..n]).map_err(protocol_failure)?;
+            if kind == ble_protocol::stream::BUTTON {
+                events
+                    .try_send(Event::Button {
+                        epoch: self.epoch,
+                        button: body[0],
+                    })
+                    .map_err(|_| Failure::QueueFull)?;
+            }
+            Some((kind, body.to_vec()))
+        } else {
+            None
+        };
+        // ACK follows validation and admission into bounded application-owned storage.
+        if self.fragments == ble_protocol::stream::WINDOW || record.is_some() {
+            self.ack = Some((sequence, offset as u16));
+            self.fragments = 0;
+            self.flush_ack().await?;
+        }
+        Ok(record)
+    }
+    async fn pump_available(&mut self) -> Result<(), Failure> {
+        let Some(events) = self.events.clone() else {
+            return Ok(());
+        };
+        self.flush_ack().await?;
+        for _ in 0..8 {
+            let packet = self
+                .notifications
+                .as_mut()
+                .and_then(|s| s.next().now_or_never())
+                .flatten();
+            let Some(packet) = packet else {
+                break;
+            };
+            let _ = self.consume_notification(packet, &events).await?;
+        }
+        Ok(())
+    }
+    async fn identity(
+        &mut self,
+        command: ble_protocol::identity::Command<'_>,
+    ) -> Result<Reply, Failure> {
+        let mut body = [0; ble_protocol::identity::COMMAND_MAX];
+        let length = command.encode(&mut body).map_err(protocol_failure)?;
+        let token = self.next_token()?;
+        self.upload(ble_protocol::KIND_IDENTITY, token, &body[..length])
+            .await?;
+        let plaintext = self.protected_response().await?;
+        identity_reply(token, &plaintext)
+    }
     fn next_token(&mut self) -> Result<u16, Failure> {
         self.token = self.token.checked_add(1).ok_or(Failure::IdExhausted)?;
         Ok(self.token)
@@ -419,7 +688,7 @@ impl Radio {
         .await
     }
     async fn write_fragments(
-        &self,
+        &mut self,
         uuid: Uuid,
         kind: u8,
         token: u16,
@@ -445,7 +714,7 @@ impl Radio {
         }
         Ok(())
     }
-    async fn read_response(&self) -> Result<(u8, u16, Vec<u8>), Failure> {
+    async fn read_response(&mut self) -> Result<(u8, u16, Vec<u8>), Failure> {
         let peripheral = self.connected.as_ref().ok_or(Failure::LinkLost)?;
         let characteristic = characteristic(peripheral, RESULT)?;
         let mut receiver = ble_protocol::Receiver::new();
@@ -504,6 +773,7 @@ impl Radio {
             {
                 return Ok(value.code);
             }
+            self.pump_available().await?;
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -518,6 +788,7 @@ fn code_failure(code: ble_protocol::Code) -> Failure {
     match code {
         ble_protocol::Code::Busy => Failure::Busy,
         ble_protocol::Code::UsbUnavailable => Failure::UsbUnavailable,
+        ble_protocol::Code::AgentUnavailable => Failure::AgentUnavailable,
         _ => Failure::NotReady,
     }
 }
@@ -590,6 +861,9 @@ fn failure(error: btleplug::Error) -> Failure {
         btleplug::Error::NoAdapterAvailable => Failure::AdapterUnavailable,
         btleplug::Error::NotConnected | btleplug::Error::DeviceNotFound => Failure::LinkLost,
         btleplug::Error::TimedOut(_) => Failure::Timeout,
+        btleplug::Error::RuntimeError(message) if message == "Device disconnected" => {
+            Failure::LinkLost
+        }
         _ => Failure::BluetoothUnavailable,
     }
 }
@@ -622,16 +896,22 @@ async fn run(
                     urgent = cancel.borrow_and_update().clone(); continue;
                 }
                 command = commands.recv() => match command { Some(command) => command, None => break },
+                result=radio.idle(&events) => { if result.is_err(){radio.cleanup().await;} continue; },
             }
         };
         if command.generation != *reset.borrow() {
             continue;
         }
         let tag = command.request.tag;
-        if matches!(command.request.operation, Operation::Cancel(_)) {
+        if matches!(
+            command.request.operation,
+            Operation::Cancel(_) | Operation::CancelDirectory
+        ) {
             cancelled_tag = Some(tag);
-        } else if matches!(command.request.operation, Operation::Run(_))
-            && cancelled_tag == Some(tag)
+        } else if matches!(
+            command.request.operation,
+            Operation::Run(_) | Operation::ListDirectory { .. }
+        ) && cancelled_tag == Some(tag)
         {
             // An urgent Cancel can overtake an unstarted Run in the normal queue.
             continue;
@@ -640,6 +920,7 @@ async fn run(
             Operation::Acquire | Operation::Connect(_) => Duration::from_secs(10),
             Operation::Overview => Duration::from_secs(8),
             Operation::Run(_) => Duration::from_secs(300),
+            Operation::ListDirectory { .. } | Operation::StreamProbe => Duration::from_secs(30),
             _ => IO_TIMEOUT,
         };
         let result = tokio::select! {
@@ -663,7 +944,10 @@ async fn run(
             Err(error) => {
                 if !matches!(
                     error,
-                    Failure::Busy | Failure::UsbUnavailable | Failure::NotReady
+                    Failure::Busy
+                        | Failure::UsbUnavailable
+                        | Failure::NotReady
+                        | Failure::AgentUnavailable
                 ) {
                     radio.cleanup().await;
                 }
@@ -926,5 +1210,163 @@ mod tests {
         assert!(matches!(event,Event::Reply { tag:other,reply:Reply::Status(_) } if other == next));
         assert_eq!(started.load(Ordering::Relaxed), 0);
         transport.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn directory_cancel_overtakes_queued_or_active_list_and_preserves_connection() {
+        struct DirectoryRadio {
+            started: Arc<AtomicUsize>,
+            cleanups: Arc<AtomicUsize>,
+        }
+        impl RadioIo for DirectoryRadio {
+            async fn cleanup(&mut self) {
+                self.cleanups.fetch_add(1, Ordering::Relaxed);
+            }
+            async fn request(
+                &mut self,
+                request: Request,
+                _: &mpsc::Sender<Event>,
+            ) -> Result<Reply, Failure> {
+                match request.operation {
+                    Operation::ListDirectory { .. } => {
+                        self.started.fetch_add(1, Ordering::Relaxed);
+                        std::future::pending().await
+                    }
+                    Operation::CancelDirectory => Ok(Reply::DirectoryCancelled),
+                    Operation::Status => Ok(Reply::Status(Status::default())),
+                    _ => Err(Failure::InvalidData),
+                }
+            }
+        }
+        for active in [false, true] {
+            let started = Arc::new(AtomicUsize::new(0));
+            let cleanups = Arc::new(AtomicUsize::new(0));
+            let mut transport = BleTransport::spawn(DirectoryRadio {
+                started: started.clone(),
+                cleanups: cleanups.clone(),
+            });
+            let tag = Tag {
+                epoch: 1,
+                request: 1,
+            };
+            transport
+                .submit(
+                    Request {
+                        tag,
+                        operation: Operation::ListDirectory {
+                            path: String::new(),
+                            cursor: 0,
+                            hidden: false,
+                        },
+                    },
+                    Duration::ZERO,
+                )
+                .unwrap();
+            if active {
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while started.load(Ordering::Relaxed) == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+            transport
+                .submit(
+                    Request {
+                        tag,
+                        operation: Operation::CancelDirectory,
+                    },
+                    Duration::ZERO,
+                )
+                .unwrap();
+            let event = tokio::time::timeout(Duration::from_secs(1), transport.events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(event, Event::Reply { tag: other, reply: Reply::DirectoryCancelled } if other == tag)
+            );
+            let next = Tag {
+                epoch: 1,
+                request: 2,
+            };
+            transport
+                .submit(
+                    Request {
+                        tag: next,
+                        operation: Operation::Status,
+                    },
+                    Duration::ZERO,
+                )
+                .unwrap();
+            let event = tokio::time::timeout(Duration::from_secs(1), transport.events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(event, Event::Reply { tag: other, reply: Reply::Status(_) } if other == next)
+            );
+            assert_eq!(started.load(Ordering::Relaxed), usize::from(active));
+            assert_eq!(cleanups.load(Ordering::Relaxed), 0);
+            assert!(transport.poll(Duration::ZERO).is_none());
+            transport.shutdown().await;
+        }
+    }
+}
+
+fn identity_reply(token: u16, plaintext: &[u8]) -> Result<Reply, Failure> {
+    let response = ble_protocol::identity::Response::decode(plaintext).map_err(protocol_failure)?;
+    if response.request != token {
+        return Err(Failure::InvalidData);
+    }
+    use ble_protocol::identity::Status;
+    let error = match response.status {
+        Status::Success => None,
+        Status::UsbActive => Some(Failure::UsbActive),
+        Status::Busy => Some(Failure::Busy),
+        Status::Invalid => Some(Failure::InvalidIdentity),
+        Status::FlashFailure => Some(Failure::Persistence),
+    };
+    Ok(Reply::Identity {
+        identity: companion_core::UsbIdentity::new(
+            response.identity.manufacturer,
+            response.identity.product,
+        )?,
+        error,
+    })
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    #[test]
+    fn identity_reply_requires_exact_correlation_and_preserves_flash_failure() {
+        use ble_protocol::identity::{Identity, RESPONSE_MAX, Response, Status};
+        let mut bytes = [0; RESPONSE_MAX];
+        let response = Response {
+            request: 42,
+            status: Status::FlashFailure,
+            identity: Identity {
+                manufacturer: "Saved",
+                product: "Current",
+            },
+        };
+        let len = response.encode(&mut bytes).unwrap();
+        assert!(matches!(
+            identity_reply(41, &bytes[..len]),
+            Err(Failure::InvalidData)
+        ));
+        assert!(matches!(
+            identity_reply(42, &bytes[..len]),
+            Ok(Reply::Identity {
+                error: Some(Failure::Persistence),
+                ..
+            })
+        ));
+        assert!(matches!(
+            identity_reply(42, &bytes[..len - 1]),
+            Err(Failure::InvalidData)
+        ));
     }
 }

@@ -25,9 +25,11 @@ All integers are little-endian; reserved bytes must be zero.
 | suffix `00000004` | Auth | handshake fragment write with response, 9–20 bytes |
 | suffix `00000005` | Command | encrypted-record fragment write with response, 9–20 bytes |
 | suffix `00000006` | Result | sequential response-fragment reads, fixed 20 bytes |
+| suffix `00000007` | Events | encrypted stream notifications, fixed 20 bytes |
 
 Info: bytes 0–3 `PBLE`, byte 4 version `3`, byte 5 mandatory control flag `4`
-plus optional overview-v1 flag `8` (current value `12`),
+plus optional overview-v1 flag `8`, USB-identity-v1 flag `16` and stream/filesystem-v1
+flag `32` (current value `60`),
 bytes 6–7 zero, bytes 8–19 printable ASCII build label with zero padding.
 Status: byte 0 version, byte 1 flags (bit 0 USB enabled, bit 1 USB ready,
 bit 2 agent recently present), bytes 2–3 zero, bytes 4–11 uptime seconds `u64`.
@@ -56,7 +58,7 @@ sequential transport framing. There is no plaintext fallback or OS bond.
 | Fragment offset | Field |
 | --- | --- |
 | 0 | version `3` |
-| 1 | outer kind: handshake `3`, encrypted record `4` |
+| 1 | outer kind: handshake `3`, encrypted record `4`; Events accepts only encrypted stream `7` |
 | 2–3 | nonzero monotonic `u16` token/record sequence |
 | 4–5 | `u16` payload offset |
 | 6–7 | `u16` complete length, at most 4,142 bytes |
@@ -79,10 +81,14 @@ of a partially read response. ATT acknowledgement confirms a fragment, not an
 authenticated record, effect admission or HID completion.
 
 Encrypted command plaintext is one inner kind byte plus its payload: control
-`1`, script `2`. Control payload is exactly one opcode: Acquire `0`, Release `1`,
+`1`, script `2`, USB identity `5` when Info advertises flag `16`. Control payload is exactly one opcode: Acquire `0`, Release `1`,
 USB on `2`, USB off `3`, Poll `4`, ReadOverview `5` when Info advertises flag `8`.
 Except Poll and Acquire, controls require the
-lease; Release/USB off require no reserved HID job. Script retains the existing
+lease; Release/USB off require no reserved HID job. USB off acknowledges only
+after USB tasks stop, the device pull-up/controller are disabled, and cleanup
+finishes; a two-second shutdown timeout reports Busy. Public USB-enabled state
+represents intent, whereas USB-ready drops on cleanup. Neither flag is a host
+operating-system registry acknowledgement. Script retains the existing
 version-1 29-byte envelope, full request/process/effect `u64` IDs, leading kind
 byte `8`, and up to 4,096 KBD1 bytes. Maximum plaintext is therefore 4,126 bytes,
 plus the 16-byte tag. No USB tag, script version or KBD1 limit changes.
@@ -96,12 +102,74 @@ The server encrypts a fresh snapshot for every completed command/Poll; the clien
 polls until a correlated response, timeout or disconnect. Snapshot record sequence
 and contained command/result token are different fields.
 
+### Protected event stream and filesystem v1
+
+Info flag `32` negotiates this extension. The companion subscribes to Events before
+Acquire, then sends encrypted inner kind `6` FlowStart. No plaintext stream is
+accepted on Auth/Command. Notifications use outer kind `7`, the same 8-byte header
+and zero-padded 20-byte values, with a 2,070-byte ciphertext maximum. At MTU 23 or
+larger, values remain 20 bytes; larger fragments are a separate optimization.
+
+The server-to-client stream uses the same directional Noise key with a **disjoint
+nonce domain**: nonce four zero bytes followed by LE `u64((1 << 32) | sequence)`;
+associated data `[3, 7, seq_lo, seq_hi]`. Its nonzero increasing `u16` sequence and
+replay counter are independent of finite responses. Finite responses can overtake
+partial streams. Nonces/counters are never reset by Release/FlowStart; fresh
+connections establish fresh keys. Cross-lane authentication and replay are tested.
+
+Flow payloads (inside encrypted kind `6`) are exact:
+
+- Start: `[1, 0]`; enables four fragment credits, only once per acquired lease.
+- ACK: `[1, 1, sequence:u16, next_offset:u16, 4]`; grants four credits after exactly
+  the current sent batch or final fragment. A repeated latest receipt is an
+  idempotent no-op, so priority cancellation may interrupt ACK upload safely.
+- Probe: `[1, 2]`; requests one deterministic maximum-size test record while idle.
+
+ACKs are fresh encrypted commands. They do not replace the finite response/HID
+result. Notification submission alone never grants credits. Intermediate ACKs
+follow contiguous fragment admission; final ACK follows AEAD/envelope validation
+into bounded application storage. This is a directory/event receipt, not a disk
+save or a USB transfer-chunk ACK. The sender owns one ciphertext, and the relay
+owns at most one directory page plus eight best-effort buttons. Four credits leave
+ATT request/reply headroom in the unchanged eight-packet pool. Send waits are
+bounded at 100 ms. An unfinished stream disconnects after five seconds without
+GATT activity; command uploads/finite reads may postpone pumping. The client
+bounds listing/probe I/O at 30 seconds, and browser requests at 35 seconds.
+
+Stream plaintext is ASCII `PES1`, schema `1`, event kind `u8`, then exact body:
+
+| Event kind | Body |
+| --- | --- |
+| `1` | unchanged filesystem-v1 page, at most 2,048 bytes; request ID remapped to the companion ID |
+| `2` | released button `u8`: A `0`, B `1`, X `2`, Y `3` |
+| `3` | 2,048-byte probe: bytes 0–2039 equal index modulo 256; 2040–2041 negotiated ATT MTU; 2042 fragment queue high-water; 2043 button queue high-water; 2044 page queue high-water; 2045–2047 zero |
+
+Filesystem command inner kind `8` requires acquired control and started streaming:
+`[1, 0, filesystem-v1 request]` lists; `[1, 1, request_id:u64]` cancels. Requests
+use a 512-byte UTF-8 path maximum, 64-entry limit, cursor and hidden flag. Empty
+path uses the agent's home. Finite admission responses use ordinary 32-byte
+snapshots with the command token and codes `10` accepted, `11` cancelled, `12`
+agent unavailable (or existing Busy/Rejected). These direct responses preserve
+the independent HID result; Poll cannot retrieve a filesystem admission result.
+
+USB tags 29/30/31 and filesystem version 1 are unchanged. Firmware maps each list
+onto USB ID `(connection_incarnation << 32) | command_token`; late host pages,
+duplicates, cancelled lists and replacement connections cannot claim its slot.
+The adapter strictly validates the full page before queueing/remapping. Native
+validation also checks correlation, cursor progress, duplicate names, canonical
+path/hidden consistency and the 512-entry accumulation bound. Superseding a list
+cancels it before issuing the replacement. Cancellation drains already credited
+ciphertext and discards its obsolete ID; it never replays a request after loss.
+Menu chords, menu releases, Payloads controls and device-wide Stop releases do
+not publish button events. Native button history is bounded at 32 and cleared on
+release/disconnect. Generic secure-transfer sinks remain unavailable.
+
 ### Protected overview v1
 
 ReadOverview requires an authenticated, acquired connection. Its response is a
 finite record and preserves the active effect's ResultValue. It uses the same
 directional encryption, sequences, fragmentation and read cursor as snapshots.
-No streaming, notification, credit or USB TLV format is introduced. The companion
+This finite operation does not use the notification lane or alter USB TLV. The companion
 reads it after acquiring control and targets a ten-second refresh interval while
 idle; USB status targets one second. Only one request runs at a time.
 
@@ -149,6 +217,64 @@ seconds after accept, including under continuous GATT traffic; reads/fragments
 cannot extend that deadline. Each disconnect imposes a 250-ms advertising delay.
 The prototype does not provide strong radio denial-of-service resistance.
 
+### Protected USB identity v1
+
+Inner kind `5` requires authenticated acquired control. Its bounded requests and
+responses use the existing encrypted record, directional sequence and read cursor;
+they preserve the HID ResultValue. An unacquired request fails closed. Plaintext
+requests are schema byte `1`, opcode (Read `0`, Save `1`), followed by an identity
+only for Save. Read is exactly two bytes. Save is at most 84 bytes before its
+inner kind and 16-byte authentication tag.
+
+Identity is `manufacturer_len:u8`, manufacturer bytes, `product_len:u8`, product
+bytes, with exact length and no trailing data. Strings are printable ASCII
+(`0x20..0x7e`), manufacturer at most 32 bytes and product at most 48. Empty strings
+are valid. These bounds also apply to the flash schema and native editor.
+
+| Response plaintext offset | Field |
+| --- | --- |
+| 0–3 | ASCII `PCF1` |
+| 4 | identity schema version `1` |
+| 5 | success `0`, USB active `1`, reserved HID/CDC work `2`, invalid input `3`, flash/readback failure `4` |
+| 6–7 | echoed authenticated command token, nonzero `u16` |
+| 8 onward | current identity, using the two length-prefixed strings above |
+
+Responses are 10–90 plaintext bytes, at most 106 encrypted bytes and nine
+MTU-23 reads; the existing 304-byte response slot is unchanged. The native client
+validates correlation after decryption. Read reloads the winning flash record;
+no valid record means defaults. Save requires USB disabled **and fully stopped**,
+no reserved HID job or active installer, and holds the shared USB lifecycle gate.
+It never changes VID/PID/serial or key provisioning. Apply names by enabling USB
+again, which rebuilds descriptors. A successful Save means persisted and verified,
+not merely staged in RAM. Unchanged valid records incur no erase/program wear.
+
+The native app reads identity after acquiring control. Background refreshes do
+not overwrite edits. Rejected saves retain the draft; a flash failure requires
+Reload before retry. Timeout/disconnect never automatically replays a save: a
+commit may have succeeded even if its acknowledgement was lost.
+
+Earlier v3 firmware without flag `16` remains usable with identity editing disabled.
+Older companions that reject new Info flags require updating alongside firmware.
+Unknown flags, schema versions, status values, invalid strings and excess data
+remain errors; no plaintext downgrade is provided.
+
+### Persistent USB identity record v1
+
+The existing two 4-KiB slots remain at `0x10FFE000..0x11000000`, separate from
+control keys and the embedded agent image. Each starts with magic `0x50494346`
+(`FCIP` bytes) at 0–3, version `1` at 4, reserved zeros at 5–7, wrapping `u32`
+sequence at 8–11, payload length `u16` at 12–13, IEEE CRC32 at 14–17, then the
+identity payload at 18 onward. CRC covers the payload only. Firmware selects the
+newer valid slot using wrap-aware comparison; equal sequences select the second.
+Legacy records load without migration and invalid records fall back to defaults.
+
+Saving erases only the inactive 4-KiB slot, programs a 256-byte staged page with
+erased magic, verifies it, then programs the complete page with magic and verifies
+both exact bytes and decoding. Until commit, the previous valid slot remains
+boot-loadable. An error after commit can leave a complete new record; firmware
+attempts to reconcile RAM but reports failure until the companion explicitly reads
+again. This operation cannot write the key region or change the memory map.
+
 ### Factory provisioning record v1
 
 Dedicated two 4-KiB slots at `0x10BFC000..0x10BFE000`, separate from USB identity
@@ -192,7 +318,7 @@ Types used in layout tables:
 
 WebSocket/HELLO entries and browser-specific sections below are historical wire
 reference only: the WLAN endpoint and browser have been removed. USB tags and
-bulk payload formats remain unchanged; native BLE does not relay these workflows.
+bulk payload formats remain unchanged; native BLE now relays filesystem v1, while bulk transfers remain unavailable.
 
 ## Version inventory
 
@@ -623,7 +749,7 @@ Implementation:
 
 - Firmware request encoding and response routing: `firmware/src/usb/ctrl.rs`, `firmware/src/usb/ctrl/relay/events.rs`
 - Host request decoding, filesystem access, sorting, pagination, cancellation, and page encoding: `apps/host-agent/src/filesystem.rs`, `apps/host-agent/src/dispatch.rs`
-- Frontend request construction, page decoding, and view state: `apps/frontend/src/api.rs`, `apps/frontend/src/filesystem.rs`, `apps/frontend/src/app.rs`
+- Native request construction/page decoding/state: `apps/companion/src/ble.rs`, `crates/ble-protocol/src/filesystem.rs`, `crates/companion-core/src/filesystem.rs`
 
 ## Browser–firmware WebSocket protocol
 

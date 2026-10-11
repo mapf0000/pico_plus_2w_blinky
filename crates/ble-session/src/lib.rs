@@ -124,6 +124,8 @@ impl Handshake {
             rx,
             tx_sequence: 0,
             rx_sequence: 0,
+            tx_stream_sequence: 0,
+            rx_stream_sequence: 0,
         })
     }
 }
@@ -135,15 +137,59 @@ pub struct Session {
     rx: Sensitive<[u8; 32]>,
     tx_sequence: u16,
     rx_sequence: u16,
+    tx_stream_sequence: u16,
+    rx_stream_sequence: u16,
 }
 impl Session {
+    /// Stream records use disjoint nonces (bit 32 set), kind 7 associated data,
+    /// and independent replay counters. Finite responses may overtake a stream.
+    pub fn seal_stream(
+        &mut self,
+        sequence: u16,
+        plaintext: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        self.seal_lane(sequence, plaintext, out, true)
+    }
+    pub fn open_stream(
+        &mut self,
+        sequence: u16,
+        ciphertext: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        self.open_lane(sequence, ciphertext, out, true)
+    }
     pub fn seal(
         &mut self,
         sequence: u16,
         plaintext: &[u8],
         out: &mut [u8],
     ) -> Result<usize, Error> {
-        if sequence == 0 || sequence <= self.tx_sequence {
+        self.seal_lane(sequence, plaintext, out, false)
+    }
+    pub fn open(
+        &mut self,
+        sequence: u16,
+        ciphertext: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        self.open_lane(sequence, ciphertext, out, false)
+    }
+    fn seal_lane(
+        &mut self,
+        sequence: u16,
+        plaintext: &[u8],
+        out: &mut [u8],
+        stream: bool,
+    ) -> Result<usize, Error> {
+        if sequence == 0
+            || sequence
+                <= if stream {
+                    self.tx_stream_sequence
+                } else {
+                    self.tx_sequence
+                }
+        {
             return Err(Error::Sequence);
         }
         if plaintext.is_empty()
@@ -153,18 +199,36 @@ impl Session {
             return Err(Error::Length);
         }
         let size = plaintext.len() + TAG_LEN;
-        let ad = [3, 4, sequence as u8, (sequence >> 8) as u8];
-        ChaCha20Poly1305::encrypt(&self.tx, sequence.into(), &ad, plaintext, &mut out[..size]);
-        self.tx_sequence = sequence;
+        let ad = [
+            3,
+            if stream { 7 } else { 4 },
+            sequence as u8,
+            (sequence >> 8) as u8,
+        ];
+        let nonce = u64::from(sequence) | if stream { 1u64 << 32 } else { 0 };
+        ChaCha20Poly1305::encrypt(&self.tx, nonce, &ad, plaintext, &mut out[..size]);
+        if stream {
+            self.tx_stream_sequence = sequence;
+        } else {
+            self.tx_sequence = sequence;
+        }
         Ok(size)
     }
-    pub fn open(
+    fn open_lane(
         &mut self,
         sequence: u16,
         ciphertext: &[u8],
         out: &mut [u8],
+        stream: bool,
     ) -> Result<usize, Error> {
-        if sequence == 0 || sequence <= self.rx_sequence {
+        if sequence == 0
+            || sequence
+                <= if stream {
+                    self.rx_stream_sequence
+                } else {
+                    self.rx_sequence
+                }
+        {
             return Err(Error::Sequence);
         }
         if ciphertext.len() <= TAG_LEN
@@ -174,14 +238,22 @@ impl Session {
             return Err(Error::Length);
         }
         let size = ciphertext.len() - TAG_LEN;
-        let ad = [3, 4, sequence as u8, (sequence >> 8) as u8];
-        if ChaCha20Poly1305::decrypt(&self.rx, sequence.into(), &ad, ciphertext, &mut out[..size])
-            .is_err()
-        {
+        let ad = [
+            3,
+            if stream { 7 } else { 4 },
+            sequence as u8,
+            (sequence >> 8) as u8,
+        ];
+        let nonce = u64::from(sequence) | if stream { 1u64 << 32 } else { 0 };
+        if ChaCha20Poly1305::decrypt(&self.rx, nonce, &ad, ciphertext, &mut out[..size]).is_err() {
             out[..size].zeroize();
             return Err(Error::Authentication);
         }
-        self.rx_sequence = sequence;
+        if stream {
+            self.rx_stream_sequence = sequence;
+        } else {
+            self.rx_sequence = sequence;
+        }
         Ok(size)
     }
 }

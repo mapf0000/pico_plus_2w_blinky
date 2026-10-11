@@ -1,5 +1,5 @@
 use companion_core::{
-    Action, Client, Connection, Job, Outcome,
+    Action, Client, Connection, IdentityUpdate, Job, Outcome, UsbIdentity,
     mock::{LATENCY, MockTransport, Scenario},
 };
 use std::time::Duration;
@@ -58,6 +58,67 @@ pub fn run() -> Result<(), &'static str> {
     client.tick(now);
     if client.snapshot().job != Job::Finished(Outcome::Cancelled) {
         return Err("mock cancellation failed");
+    }
+    let original = client
+        .snapshot()
+        .capabilities
+        .as_ref()
+        .and_then(|c| c.identity.clone())
+        .ok_or("mock identity unavailable")?;
+    client.dispatch(Action::SetUsbEnabled(false), now);
+    now += LATENCY;
+    client.tick(now);
+    let edited = UsbIdentity::new("Mock vendor", "Mock product").map_err(|e| e.message())?;
+    client.dispatch(Action::SaveIdentity(edited.clone()), now);
+    now += LATENCY;
+    client.tick(now);
+    if client.snapshot().identity_update != IdentityUpdate::Saved {
+        return Err("mock identity save failed");
+    }
+    client.dispatch(Action::ReadIdentity, now);
+    now += LATENCY;
+    client.tick(now);
+    if client
+        .snapshot()
+        .capabilities
+        .as_ref()
+        .and_then(|c| c.identity.as_ref())
+        != Some(&edited)
+    {
+        return Err("mock identity readback failed");
+    }
+    client.dispatch(Action::SaveIdentity(original), now);
+    now += LATENCY;
+    client.tick(now);
+    client.dispatch(Action::SetUsbEnabled(true), now);
+    now += LATENCY;
+    client.tick(now);
+    client.dispatch(
+        Action::Browse {
+            path: String::new(),
+            cursor: 0,
+            hidden: false,
+        },
+        now,
+    );
+    now += LATENCY;
+    client.tick(now);
+    if client.snapshot().filesystem.entries.len() != 2 {
+        return Err("mock filesystem listing failed");
+    }
+    client.dispatch(
+        Action::Browse {
+            path: "/".into(),
+            cursor: 0,
+            hidden: true,
+        },
+        now,
+    );
+    client.dispatch(Action::CancelDirectory, now);
+    now += LATENCY;
+    client.tick(now);
+    if client.snapshot().filesystem.loading || client.snapshot().filesystem.directory != "/mock" {
+        return Err("mock filesystem cancellation failed");
     }
     client.dispatch(Action::Release, now);
     now += LATENCY;

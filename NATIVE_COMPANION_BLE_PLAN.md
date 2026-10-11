@@ -19,8 +19,13 @@ Timestamped/contextual diagnostics now have filtering, errors-only, clear and
 autoscroll. An acquired, encrypted overview reports the full build, execution
 limits, agent metadata/freshness and CDC stage. Pico readback and commands during
 refresh have passed. The user confirmed steady buttons across repeated refreshes
-while connected with control acquired; populated-agent/CDC tests remain pending.
-See DEVICE_TESTING.md for the completed slice.
+while connected with control acquired. Read-only host filesystem browsing and
+released-button notifications now use an encrypted, credit-controlled BLE stream;
+macOS/Pico pagination, cancellation and reconnect have passed. CDC installer-stage
+and stale-agent acceptance remain pending.
+USB identity editing, verified legacy-slot saving while USB is off, encrypted
+readback, USB descriptor application, repeated stop/start and reconnect have passed.
+See DEVICE_TESTING.md for completed slices.
 WLAN, HTTP/WebSocket, the Yew frontend and browser Python Worker have been removed.
 The target computer still connects to the Pico through USB HID/CDC and runs the
 host agent. The control computer runs the companion and connects through BLE.
@@ -28,8 +33,8 @@ host agent. The control computer runs the companion and connects through BLE.
 Keep egui/Glow, the bounded backend, one BLE connection and one HID job. Preserve
 connection ownership, priority cancellation and independent local payload execution.
 The user requires operation without physical Pico access, including the first
-connection. Replace numeric comparison with provisioned-secret authentication as
-milestone 0. BLE v3 now implements this without a pairing gate or display overlay.
+connection. BLE v3 implements provisioned-secret authentication without a pairing gate or
+display overlay; milestone 0 tracks remaining acceptance and key lifecycle work.
 Add concrete operations as needed; no WLAN fallback or general transport framework
 is required. Python runs on the control computer.
 
@@ -49,11 +54,11 @@ Bluetooth-only removal (`2f6579c`). Historical sources can be read with
 | --- | --- | --- |
 | Unattended authorization (new deployment requirement) | BLE v3 Noise PSK, private provisioning profile, encrypted control/snapshots and no physical gate implemented | Board acceptance, OS credential-store import/profile selection and authenticated atomic rotation |
 | Overview: USB state, firmware version/build, host OS, agent presence/version, CDC installation stage, compatibility errors | Protected overview v1, full build/limits, version/OS/hostname/heartbeat age and CDC stage reuse existing firmware state | Populated/stale-agent and CDC-stage acceptance; installation byte progress/specific failure reasons if needed; gate future workflows by actual BLE support |
-| Start/stop USB | Implemented; fault cases remain unverified | Hardware acceptance for enable/disable, detach and job contention |
-| USB manufacturer/product editing and persistent save | `device_config.rs` still reads the two existing flash slots; mutation/save code was removed | Restore validated, transactional saving while USB is off; native editor and readback |
+| Start/stop USB | Repeated BLE stop/start, live macOS removal and descriptor rebuild passed | Timeout/detach and job-contention fault acceptance |
+| USB manufacturer/product editing and persistent save | Native editor, encrypted acquired read/save, verified inactive-slot transaction and USB-off lifecycle gate implemented; macOS descriptor/readback/reconnect checks passed | Independent power-cycle persistence and editor failure/draft acceptance; worst-case flash blackout measurement |
 | Python editor, generator execution, Start/Stop and errors | Text demo only; keyboard lowering, script envelopes and strict HID execution remain | Supervised interpreter, editor, generator send/throw, deadlines, local waits and capability checks |
-| Python `wait_event()` for buttons and connection/USB/agent changes | Status can supply capability transitions; device button publisher was removed | Authenticated, bounded button events; supervisor event routing and lifecycle semantics |
-| Host filesystem navigation | Agent listing/pagination and firmware page validation remain | BLE request/page relay; Home/Root/Up, breadcrumbs, hidden files, metadata, selection, pagination and errors |
+| Python `wait_event()` for buttons and connection/USB/agent changes | Encrypted released-button stream, 32-event native history and sampled status exist | Physical routing/Stop acceptance; supervisor event routing and lifecycle semantics |
+| Host filesystem navigation | Encrypted BLE list/cancel/page relay; bounded native Home/Root/Up, breadcrumbs, hidden files, metadata, selection and pagination implemented; real agent pagination/error/cancel/reconnect passed | Interactive navigation acceptance, slow-agent/soak and Windows/Linux board checks |
 | Encrypted path/default-path transfer initiation and session reconnect | Agent session/crypto/sender and shared `transfer-crypto` / `transfer-protocol` remain | Native session client, authenticated BLE relay and transfer controls |
 | Downloads: queue, progress, rate/ETA, verification, save | No native receiver; `usb/events.rs` deliberately rejects delivery | Bounded stream-to-disk receiver, verification/receipt, safe saving and transfer activity UI |
 | Connection loss and reconnect | Explicit reconnect and incarnation checks exist | Convenient recovery with fresh secret-authenticated sessions, stale-response rejection and no execution replay; platform acceptance |
@@ -131,15 +136,18 @@ the existing protected records, with a negotiated overview-v1 Info flag, a
 remain 48-byte ciphertext. No streaming relay or USB format changed. Detailed
 metadata requires acquired control; layouts are companion lowering choices,
 because firmware executes layout-independent KBD1. Completed checks belong in
-DEVICE_TESTING.md; this milestone is not yet complete.
+DEVICE_TESTING.md; USB identity v1 now shares those records and the existing response slot.
+Implementation is complete; the remaining acceptance below is still open.
 
-Remaining, with USB identity as the next implementation slice:
+Remaining acceptance (implementation and completed checks are in DEVICE_TESTING.md):
 
-- Restore configuration mutation and persistence using the current printable
-  ASCII bounds (manufacturer 32 bytes, product 48). Reject edits while USB is
-  active, report flash failures, and acknowledge success only after persistence.
-  Preserve the existing slot/schema/layout and apply identity on next USB start.
-  Review flash-write safety while the BLE stack is running.
+- Confirm saved identity after an independent power cycle, and exercise the native
+  editor failure/draft behavior interactively (invalid input, rejected save, Reload,
+  and edits across refresh). The user confirmed a successful name change; live
+  macOS detach acceptance now checks actual registry removal as well as BLE flags.
+  Flash failure/power loss is covered in host fault-injection tests; board save,
+  readback, repeated USB toggles, descriptors and fresh reconnect have passed.
+  Measure worst-case flash/radio blackout if field conditions require a tighter bound.
 - Exercise diagnostic filtering, clear and manual scrolling with a populated view.
 - Accept populated/stale/legacy agent metadata and CDC installer stages on hardware.
   Heartbeat age is sampled at overview time; live presence still expires at
@@ -155,48 +163,40 @@ Verify USB toggles, authentication failure/timeout, physical Y Stop, detach, dis
 partial-upload cancellation, near-limit effects and local-preset contention.
 Record pending and completed board checks in DEVICE_TESTING.md.
 
-## 2. Bounded BLE responses/events and filesystem browsing
+## 2. Stream/filesystem acceptance and throughput
 
-This is the shared prerequisite for filesystem pages, Python button events and
-file streaming. Today's finite response slot is 304 bytes: ordinary control/status
-ciphertext is 48 bytes, and protected overview v1 uses up to 304. It cannot stream
-directory pages or file records. `usb/events.rs` is an unavailable
-sink, so a new screen alone cannot restore these workflows.
+Implementation is complete. Info flag 32 negotiates encrypted Events, independent
+stream nonces and four-fragment credits. The relay owns one 2,048-byte page and
+at most eight best-effort buttons; native browsing accumulates at most 512 entries.
+Filesystem v1 and the sole USB CDC owner are unchanged. Native list/cancel, page
+validation, target-platform navigation and consumed-button exclusions are covered
+by portable tests. Generic file-transfer sinks remain unavailable until milestone 4.
+See [DEVICE_TESTING.md](docs/DEVICE_TESTING.md) for board measurements and commands.
 
-- Extend `ble-protocol` with explicitly versioned request/response/event framing,
-  correlation, connection ownership and capability negotiation, building on the
-  protected metadata/configuration slice. Negotiate additions to BLE v3 without
-  accepting a downgrade to the old control gate or plaintext operations.
-- Add an authenticated outgoing GATT characteristic and native subscription.
-  Use notifications with explicit application credit/acknowledgement for streaming;
-  notification submission does not prove receiver consumption. Keep command
-  results, Cancel/Disconnect and physical Stop responsive during streaming.
-- Start with MTU-23 support. Measure negotiated MTU and test larger fragments
-  within stack/characteristic limits. Current packets are eight fixed 128-byte
-  buffers; a larger MTU requires an explicit packet-pool/memory review. Never
-  assume an OS supplies a large MTU or increase all buffers indiscriminately.
-- Replace the unavailable sink with one connection-owned bounded relay; separate
-  pure payload validation from BLE delivery. Reuse the existing sole CDC owner,
-  `CtrlCommand` queue and `usb/ctrl/relay` validation. Remove browser JSON/kind
-  wrappers at this adapter boundary where practical; preserve USB wire versions.
-- Define bounds before coding: fragment size, logical record maximum (USB payloads
-  are at most 2,048 bytes), reassembly storage, queues, credits and deadlines.
-  Reset partial uploads, pages and queued events on connection loss. No stale
-  receiver can consume or acknowledge a replacement connection's records.
-- Implement correlated filesystem list/cancel and validated pages using existing
-  filesystem v1. Recover pure decoding/state from the old `filesystem.rs` into
-  native code; replace Yew rendering. Preserve cursor/hidden/entry-type semantics,
-  superseded-request cancellation and list deadlines; bound accumulated entries.
-- Restore best-effort released-button events from display routing, excluding
-  gestures consumed by menus, Payloads and device-wide Stop. Keep display
-  hardware adapters out of protocol/state code.
+Remaining acceptance/optimization:
 
-Acceptance: fragmented maximum-size pages, malformed frames, queue saturation,
-stale pages and reconnect are covered. Real browsing supports Home/Root/Up,
-breadcrumbs, hidden files, Load more, path selection and actionable errors.
-Run a synthetic record stream at MTU 23 and the negotiated larger MTU; record
-throughput, queue high-water marks and Cancel/Stop latency. Set measured transfer
-timeouts before building the download workflow. No assumed Wi-Fi-equivalent rate.
+- Exercise Home/Root/Up, breadcrumbs, hidden toggling, folder double-click, selection,
+  Copy path, Load more and error recovery in the connected native window. The
+  headless real-agent check covers multi-page listing, missing paths, cancellation
+  and fresh reconnect; it does not establish interactive rendering or navigation.
+- Test physical released-button delivery and confirm menus/Payloads/Stop gestures
+  stay local, including physical Y Stop during saturated streaming and HID work.
+  Routing exclusions and queue saturation have software coverage. Preserve the
+  independent local payload job and measure actual Stop/key-release latency.
+- Record slow/unresponsive-agent recovery, interrupted ACK/upload, USB loss and
+  repeated browsing/connect/release/acquire cycles under load. One early paginated
+  hardware run disconnected; repeated runs passed afterwards. Keep soak coverage
+  open rather than attributing an unobserved cause to that interruption.
+- Force ATT MTU 23 on hardware when a suitable central is available. macOS currently
+  negotiates MTU 124, while all values deliberately remain 20 bytes. Codec tests
+  cover default-MTU fragmentation. Evaluate larger fragments only with measured
+  gains and an explicit packet-pool/characteristic review; the pool remains eight
+  128-byte packets. Do not increase every firmware buffer for throughput.
+- Set download-specific credits/timeouts from measurements before milestone 4.
+  Maximum 2,048-byte probe payloads currently take roughly 5.4–5.7 seconds
+  (about 360–380 bytes/s); directory/probe I/O allows 30 seconds. The host sender's
+  existing five-second USB chunk ACK deadline cannot be copied unchanged into a
+  future end-to-end BLE download path. Keep transfer backpressure fail-closed.
 
 ## 3. Native Python scripting
 
@@ -307,8 +307,9 @@ adapter. Host interoperability and compilation do not establish hardware perform
 or a complete security audit.
 
 The installed btleplug 0.13.4 exposes `mtu()`, `subscribe()` and `notifications()`;
-TrouBLE 0.6.0 provides the GATT stack. These APIs enable the proposed outgoing
-path but do not establish throughput or application backpressure. See the
+TrouBLE 0.6.0 provides the GATT stack. The outgoing path now uses subscriptions and explicit application credits;
+throughput evidence belongs in DEVICE_TESTING.md and does not establish other
+platforms or larger-fragment performance. See the
 [btleplug Peripheral API](https://docs.rs/btleplug/latest/btleplug/api/trait.Peripheral.html).
 
 The old Worker already has native RustPython tests and uses

@@ -42,8 +42,24 @@ buffers and zeroizing key types; caller-owned key/plaintext buffers are cleared.
 Upstream Noise scratch is not comprehensively zeroized or independently audited.
 TrouBLE logs stay disabled, and application diagnostics omit keys/text/bytecode.
 
-Only acquired control, USB enable/disable and bounded keyboard effects are exposed.
-No shell, credentials, file contents or filesystem browsing is routed over BLE.
+USB identity reads and saves require encrypted acquired control. The native and
+firmware endpoints enforce printable ASCII and fixed string bounds. Firmware
+requires fully stopped USB, excludes reserved HID/CDC work, and only writes the
+existing identity slots. Saving does not expose or mutate provisioning keys and
+cannot change VID/PID/serial. CRC detects torn/corrupt records, not hostile flash
+modification. An acknowledgement loss can leave a committed save; the client reads
+again instead of automatically replaying a write.
+
+Acquired control, USB enable/disable, USB identity and bounded keyboard effects are exposed.
+Filesystem browsing also requires acquired control and authenticated event receipts.
+The USB agent remains untrusted: both firmware and companion validate bounded
+pages, names, flags, IDs and cursors. Incarnation-derived USB IDs prevent stale
+agent responses from claiming a replacement connection. Metadata is not evidence
+of trust. The event lane uses disjoint nonces/AD and independent replay counters;
+partial notification headers are not authenticated until the record completes.
+Four credits and fixed queues bound a stalled or corrupt stream. Final directory
+ACK means validated bounded storage, not a file receipt. No shell, credentials
+or file contents are routed over BLE; generic bulk delivery still fails closed.
 Disconnect cancels this connection's effects, and stale IDs cannot update a new
 connection. Local jobs and physical Y Stop remain independent.
 

@@ -916,3 +916,26 @@ fn bluetooth_system_scene_shows_metrics_without_confirmation() {
     assert!(scene.rows.iter().any(|row| row.text == "Radio: Bluetooth"));
     assert!(scene.rows.iter().any(|row| row.text.starts_with("Uptime:")));
 }
+
+#[test]
+fn remote_button_events_exclude_menu_chords_payloads_and_stop() {
+    use super::input::{Button, ButtonEvents, Navigation};
+    let nav = Navigation::new(0);
+    let mut e = ButtonEvents::default();
+    for b in Button::ALL {
+        e.0[b as usize].released = true;
+    }
+    let r = nav.route(e, false, false, false);
+    for b in Button::ALL {
+        assert!(r.remote.contains(b));
+    }
+    let r = nav.route(e, true, false, false);
+    assert_eq!(r.remote, Default::default());
+    let r = nav.route(e, false, true, false);
+    assert_eq!(r.remote, Default::default());
+    let r = nav.route(e, false, false, true);
+    assert!(r.stop);
+    assert!(!r.remote.contains(Button::Y));
+    assert!(!r.remote.contains(Button::X));
+    assert!(r.remote.contains(Button::A));
+}

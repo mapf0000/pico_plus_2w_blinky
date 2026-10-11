@@ -261,6 +261,9 @@ fn rejects_unbounded_metadata_and_mismatched_reply_kinds() {
                 status: Status::default(),
                 overview_supported: false,
                 overview: None,
+                identity_supported: false,
+                filesystem_supported: false,
+                identity: None,
             }),
         },
         LATENCY,
@@ -667,4 +670,297 @@ fn late_status_completion_cannot_start_a_queued_effect_after_deadline() {
     );
     assert_eq!(client.snapshot().job, Job::Finished(Outcome::Disconnected));
     assert!(client.queued.is_none());
+}
+
+fn identity_ready() -> (Client<MockTransport>, Duration) {
+    let (mut client, now) = ready();
+    client.dispatch(Action::SetUsbEnabled(false), now);
+    client.tick(now + LATENCY);
+    assert!(client.snapshot().can_save_identity());
+    (client, now + LATENCY)
+}
+fn identity() -> crate::UsbIdentity {
+    crate::UsbIdentity::new("Test vendor", "Test product").unwrap()
+}
+
+#[test]
+fn identity_requires_control_and_usb_shutdown_then_persists_across_reconnect() {
+    let (mut client, now) = connected(Scenario::Normal);
+    client.dispatch(Action::ReadIdentity, now);
+    assert_eq!(client.snapshot().last_error, Some(Failure::NotReady));
+    client.dispatch(Action::SaveIdentity(identity()), now);
+    assert_eq!(client.snapshot().last_error, Some(Failure::NotReady));
+    client.dispatch(Action::Acquire, now);
+    client.tick(now + LATENCY);
+    client.dispatch(Action::SaveIdentity(identity()), now + LATENCY);
+    assert_eq!(client.snapshot().last_error, Some(Failure::UsbActive));
+    assert!(!client.snapshot().pending);
+    client.dispatch(Action::SetUsbEnabled(false), now + LATENCY);
+    client.tick(now + LATENCY * 2);
+    client.dispatch(Action::SaveIdentity(identity()), now + LATENCY * 2);
+    client.tick(now + LATENCY * 3);
+    assert_eq!(client.snapshot().identity_update, IdentityUpdate::Saved);
+    assert_eq!(
+        client.snapshot().capabilities.as_ref().unwrap().identity,
+        Some(identity())
+    );
+    client.dispatch(Action::ReadIdentity, now + LATENCY * 3);
+    client.tick(now + LATENCY * 4);
+    assert_eq!(client.snapshot().identity_update, IdentityUpdate::Loaded);
+    client.dispatch(Action::Disconnect, now + LATENCY * 4);
+    client.dispatch(Action::Connect("mock-pico-1".into()), now + LATENCY * 4);
+    client.tick(now + LATENCY * 5);
+    assert_eq!(
+        client.snapshot().capabilities.as_ref().unwrap().identity,
+        Some(identity())
+    );
+    assert!(!client.snapshot().can_save_identity());
+}
+
+#[test]
+fn flash_failure_returns_current_identity_and_requires_reload_before_retry() {
+    let (mut client, now) = identity_ready();
+    let old = client
+        .snapshot()
+        .capabilities
+        .as_ref()
+        .unwrap()
+        .identity
+        .clone()
+        .unwrap();
+    client.dispatch(Action::SaveIdentity(identity()), now);
+    let tag = client.pending.as_ref().unwrap().tag;
+    client.transport.events_for_test_clear();
+    client.receive(
+        Event::Reply {
+            tag,
+            reply: Reply::Identity {
+                identity: old.clone(),
+                error: Some(Failure::Persistence),
+            },
+        },
+        now + LATENCY,
+    );
+    assert_eq!(
+        client.snapshot().identity_update,
+        IdentityUpdate::Failed(Failure::Persistence)
+    );
+    assert_eq!(
+        client.snapshot().capabilities.as_ref().unwrap().identity,
+        Some(old)
+    );
+    assert!(!client.snapshot().can_save_identity());
+    assert!(client.snapshot().can_read_identity());
+    client.dispatch(Action::SaveIdentity(identity()), now + LATENCY);
+    assert!(client.pending.is_none());
+    client.dispatch(Action::ReadIdentity, now + LATENCY);
+    client.tick(now + LATENCY * 2);
+    assert_eq!(client.snapshot().identity_update, IdentityUpdate::Loaded);
+    assert!(client.snapshot().can_save_identity());
+}
+
+#[test]
+fn queued_identity_save_is_revalidated_after_refresh_and_not_replayed_on_loss() {
+    let (mut client, now) = identity_ready();
+    let refresh = now + STATUS_INTERVAL;
+    client.tick(refresh);
+    assert!(client.snapshot().refreshing);
+    assert!(!client.snapshot().pending);
+    assert!(client.snapshot().can_save_identity());
+    client.dispatch(Action::SaveIdentity(identity()), refresh);
+    let tag = client.pending.as_ref().unwrap().tag;
+    client.transport.events_for_test_clear();
+    client.receive(
+        Event::Reply {
+            tag,
+            reply: Reply::Status(Status {
+                usb_enabled: true,
+                usb_ready: true,
+                ..Status::default()
+            }),
+        },
+        refresh + LATENCY,
+    );
+    assert_eq!(client.snapshot().last_error, Some(Failure::UsbActive));
+    assert!(client.pending.is_none());
+
+    client.dispatch(Action::SetUsbEnabled(false), refresh + LATENCY);
+    client.tick(refresh + LATENCY * 2);
+    client.dispatch(Action::SaveIdentity(identity()), refresh + LATENCY * 2);
+    let tag = client.pending.as_ref().unwrap().tag;
+    client.transport.events_for_test_clear();
+    client.tick(refresh + REQUEST_TIMEOUT + LATENCY * 3);
+    assert_eq!(
+        client.snapshot().connection,
+        Connection::Failed(Failure::Timeout)
+    );
+    client.receive(
+        Event::Reply {
+            tag,
+            reply: Reply::Identity {
+                identity: identity(),
+                error: None,
+            },
+        },
+        refresh + REQUEST_TIMEOUT + LATENCY * 3,
+    );
+    assert!(client.snapshot().capabilities.is_none());
+    assert_eq!(client.snapshot().identity_update, IdentityUpdate::Unknown);
+    client.dispatch(
+        Action::Connect("mock-pico-1".into()),
+        refresh + REQUEST_TIMEOUT + LATENCY * 3,
+    );
+    client.tick(refresh + REQUEST_TIMEOUT + LATENCY * 4);
+    assert!(client.pending.is_none());
+    assert!(!client.snapshot().control_acquired);
+}
+
+#[test]
+fn negotiated_identity_is_read_automatically_without_disabling_controls() {
+    let (mut client, now) = ready();
+    client.snapshot.capabilities.as_mut().unwrap().identity = None;
+    client.snapshot.identity_update = IdentityUpdate::Unknown;
+    client.tick(now);
+    assert!(matches!(
+        client.pending.as_ref().unwrap().kind,
+        Kind::IdentityRead(true)
+    ));
+    assert!(client.snapshot().refreshing);
+    assert!(client.snapshot().can_send());
+    client.tick(now + LATENCY);
+    assert_eq!(client.snapshot().identity_update, IdentityUpdate::Loaded);
+    assert!(
+        client
+            .snapshot()
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .identity
+            .is_some()
+    );
+    client
+        .snapshot
+        .capabilities
+        .as_mut()
+        .unwrap()
+        .identity_supported = false;
+    client.dispatch(Action::ReadIdentity, now + LATENCY);
+    assert_eq!(client.snapshot().last_error, Some(Failure::NotReady));
+}
+
+fn browse(path: &str) -> Action {
+    Action::Browse {
+        path: path.into(),
+        cursor: 0,
+        hidden: false,
+    }
+}
+#[test]
+fn filesystem_browsing_and_superseded_cancellation_are_scoped() {
+    let (mut c, mut now) = ready();
+    c.dispatch(browse(""), now);
+    now += LATENCY;
+    c.tick(now);
+    assert_eq!(c.snapshot.filesystem.directory, "/mock");
+    assert_eq!(c.snapshot.filesystem.entries.len(), 2);
+    c.dispatch(browse("/first"), now);
+    let old = c.pending.as_ref().unwrap().tag;
+    c.dispatch(browse("/second"), now);
+    now += LATENCY;
+    c.tick(now);
+    now += LATENCY;
+    c.tick(now);
+    assert_eq!(c.snapshot.filesystem.directory, "/second");
+    assert!(!c.snapshot.filesystem.loading);
+    c.receive(
+        Event::Reply {
+            tag: old,
+            reply: Reply::Directory(crate::mock::mock_directory(old.request, "/old", 0, false)),
+        },
+        now,
+    );
+    assert_eq!(c.snapshot.filesystem.directory, "/second");
+    c.dispatch(browse("/third"), now);
+    c.dispatch(Action::CancelDirectory, now);
+    now += LATENCY;
+    c.tick(now);
+    assert_eq!(c.snapshot.filesystem.directory, "/second");
+    assert!(!c.snapshot.filesystem.loading);
+    c.dispatch(Action::Disconnect, now);
+    assert!(c.snapshot.filesystem.entries.is_empty());
+    assert!(c.snapshot.filesystem.selected.is_none());
+}
+#[test]
+fn filesystem_requires_capability_agent_control_and_times_out_without_replay() {
+    let (mut c, mut now) = connected(Scenario::Normal);
+    c.dispatch(browse(""), now);
+    assert!(!c.snapshot.filesystem.loading);
+    c.dispatch(Action::Acquire, now);
+    now += LATENCY;
+    c.tick(now);
+    c.snapshot
+        .capabilities
+        .as_mut()
+        .unwrap()
+        .filesystem_supported = false;
+    c.dispatch(browse(""), now);
+    assert!(!c.snapshot.filesystem.loading);
+    c.snapshot
+        .capabilities
+        .as_mut()
+        .unwrap()
+        .filesystem_supported = true;
+    c.snapshot
+        .capabilities
+        .as_mut()
+        .unwrap()
+        .status
+        .host_agent_present = false;
+    c.dispatch(browse(""), now);
+    assert!(!c.snapshot.filesystem.loading);
+    c.snapshot
+        .capabilities
+        .as_mut()
+        .unwrap()
+        .status
+        .host_agent_present = true;
+    c.dispatch(browse(""), now);
+    c.transport.events_for_test_clear();
+    c.tick(now + Duration::from_secs(35));
+    assert_eq!(c.snapshot.connection, Connection::Failed(Failure::Timeout));
+    assert!(!c.snapshot.filesystem.loading);
+}
+#[test]
+fn button_events_are_bounded_and_discarded_after_release_or_reconnect() {
+    let (mut c, now) = ready();
+    for i in 0..40 {
+        c.receive(
+            Event::Button {
+                epoch: c.epoch,
+                button: i % 4,
+            },
+            now,
+        );
+    }
+    assert_eq!(c.snapshot.buttons.len(), 32);
+    assert_eq!(c.snapshot.dropped_buttons, 8);
+    c.receive(
+        Event::Button {
+            epoch: c.epoch + 1,
+            button: 0,
+        },
+        now,
+    );
+    assert_eq!(c.snapshot.dropped_buttons, 8);
+    c.dispatch(Action::Release, now);
+    c.tick(now + LATENCY);
+    assert!(c.snapshot.buttons.is_empty());
+    c.receive(
+        Event::Button {
+            epoch: c.epoch,
+            button: 1,
+        },
+        now + LATENCY,
+    );
+    assert!(c.snapshot.buttons.is_empty());
 }

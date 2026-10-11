@@ -162,6 +162,10 @@ pub async fn usb_task(
             Timer::after_millis(delay).await;
         }
         usb.disable().await;
+        disconnect_bus();
+        // Leave a physical disconnect interval before acknowledging shutdown
+        // and allowing the next session to rebuild its descriptors.
+        Timer::after_millis(10).await;
         crate::usb::bootstrap::cancel();
         crate::usb::bootstrap::release();
         crate::usb::bootstrap::CAN_ARM.store(false, Ordering::Release);
@@ -169,6 +173,20 @@ pub async fn usb_task(
         crate::usb::ctrl::CTRL_READY.store(false, Ordering::SeqCst);
         crate::usb::usb_supervisor::notify_stopped();
     }
+}
+
+/// Embassy RP 0.10.0's Bus::disable is empty. After all USB futures have
+/// stopped and UsbDevice has notified its handlers, this task still exclusively
+/// owns the peripheral. Remove the device pull-up and stop its controller/IRQs
+/// before releasing session buffers or admitting an identity flash transaction.
+/// Driver::new/start restores these registers when the next session begins.
+fn disconnect_bus() {
+    cortex_m::interrupt::free(|_| {
+        let regs = embassy_rp::pac::USB;
+        regs.sie_ctrl().modify(|w| w.set_pullup_en(false));
+        regs.inte().write(|w| w.0 = 0);
+        regs.main_ctrl().modify(|w| w.set_controller_en(false));
+    });
 }
 
 fn usb_log_style(record: &Record, writer: &mut embassy_usb_logger::Writer<'_, USB_LOGGER_BUF>) {

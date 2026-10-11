@@ -37,11 +37,35 @@ Pending effects are never replayed after reconnect. USB enable/disable controls
 require acquired control and an idle keyboard executor.
 
 The companion currently supports live status, an encrypted device/agent overview,
-control acquisition/release, USB on/off, bounded text effects and filterable
-diagnostics. Background polling keeps controls available. Python, filesystem browsing, credentials and
-Bluetooth file transfer are not implemented. The host-agent USB protocol and
+control acquisition/release, USB on/off, saved USB manufacturer/product names,
+bounded text effects, host filesystem browsing and filterable diagnostics.
+The browser supports Home/Root/Up, breadcrumbs, hidden files, metadata, selection
+and pagination. Enable USB and run the host agent on the attached computer.
+Released Pico buttons arrive over the encrypted notification stream. Background
+polling keeps controls available. Python, credentials and Bluetooth file transfer
+are not implemented. The host-agent USB protocol and
 local display presets remain. Browser-dependent bulk requests fail closed:
 chunks cannot be acknowledged without a receiver.
+
+In **USB identity**, edit the manufacturer/product, choose **Disable USB**, then
+**Save identity** and **Enable USB** to apply the names. Both USB buttons are next
+to the identity editor and explain when acquiring control or finishing a job is
+required. Saving validates printable ASCII
+and verifies the existing flash slots. **Reload identity** discards the draft and
+reads the saved names; reload after a flash failure before retrying. Background
+status polling keeps the draft and controls steady.
+
+An explicit reversible hardware check is available:
+
+```sh
+cargo run -p pico-companion --release -- --profile /private/path/pico.json --identity-self-test
+```
+
+It temporarily changes the USB names, verifies readback and repeated USB toggles,
+reconnects, then restores the original names and USB state. It holds USB off for five seconds for host removal inspection and the temporary
+names for ten seconds for USB descriptor inspection. Ordinary `--self-test` reads
+identity without changing flash or toggling USB. Independent power-cycle acceptance
+is a separate check.
 
 ## Build and validation
 

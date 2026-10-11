@@ -3875,6 +3875,7 @@ dependencies = [
  "clap",
  "companion-core",
  "eframe",
+ "futures-util",
  "getrandom 0.4.3",
  "script-protocol",
  "serde",

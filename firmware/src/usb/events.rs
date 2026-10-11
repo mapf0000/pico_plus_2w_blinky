@@ -4,7 +4,6 @@
 use heapless::{String, Vec};
 pub const TRANSFER_TEXT_MAX: usize = 1024;
 pub const TRANSFER_BINARY_MAX: usize = 1 + transfer_protocol::TLV_MAX_PAYLOAD;
-pub const WS_BINARY_KIND_FILESYSTEM: u8 = 2;
 #[derive(Debug)]
 pub struct Unavailable;
 pub fn has_active_client() -> bool {

@@ -9,7 +9,12 @@ pub const INFO_LEN: usize = 20;
 pub const STATUS_LEN: usize = 12;
 const CONTROL: u8 = 4; // PSK-protected control; incompatible with v2 pairing
 const OVERVIEW_FLAG: u8 = 8;
+const IDENTITY_FLAG: u8 = 16;
+const STREAM_FLAG: u8 = 32;
+pub mod filesystem;
+pub mod identity;
 mod overview;
+pub mod stream;
 pub use overview::{BootstrapPhase, MAX_OVERVIEW_LEN, Overview};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +29,8 @@ pub struct Info {
     /// ASCII build label, truncated to 12 bytes and zero padded. Not device identity.
     pub build: [u8; 12],
     pub overview: bool,
+    pub identity: bool,
+    pub streams: bool,
 }
 
 impl Info {
@@ -31,6 +38,8 @@ impl Info {
         let mut value = Self {
             build: [0; 12],
             overview: true,
+            identity: true,
+            streams: true,
         };
         for (out, input) in value.build.iter_mut().zip(build.bytes()) {
             *out = if input.is_ascii_graphic() {
@@ -50,7 +59,10 @@ impl Info {
         let mut bytes = [0; INFO_LEN];
         bytes[..4].copy_from_slice(b"PBLE");
         bytes[4] = VERSION;
-        bytes[5] = CONTROL | if self.overview { OVERVIEW_FLAG } else { 0 };
+        bytes[5] = CONTROL
+            | if self.overview { OVERVIEW_FLAG } else { 0 }
+            | if self.identity { IDENTITY_FLAG } else { 0 }
+            | if self.streams { STREAM_FLAG } else { 0 };
         bytes[8..].copy_from_slice(&self.build);
         bytes
     }
@@ -64,7 +76,7 @@ impl Info {
         }
         if &bytes[..4] != b"PBLE"
             || bytes[5] & CONTROL == 0
-            || bytes[5] & !(CONTROL | OVERVIEW_FLAG) != 0
+            || bytes[5] & !(CONTROL | OVERVIEW_FLAG | IDENTITY_FLAG | STREAM_FLAG) != 0
             || bytes[6..8] != [0, 0]
         {
             return Err(Error::Invalid);
@@ -74,6 +86,8 @@ impl Info {
         let label = Self {
             build,
             overview: bytes[5] & OVERVIEW_FLAG != 0,
+            identity: bytes[5] & IDENTITY_FLAG != 0,
+            streams: bytes[5] & STREAM_FLAG != 0,
         };
         let end = label.build.iter().position(|b| *b == 0).unwrap_or(12);
         if end == 0
@@ -145,8 +159,18 @@ mod tests {
         assert_eq!(Info::decode(&info.encode()), Ok(info));
         let mut legacy = info;
         legacy.overview = false;
+        legacy.identity = false;
+        legacy.streams = false;
         assert_eq!(Info::decode(&legacy.encode()), Ok(legacy));
         assert_eq!(legacy.encode()[5], 4);
+        for flags in [4, 12, 20, 28, 60] {
+            let mut encoded = info.encode();
+            encoded[5] = flags;
+            let decoded = Info::decode(&encoded).unwrap();
+            assert_eq!(decoded.overview, flags & 8 != 0);
+            assert_eq!(decoded.identity, flags & 16 != 0);
+            assert_eq!(decoded.encode(), encoded);
+        }
         for flags in 0..8 {
             let status = Status {
                 usb_enabled: flags & 1 != 0,
@@ -192,6 +216,10 @@ mod tests {
 
 pub const AUTH_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000004;
 pub const COMMAND_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000005;
+pub const EVENTS_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000007;
+pub const KIND_FLOW: u8 = 6;
+pub const KIND_STREAM: u8 = 7;
+pub const KIND_FILESYSTEM: u8 = 8;
 pub const RESULT_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000006;
 pub const FRAME_LEN: usize = 20;
 pub const HEADER_LEN: usize = 8;
@@ -201,6 +229,8 @@ pub const KIND_CONTROL: u8 = 1;
 pub const KIND_SCRIPT: u8 = 2;
 pub const KIND_HANDSHAKE: u8 = 3;
 pub const KIND_RECORD: u8 = 4;
+/// Inner plaintext only; outer frames remain encrypted KIND_RECORD.
+pub const KIND_IDENTITY: u8 = 5;
 pub const ACQUIRE: u8 = 0;
 pub const RELEASE: u8 = 1;
 pub const USB_ON: u8 = 2;
@@ -294,6 +324,9 @@ pub enum Code {
     UsbUnavailable = 7,
     Busy = 8,
     UsbChanged = 9,
+    DirectoryAccepted = 10,
+    DirectoryCancelled = 11,
+    AgentUnavailable = 12,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResultValue {
@@ -329,6 +362,9 @@ impl ResultValue {
             7 => Code::UsbUnavailable,
             8 => Code::Busy,
             9 => Code::UsbChanged,
+            10 => Code::DirectoryAccepted,
+            11 => Code::DirectoryCancelled,
+            12 => Code::AgentUnavailable,
             _ => return Err(Error::Invalid),
         };
         let token = u16::from_le_bytes([bytes[2], bytes[3]]);
@@ -346,7 +382,7 @@ pub fn fragment(
     offset: usize,
 ) -> Result<([u8; FRAME_LEN], usize), Error> {
     if token == 0
-        || !matches!(kind, KIND_HANDSHAKE | KIND_RECORD)
+        || !matches!(kind, KIND_HANDSHAKE | KIND_RECORD | KIND_STREAM)
         || message.is_empty()
         || message.len() > MAX_MESSAGE_LEN
         || offset >= message.len()
@@ -373,6 +409,7 @@ pub struct Message<'a> {
 }
 
 pub struct Receiver {
+    stream: bool,
     buffer: [u8; MAX_MESSAGE_LEN],
     token: u16,
     kind: u8,
@@ -387,12 +424,18 @@ impl Default for Receiver {
 impl Receiver {
     pub const fn new() -> Self {
         Self {
+            stream: false,
             buffer: [0; MAX_MESSAGE_LEN],
             token: 0,
             kind: 0,
             total: 0,
             received: 0,
         }
+    }
+    pub const fn new_stream() -> Self {
+        let mut value = Self::new();
+        value.stream = true;
+        value
     }
     pub fn abandon(&mut self) {
         self.total = 0;
@@ -411,9 +454,18 @@ impl Receiver {
         let total = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
         let payload = &bytes[HEADER_LEN..];
         if token == 0
-            || !matches!(kind, KIND_HANDSHAKE | KIND_RECORD)
+            || if self.stream {
+                kind != KIND_STREAM
+            } else {
+                !matches!(kind, KIND_HANDSHAKE | KIND_RECORD)
+            }
             || total == 0
-            || total > MAX_MESSAGE_LEN
+            || total
+                > if self.stream {
+                    stream::CIPHERTEXT_MAX
+                } else {
+                    MAX_MESSAGE_LEN
+                }
             || offset + payload.len() > total
         {
             return Err(Error::Invalid);

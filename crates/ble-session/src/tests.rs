@@ -221,3 +221,31 @@ fn provisioning_is_versioned_and_rejects_corruption_and_defaults() {
     assert!(Profile::new(ID, [0; 32]).is_none());
     assert!(Profile::new([0; 16], KEY).is_none());
 }
+
+#[test]
+fn stream_and_response_lanes_are_independent_and_cannot_be_reflected() {
+    let (mut client, mut server) = pair();
+    let mut stream = [0; 64];
+    let mut result = [0; 64];
+    let mut plain = [0; 64];
+    let n = server.seal_stream(1, b"page", &mut stream).unwrap();
+    let m = server.seal(9, b"status", &mut result).unwrap();
+    assert_eq!(client.open(9, &result[..m], &mut plain), Ok(6));
+    assert_eq!(client.open_stream(1, &stream[..n], &mut plain), Ok(4));
+    assert_eq!(
+        client.open_stream(1, &stream[..n], &mut plain),
+        Err(Error::Sequence)
+    );
+    let n = server.seal_stream(10, b"page", &mut stream).unwrap();
+    assert_eq!(
+        client.open(10, &stream[..n], &mut plain),
+        Err(Error::Authentication)
+    );
+    assert_eq!(client.open_stream(10, &stream[..n], &mut plain), Ok(4));
+    assert_ne!(server.seal(10, b"page", &mut result).unwrap(), 0);
+    assert_ne!(&result[..n], &stream[..n]);
+    assert_eq!(
+        server.open_stream(10, &stream[..n], &mut plain),
+        Err(Error::Authentication)
+    );
+}

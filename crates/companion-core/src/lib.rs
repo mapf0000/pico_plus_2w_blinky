@@ -4,6 +4,7 @@
 //! protocol, while keyboard effects retain the production script envelope/KBD1.
 
 mod client;
+pub mod filesystem;
 pub mod keyboard;
 pub mod mock;
 
@@ -20,6 +21,43 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
 pub const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 pub const OVERVIEW_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Validated owned identity; callers cannot retain unbounded strings in commands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsbIdentity {
+    manufacturer: String,
+    product: String,
+}
+impl UsbIdentity {
+    pub fn new(manufacturer: &str, product: &str) -> Result<Self, Failure> {
+        let identity = ble_protocol::identity::Identity {
+            manufacturer,
+            product,
+        };
+        if !identity.valid() {
+            return Err(Failure::InvalidIdentity);
+        }
+        Ok(Self {
+            manufacturer: manufacturer.into(),
+            product: product.into(),
+        })
+    }
+    pub fn value(&self) -> ble_protocol::identity::Identity<'_> {
+        ble_protocol::identity::Identity {
+            manufacturer: &self.manufacturer,
+            product: &self.product,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IdentityUpdate {
+    #[default]
+    Unknown,
+    Loaded,
+    Saved,
+    Failed(Failure),
+}
 
 /// Validated finite wire metadata; private storage preserves decode invariants.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,11 +97,18 @@ pub enum Failure {
     BluetoothUnavailable,
     ReadOnly,
     Rejected,
+    InvalidIdentity,
+    AgentUnavailable,
+    UsbActive,
+    Persistence,
 }
 
 impl Failure {
     pub fn message(self) -> &'static str {
         match self {
+            Self::AgentUnavailable => {
+                "Host agent unavailable; enable USB and start the agent on the attached computer"
+            }
             Self::MissingKey => "Load the device's provisioning profile with --profile PATH",
             Self::Authentication => "Device authentication failed; check the provisioning profile",
             Self::PermissionDenied => "Bluetooth permission denied",
@@ -83,6 +128,11 @@ impl Failure {
             }
             Self::ReadOnly => "This BLE service supports status only",
             Self::Rejected => "Command rejected by device",
+            Self::InvalidIdentity => {
+                "Use printable ASCII: manufacturer up to 32 bytes, product up to 48"
+            }
+            Self::UsbActive => "Disable USB and wait for shutdown before saving identity",
+            Self::Persistence => "Flash save/readback failed; reload identity before retrying",
             Self::IdExhausted => "Session identifiers exhausted; restart the companion",
         }
     }
@@ -121,6 +171,9 @@ pub struct Capabilities {
     pub status: Status,
     pub overview_supported: bool,
     pub overview: Option<Overview>,
+    pub identity_supported: bool,
+    pub filesystem_supported: bool,
+    pub identity: Option<UsbIdentity>,
     /// Extra budget for BLE fragmentation; mock transports need none.
     pub upload_timeout: Duration,
 }
@@ -243,7 +296,12 @@ pub struct Snapshot {
     pub refreshing: bool,
     pub last_status_update: Option<Duration>,
     pub last_overview_update: Option<Duration>,
+    pub identity_update: IdentityUpdate,
+    pub identity_revision: u64,
     pub job: Job,
+    pub filesystem: filesystem::Browser,
+    pub buttons: VecDeque<u8>,
+    pub dropped_buttons: u64,
     pub last_error: Option<Failure>,
     pub last_rtt: Option<Duration>,
     pub diagnostics: VecDeque<Diagnostic>,
@@ -251,6 +309,33 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    pub fn can_browse(&self) -> bool {
+        self.connection == Connection::Connected
+            && self.control_acquired
+            && !self.pending
+            && !self.job.active()
+            && self.capabilities.as_ref().is_some_and(|c| {
+                c.filesystem_supported && c.status.usb_enabled && c.status.host_agent_present
+            })
+    }
+    pub fn can_read_identity(&self) -> bool {
+        self.connection == Connection::Connected
+            && self.compatible()
+            && self.control_acquired
+            && !self.pending
+            && !self.job.active()
+            && self
+                .capabilities
+                .as_ref()
+                .is_some_and(|c| c.identity_supported)
+    }
+    pub fn can_save_identity(&self) -> bool {
+        self.can_read_identity()
+            && self.identity_update != IdentityUpdate::Failed(Failure::Persistence)
+            && self.capabilities.as_ref().is_some_and(|c| {
+                c.identity.is_some() && !c.status.usb_enabled && !c.status.usb_ready
+            })
+    }
     pub fn compatible(&self) -> bool {
         self.capabilities
             .as_ref()
@@ -273,11 +358,20 @@ impl Snapshot {
 #[derive(Clone, Debug)]
 pub enum Action {
     ClearDiagnostics,
+    Browse {
+        path: String,
+        cursor: u32,
+        hidden: bool,
+    },
+    CancelDirectory,
+    SelectPath(String),
     Scan,
     Connect(String),
     Acquire,
     Release,
     SetUsbEnabled(bool),
+    ReadIdentity,
+    SaveIdentity(UsbIdentity),
     SendText {
         text: String,
         layout: String,
@@ -295,6 +389,13 @@ pub struct Tag {
 
 #[derive(Clone, Debug)]
 pub enum Operation {
+    ListDirectory {
+        path: String,
+        cursor: u32,
+        hidden: bool,
+    },
+    CancelDirectory,
+    StreamProbe,
     Scan,
     Connect(Device),
     Acquire,
@@ -302,6 +403,8 @@ pub enum Operation {
     SetUsbEnabled(bool),
     Status,
     Overview,
+    ReadIdentity,
+    SaveIdentity(UsbIdentity),
     Run(Vec<u8>),
     Cancel(Vec<u8>),
 }
@@ -314,12 +417,24 @@ pub struct Request {
 
 #[derive(Clone, Debug)]
 pub enum Reply {
+    Directory(Vec<u8>),
+    DirectoryCancelled,
+    StreamMeasured {
+        bytes: usize,
+        elapsed: Duration,
+        att_mtu: u16,
+        queue_high_water: [u8; 3],
+    },
     Devices(Vec<Device>),
     Connected(Capabilities),
     Acquired,
     Released,
     Status(Status),
     Overview(Overview),
+    Identity {
+        identity: UsbIdentity,
+        error: Option<Failure>,
+    },
     Accepted(script_protocol::EffectId),
     Finished {
         id: script_protocol::EffectId,
@@ -330,6 +445,7 @@ pub enum Reply {
 
 #[derive(Clone, Debug)]
 pub enum Event {
+    Button { epoch: u64, button: u8 },
     Reply { tag: Tag, reply: Reply },
     Lost { epoch: u64 },
 }

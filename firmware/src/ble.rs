@@ -9,6 +9,7 @@ use trouble_host::prelude::*;
 const _: () = assert!(ble_protocol::MAX_MESSAGE_LEN == ble_session::MAX_CIPHERTEXT);
 const _: () = assert!(ble_protocol::VERSION == 3 && ble_protocol::KIND_RECORD == 4);
 const _: () = assert!(ble_protocol::MAX_RESPONSE_LEN <= ble_session::MAX_CIPHERTEXT);
+const _: () = assert!(ble_protocol::identity::RESPONSE_MAX <= ble_protocol::MAX_OVERVIEW_LEN);
 
 const SERVICE_UUID: Uuid = Uuid::new_long(ble_protocol::SERVICE_UUID.to_le_bytes());
 const INFO_UUID: Uuid = Uuid::new_long(ble_protocol::INFO_UUID.to_le_bytes());
@@ -16,6 +17,7 @@ const STATUS_UUID: Uuid = Uuid::new_long(ble_protocol::STATUS_UUID.to_le_bytes()
 const AUTH_UUID: Uuid = Uuid::new_long(ble_protocol::AUTH_UUID.to_le_bytes());
 const COMMAND_UUID: Uuid = Uuid::new_long(ble_protocol::COMMAND_UUID.to_le_bytes());
 const RESULT_UUID: Uuid = Uuid::new_long(ble_protocol::RESULT_UUID.to_le_bytes());
+const EVENTS_UUID: Uuid = Uuid::new_long(ble_protocol::EVENTS_UUID.to_le_bytes());
 const NAME: &str = "Pico BLE";
 
 #[gatt_server]
@@ -34,6 +36,8 @@ struct PicoService {
     command: [u8; 20],
     #[characteristic(uuid = RESULT_UUID, read)]
     result: [u8; 20],
+    #[characteristic(uuid = EVENTS_UUID, notify)]
+    events: [u8; 20],
 }
 fn status() -> [u8; ble_protocol::STATUS_LEN] {
     ble_protocol::Status {
@@ -163,6 +167,10 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
             let mut crypto: Option<ble_session::Session> = None;
             let mut response = ble_protocol::Response::new();
             let mut response_sequence = 0u16;
+            let mut stream_sequence = 0u16;
+            let mut stream = ble_protocol::stream::Sender::new();
+            let mut stream_at = Instant::now();
+            let mut probe = false;
             let mut authenticated = false;
             let mut acquired = false;
             let connected_at = Instant::now();
@@ -175,7 +183,77 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                 if !authenticated && connected_at.elapsed() > Duration::from_secs(30) {
                     break;
                 }
-                let event = match select(connection.next(), Timer::after_millis(100)).await {
+                // Send at most one notification between GATT events. Credits bound the
+                // controller queue; a stalled receiver cannot block Cancel or local Stop.
+                if stream.enabled() && acquired {
+                    if !stream.idle() && stream_at.elapsed() > Duration::from_secs(5) {
+                        log::warn!("ble: stream ACK inactivity expiry");
+                        break; // lost ACK: discard this incarnation, never replay its page
+                    }
+                    if stream.idle() {
+                        let mut record = [0; ble_protocol::stream::PLAINTEXT_MAX];
+                        let length = if probe {
+                            probe = false;
+                            let mut body = [0; ble_protocol::filesystem::PAGE_MAX];
+                            for (i, b) in body.iter_mut().enumerate() {
+                                *b = i as u8;
+                            }
+                            body[2040..2042]
+                                .copy_from_slice(&connection.raw().att_mtu().to_le_bytes());
+                            body[2042] = stream.high_water();
+                            let high = crate::ble_relay::high_water();
+                            body[2043] = high[0];
+                            body[2044] = high[1];
+                            body[2045..].fill(0);
+                            ble_protocol::stream::encode(
+                                ble_protocol::stream::PROBE,
+                                &body,
+                                &mut record,
+                            )
+                            .ok()
+                        } else {
+                            crate::ble_relay::take(&mut record)
+                        };
+                        if let Some(length) = length {
+                            let Some(next) = stream_sequence.checked_add(1) else {
+                                break;
+                            };
+                            stream_sequence = next;
+                            let mut encrypted = [0; ble_protocol::stream::CIPHERTEXT_MAX];
+                            let Some(session) = crypto.as_mut() else {
+                                break;
+                            };
+                            let Ok(n) =
+                                session.seal_stream(next, &record[..length], &mut encrypted)
+                            else {
+                                break;
+                            };
+                            ble_session::erase(&mut record);
+                            if stream.set(next, &encrypted[..n]).is_err() {
+                                break;
+                            }
+                            stream_at = Instant::now();
+                        }
+                    }
+                    match stream.next_fragment() {
+                        Ok(Some(frame)) => {
+                            if !matches!(
+                                embassy_time::with_timeout(
+                                    Duration::from_millis(100),
+                                    server.pico.events.notify(&connection, &frame)
+                                )
+                                .await,
+                                Ok(Ok(()))
+                            ) {
+                                log::warn!("ble: notification send failed or exceeded 100ms");
+                                break;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(_) => break,
+                    }
+                }
+                let event = match select(connection.next(), Timer::after_millis(2)).await {
                     Either::First(event) => event,
                     Either::Second(()) => {
                         if Instant::now().duration_since(upload_at) > Duration::from_secs(5) {
@@ -191,6 +269,7 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                 match event {
                     GattConnectionEvent::Disconnected { .. } => break,
                     GattConnectionEvent::Gatt { event } => {
+                        stream_at = Instant::now(); // command uploads/finite reads may postpone stream pumping
                         let reply = match event {
                             GattEvent::Read(read) if read.handle() == server.pico.result.handle => {
                                 match response.next_fragment() {
@@ -275,10 +354,93 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                                         };
                                         // No authority is derived from the unprotected fragment headers.
                                         authenticated = true;
+                                        if kind == ble_protocol::KIND_FLOW && acquired {
+                                            use ble_protocol::stream::Flow;
+                                            let valid = match Flow::decode(body) {
+                                                Ok(Flow::Start) => {
+                                                    crate::ble_relay::activate(owner.0);
+                                                    stream.start().is_ok()
+                                                }
+                                                Ok(Flow::Ack { sequence, offset }) => {
+                                                    stream_at = Instant::now();
+                                                    stream.ack(sequence, offset).is_ok()
+                                                }
+                                                Ok(Flow::Probe) if stream.idle() && !probe => {
+                                                    probe = true;
+                                                    true
+                                                }
+                                                _ => false,
+                                            };
+                                            ble_session::erase(&mut plaintext);
+                                            if !valid {
+                                                log::warn!("ble: invalid stream flow control");
+                                                break;
+                                            }
+                                            // Flow grants have no finite response and never replace HID results.
+                                            if let Ok(reply) = write.accept() {
+                                                reply.send().await;
+                                            }
+                                            continue;
+                                        }
+                                        let mut filesystem_code = None;
+                                        if kind == ble_protocol::KIND_FILESYSTEM
+                                            && acquired
+                                            && stream.enabled()
+                                        {
+                                            filesystem_code = Some(match body {
+                                                [1, 0, request @ ..] => {
+                                                    match ble_protocol::filesystem::Request::decode(
+                                                        request,
+                                                    ) {
+                                                        Ok(request) => crate::ble_relay::list(
+                                                            owner.0,
+                                                            message.token,
+                                                            request,
+                                                        ),
+                                                        Err(_) => Code::Rejected,
+                                                    }
+                                                }
+                                                [1, 1, id @ ..] if id.len() == 8 => {
+                                                    let mut value = [0; 8];
+                                                    value.copy_from_slice(id);
+                                                    crate::ble_relay::cancel(
+                                                        owner.0,
+                                                        u64::from_le_bytes(value),
+                                                    );
+                                                    // Discard an in-flight page. Stream nonces remain monotonic.
+                                                    // Drain already credited bytes; the native receiver discards this ID.
+                                                    Code::DirectoryCancelled
+                                                }
+                                                _ => Code::Rejected,
+                                            });
+                                        }
                                         let wants_overview = kind == ble_protocol::KIND_CONTROL
                                             && body == [ble_protocol::READ_OVERVIEW]
                                             && acquired;
-                                        if kind == ble_protocol::KIND_CONTROL
+                                        let wants_identity =
+                                            kind == ble_protocol::KIND_IDENTITY && acquired;
+                                        let mut identity_status =
+                                            ble_protocol::identity::Status::Success;
+                                        if filesystem_code.is_some() {
+                                            // Separate finite admission result; preserve the HID result.
+                                        } else if wants_identity {
+                                            use ble_protocol::identity::{Command, Status};
+                                            identity_status = match Command::decode(body) {
+                                                Ok(Command::Read) => {
+                                                    match crate::device_config::reload().await {
+                                                        Ok(_) => Status::Success,
+                                                        Err(_) => Status::FlashFailure,
+                                                    }
+                                                }
+                                                Ok(Command::Save(identity)) => {
+                                                    crate::device_config::save(identity)
+                                                        .await
+                                                        .err()
+                                                        .unwrap_or(Status::Success)
+                                                }
+                                                Err(_) => Status::Invalid,
+                                            };
+                                        } else if kind == ble_protocol::KIND_CONTROL
                                             && (body == [ble_protocol::POLL] || wants_overview)
                                         {
                                             // Poll preserves the active Run's result token and completion.
@@ -300,6 +462,11 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                                         } else {
                                             break;
                                         }
+                                        if !acquired {
+                                            stream.reset();
+                                            probe = false;
+                                            crate::ble_relay::reset();
+                                        }
                                         ble_session::erase(&mut plaintext);
                                         let Some(next) = response_sequence.checked_add(1) else {
                                             break;
@@ -311,9 +478,31 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                                                 Ok(length) => length,
                                                 Err(_) => break,
                                             }
+                                        } else if wants_identity {
+                                            let config = crate::device_config::get().await;
+                                            match (ble_protocol::identity::Response {
+                                                request: message.token,
+                                                status: identity_status,
+                                                identity: config.identity(),
+                                            })
+                                            .encode(&mut snapshot)
+                                            {
+                                                Ok(length) => length,
+                                                Err(_) => break,
+                                            }
                                         } else {
-                                            snapshot[..20]
-                                                .copy_from_slice(&crate::ble_control::result());
+                                            snapshot[..20].copy_from_slice(
+                                                &filesystem_code.map_or_else(
+                                                    crate::ble_control::result,
+                                                    |code| {
+                                                        ble_protocol::ResultValue {
+                                                            token: message.token,
+                                                            code,
+                                                        }
+                                                        .encode()
+                                                    },
+                                                ),
+                                            );
                                             snapshot[20..ble_protocol::SNAPSHOT_LEN]
                                                 .copy_from_slice(&status());
                                             ble_protocol::SNAPSHOT_LEN
@@ -340,6 +529,11 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                                 }
                                 write.accept()
                             }
+                            GattEvent::Write(write)
+                                if Some(write.handle()) == server.pico.events.cccd_handle =>
+                            {
+                                write.accept()
+                            }
                             GattEvent::Write(write) => {
                                 write.reject(AttErrorCode::WRITE_NOT_PERMITTED)
                             }
@@ -352,6 +546,8 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                     _ => {}
                 }
             }
+            stream.reset();
+            crate::ble_relay::reset();
             ble_session::erase(&mut plaintext);
             connection.raw().disconnect();
             drop(crypto);
@@ -381,16 +577,23 @@ async fn command(
                 Code::Released
             }
             [ble_protocol::USB_ON] if *acquired => {
-                let _ = crate::usb::usb_supervisor::start().await;
-                Code::UsbChanged
+                if crate::usb::usb_supervisor::start().await.is_ok() {
+                    Code::UsbChanged
+                } else {
+                    Code::Busy
+                }
             }
             [ble_protocol::USB_OFF] if *acquired && crate::usb::hid::active_job().is_none() => {
-                let _ = embassy_time::with_timeout(
+                let stopped = embassy_time::with_timeout(
                     Duration::from_secs(2),
                     crate::usb::usb_supervisor::stop(150),
                 )
                 .await;
-                Code::UsbChanged
+                if matches!(stopped, Ok(Ok(()))) {
+                    Code::UsbChanged
+                } else {
+                    Code::Busy
+                }
             }
             _ => Code::Rejected,
         });

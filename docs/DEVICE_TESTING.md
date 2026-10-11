@@ -515,3 +515,277 @@ unconfirmed. No v3 HID/physical
 Stop, maximum radio upload, USB detach/toggle, independent power-cycle, soak or
 Linux/Windows acceptance is claimed here. USB identity editing/persistence remains
 the next implementation slice in the updated plan.
+
+
+## USB identity over encrypted BLE — 2026-10-11
+
+Implemented native manufacturer/product editing and explicit reload, acquired
+identity-v1 requests, and verified persistence through the existing version-1
+slots. Info advertises capability bit 16 (current flags 28); older v3 firmware can
+still be used without the editor. Older companions that reject the new flags need
+updating. No UUID, USB TLV, KBD1, key slot, memory map or response capacity changed.
+Manufacturer/product bounds are printable ASCII 32/48 bytes, including empty.
+Background reads preserve drafts and button availability; failed saves retain the
+draft, and flash failures require a fresh read before retry. Saving requires USB
+fully stopped and no reserved HID/installer work. USB lifecycle serialization,
+stale stop-signal reset, and accurate shutdown/start failure responses prevent an
+old acknowledgement from admitting a write during shutdown.
+
+The user explicitly made BOOTSEL available. This release was loaded and verified
+with `picotool load -u -v target/thumbv8m.main-none-eabihf/release/pico_rust -t elf`,
+then rebooted only after verification completed. Factory key provisioning was
+preserved; no full-chip erase or key write was performed. The private profile
+backup outside build output was used without printing its contents.
+
+Apple Silicon macOS / Pico hardware checks passed:
+
+- `target/release/pico-companion --profile <private-profile> --identity-self-test`
+  acquired control, disabled USB, saved temporary identity, read it from flash,
+  enabled USB, repeated stop/start twice, disconnected and freshly authenticated,
+  read the same identity, then restored the original names and original USB state.
+- During its ten-second hold, IORegistry reported the same USB device with
+  manufacturer `Pico BLE test` and product `Identity test 20261011`. After
+  restoration, the original `Logger + Keyboard` product enumerated again.
+- `target/release/pico-companion --profile <private-profile> --self-test` passed
+  encrypted status/overview/identity readback, release during refresh and fresh
+  reconnect. Uptime advanced to 105 seconds with no restart; latest status read
+  was 403 ms. No HID effect was submitted.
+
+Automated checks passed: 10 protocol, 29 companion-core, 8 native companion and
+36 portable firmware tests (83 total, excluding doc tests). Exact commands:
+
+```sh
+cargo test -p ble-protocol -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo build -p pico-companion --release
+cargo test -p pico_rust --lib --no-default-features
+cargo clippy -p pico_rust --lib --tests --no-default-features -- -D warnings
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+cargo fmt --all -- --check
+git diff --check
+```
+
+Fault tests include every erase byte (0–4,096) and every staged/commit programming
+cut (0–256), preserving the latest valid slot or a complete new record. They
+cover legacy records, slot alternation, CRC, malformed records, empty/maximal
+strings, sequence wrap, unchanged-save wear, and failures before and after commit
+verification. Client tests cover acquired/USB-off/capability gates, fresh status
+revalidation of queued saves, explicit reload after flash failure, stale results
+and no replay after timeout. The native decoder checks authenticated correlation.
+
+Flash safety was reviewed against Embassy RP 0.10.0: ROM/RAM helpers, SRAM write
+buffers, interrupt/core-1 exclusion and XiP DMA draining. Linked `write_flash_inner`
+is at `0x20000DC0`. One 4-KiB erase and two 256-byte programs ran successfully with
+the BLE stack active and USB stopped. Linked flash including initialized data is
+4,823,380 bytes (+12,788); static SRAM is 95,412 bytes (+132), aligned end
+`0x200174BC`, leaving 428,868 bytes in striped SRAM before runtime stacks.
+Application load ends at `0x10099958`; ELF load segments exclude control keys and
+both identity slots. Native release size is 8,033,104 bytes. The agent image remains exactly 4 MiB. No new external
+firmware dependency or heap allocation was introduced; flash/identity logic is
+host-testable through the shared no_std protocol. The existing upstream
+`proc-macro-error2` future-incompatibility notice remains.
+
+The native window was launched for layout inspection and the updated release
+opened with the private profile. Independent power-cycle persistence, connected
+editor interaction/invalid-input feedback, worst-case radio blackout/runtime stack,
+USB shutdown fault injection, HID contention/physical Stop, long soak and
+Linux/Windows acceptance remain unconfirmed. Populated/stale real agent metadata
+and installer-stage acceptance are unchanged pending checks in the active plan.
+
+
+USB control discoverability follow-up (2026-10-11): the user could not find the
+previous state-dependent USB toggle below the status table. The editor now shows
+separate, consistently labelled Enable USB and Disable USB buttons with USB state
+and disabled-action guidance. They remain available independently of identity
+capability, use the same bounded commands, and stay steady during background reads.
+This changes native presentation only; no firmware update is required. The user
+could not perform the interactive editor/power-cycle check, so those acceptance
+items remain pending.
+
+
+Follow-up checks passed: `cargo test -p companion-core -p pico-companion`
+(37 tests), `cargo clippy -p pico-companion -p companion-core --all-targets -- -D warnings`,
+`cargo run -p pico-companion -- --mock --self-test`,
+`cargo build -p pico-companion --release`, `cargo fmt --all -- --check`, and
+`git diff --check`. The actual mock window was captured with the development
+screenshot feature and inspected to confirm both USB buttons are visible even
+before connecting. The default release was rebuilt and reopened with the private
+profile; connected interactive acceptance remains pending.
+
+
+## Physical USB detach correction — 2026-10-11
+
+The user confirmed the native name change worked (Yoyo / Xolo), but macOS still
+listed the device while the companion reported USB disabled. Live IORegistry
+also retained an active IOUSBHostDevice, so this was a firmware detach defect.
+The pinned [Embassy RP 0.10.0 USB driver](https://github.com/embassy-rs/embassy/blob/embassy-rp-v0.10.0/embassy-rp/src/usb.rs)
+has an empty `Bus::disable`. Previous BLE-flag/readback/enumeration checks did not
+establish physical detach; those results should not be read as removal acceptance.
+
+The USB task now stops its futures, calls UsbDevice disable to notify handlers,
+then explicitly clears the device pull-up, masks controller interrupts and stops
+the controller under core-0 interrupt exclusion. It waits ten milliseconds before
+completing shutdown and releasing session buffers. The existing driver restores
+registers on the next start. No additional dependency, allocation, protocol field,
+flash reservation, VID/PID/serial or board pin changed.
+
+The user supplied BOOTSEL for this correction. ELF load/verification completed
+before `picotool reboot`; control keys and identity slots were preserved. The
+saved Yoyo / Xolo identity was already present after boot, and authenticated
+identity smoke succeeded. The first external observer was started before USB
+had enumerated after reboot and its initial-device assertion failed; the smoke
+itself restored the saved names. Repeating the targeted hardware check with the
+observer started after enumeration produced complete live removal evidence:
+
+```text
+Yoyo / Xolo -> absent
+absent -> Pico BLE test / Identity test 20261011
+Pico BLE test / Identity test 20261011 -> absent -> temporary identity
+Pico BLE test / Identity test 20261011 -> absent -> temporary identity
+Pico BLE test / Identity test 20261011 -> absent -> Yoyo / Xolo
+```
+
+The observer polled `/usr/sbin/ioreg -p IOUSB -a -l` every 100 ms and selected
+VID/PID 0x1209/0x0001 without printing unrelated devices. All four actual removals
+were seen, followed by restored manufacturer/product. The companion smoke verified
+save/readback, repeated stop/start, fresh authenticated reconnect and restoration
+of the initial USB state. It now holds USB off for five seconds to permit external
+removal inspection before its existing ten-second temporary-descriptor hold.
+No HID text was sent. Physical detach and next-start descriptor application have
+passed on this macOS/Pico combination. This does not establish other-platform
+USB timing, independent power-cycle, fault-injected shutdown or runtime stack use.
+
+Checks passed (36 portable firmware + 37 native/core tests):
+
+```sh
+cargo test -p pico_rust --lib --no-default-features
+cargo clippy -p pico_rust --lib --tests --no-default-features -- -D warnings
+cargo test -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core --all-targets -- -D warnings
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+cargo build -p pico-companion --release
+cargo run -p pico-companion -- --mock --self-test
+cargo fmt --all -- --check
+git diff --check
+```
+
+Deployment used `picotool load -u -v target/thumbv8m.main-none-eabihf/release/pico_rust -t elf`
+then `picotool reboot`. Both identity smoke runs used
+`target/release/pico-companion --profile <private-profile> --identity-self-test`.
+The updated native release was reopened with the private profile afterwards.
+
+Linked flash including initialized data is 4,823,704 bytes (+324 from the identity
+slice); static SRAM is 95,416 bytes (+4). The aligned SRAM end remains
+`0x200174BC`; application load ends at `0x10099A9C`. ELF segments still exclude
+control keys and identity slots, and the agent image remains exactly 4 MiB.
+The existing upstream future-incompatibility notice is unchanged.
+
+
+## Encrypted BLE events and native filesystem browsing — 2026-10-11
+
+Milestone 2 implements negotiated stream/filesystem v1 (Info flag 32, current
+flags 60), an Events notification characteristic, native subscription, and
+four-fragment cumulative credit. The stream has its own strictly increasing
+sequence and disjoint nonce domain under the directional Noise key; finite
+responses can overtake a partial stream without replay or nonce reuse. No USB
+wire version, key provisioning, identity slot, KBD1 or HID ownership changed.
+The native host-only futures-util dependency reuses the locked version.
+
+Firmware owns one 2,070-byte ciphertext, one queued 2,048-byte directory page and
+eight best-effort button events. Values stay 20 bytes at every negotiated MTU.
+A send wait is bounded to 100 ms; a partial stream expires after five seconds
+without GATT activity. Native directory/probe I/O is bounded to 30 seconds, with a
+35-second client listing deadline. The browser caps accumulated entries at 512,
+validates full pages/correlation/cursor progress/duplicate names, and follows the
+USB target's path conventions rather than the control PC's. Paths exceeding the
+512-byte limit remain visible as disabled entries. Consumed menu/Payloads/Stop
+button gestures are excluded. Generic transfer sinks remain unavailable; this
+milestone does not acknowledge bulk file data or introduce a native download.
+
+The user explicitly supplied BOOTSEL for the corrected build. Deployment used
+`picotool load -u -v target/thumbv8m.main-none-eabihf/release/pico_rust -t elf`,
+verified completion, then `picotool reboot`. ELF segments exclude control keys
+and identity slots. The existing private profile and saved Yoyo / Xolo identity
+were preserved; no key/identity write, USB toggle, or HID effect was issued by
+stream acceptance. An unchanged local host agent served a disposable fixture of
+100 empty files, one hidden file and one folder; only directory metadata crossed
+BLE. Test outputs do not contain keys or file contents.
+
+Apple Silicon macOS / Pico evidence:
+
+- Ordinary real BLE `--self-test` passed protected status/overview, commands during
+  background refresh, release and fresh reconnect, with USB ready and agent present.
+- Three complete stream/filesystem runs passed after the final-ACK correction.
+  Three consecutive deterministic 2,048-byte probe records per run took roughly
+  5.4–5.7 seconds (360–380 payload bytes/s). macOS negotiated ATT MTU 124; each
+  notification value remained 20 bytes. These results do not establish larger
+  fragments or a physically forced MTU 23 central.
+- Real filesystem pagination returned 102 entries across 2,006/2,008/2,008/388-byte
+  pages, with cursors 33/65/97/102. Hidden metadata was included, and a missing child
+  path returned status 1 without losing control.
+- The extended run cancelled both an unstarted request and a request after one
+  second of activity, in 0.419/0.432 seconds. A fresh listing immediately after
+  each cancel succeeded on the same authenticated connection, discarding the
+  cancelled stream's obsolete ID. Post-browsing queue high-water was [4, 0, 1]
+  (outstanding fragments, queued buttons, queued pages). No physical button was
+  pressed during this measurement.
+- Each run released/disconnected, authenticated a fresh connection and received
+  another maximum-size stream record successfully. No request/HID replay occurred.
+
+The initial maximum-record failure was a sender bug: final ACK cleared length,
+but idle polling attempted to fragment the empty record with the previous offset.
+`next_fragment()` now returns None for an empty record; the regression test polls
+an idle sender after its final receipt, starts another record and retries the old
+receipt. One early run of the corrected firmware later disconnected on its second
+filesystem page without a diagnostic cause; the following three complete runs
+passed. Keep longer soak/forced-disconnect acceptance open; this isolated event
+has not been attributed to a confirmed cause.
+
+Passed validation: 15 protocol, 8 session/crypto, 35 companion-core, 9 native
+companion and 39 portable firmware tests (106 total, excluding doc tests):
+
+```sh
+cargo test -p ble-protocol -p ble-session -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol -p ble-session --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo build -p pico-companion --release
+cargo test -p pico_rust --lib --no-default-features
+cargo clippy -p pico_rust --lib --tests --no-default-features -- -D warnings
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+cargo fmt --all -- --check
+git diff --check
+```
+
+Hardware commands (private profile contents were never printed):
+
+```sh
+target/release/pico-companion --profile <private-profile> --self-test
+target/release/pico-companion --profile <private-profile> --stream-self-test --test-directory <disposable-directory>
+```
+
+Tests cover exact maximum pages, truncation and hostile fields, strict padding,
+stream/command lane confusion, independent nonce/replay counters, credit pressure,
+idempotent final receipts, relay saturation/USB ID remapping, stale/duplicate/
+superseded pages, disconnect/timeout without replay, native cancellation priority,
+Windows/UNC/extended paths, Unix backslash names and display-routing exclusions.
+
+Linked allocated flash including initialized data is 4,834,036 bytes (+10,332
+from the detach correction); static SRAM sections total 99,800 bytes (+4,384),
+with aligned SRAM end 0x200185DC. This leaves 424,484 bytes of striped SRAM before
+runtime stacks/allocations. Application flash load ends at 0x1009C2FC; the 4-MiB
+agent image and reserved configuration/key regions are unchanged. Native release
+size is 8,100,592 bytes. Static sizes do not measure worst-case runtime stack
+headroom. No firmware dependency or heap allocation was added. The existing
+upstream proc-macro-error2 future-incompatibility notice remains.
+
+The actual mock and updated BLE native windows were launched. An attempted window
+capture was unavailable, so visual rendering and interactive navigation are not
+claimed as accepted. Home/Root/Up, breadcrumbs, hidden toggling, folder double-click,
+selection/Copy path, Load more and error recovery need a connected user check.
+Physical button delivery and Y Stop under stream/HID load, runtime stack headroom,
+slow/unresponsive agent and USB-loss recovery, repeated lease cycles/long soak,
+forced MTU 23/larger-fragment measurements, and Windows/Linux acceptance remain
+open in NATIVE_COMPANION_BLE_PLAN.md. Native Python scripting is the next
+implementation milestone; downloads require separate end-to-end backpressure and
+USB ACK timeout measurements.

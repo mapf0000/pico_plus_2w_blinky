@@ -1,5 +1,7 @@
 use crate::backend::{Backend, Mode};
-use companion_core::{Action, Connection, Job, Outcome, Snapshot, keyboard, layouts};
+use companion_core::{
+    Action, Connection, IdentityUpdate, Job, Outcome, Snapshot, UsbIdentity, keyboard, layouts,
+};
 use eframe::egui;
 
 const DEMO_TEXT: &str = "Hello from Pico!";
@@ -16,6 +18,12 @@ pub struct CompanionApp {
     diagnostic_filter: String,
     errors_only: bool,
     autoscroll: bool,
+    manufacturer: String,
+    product: String,
+    identity_epoch: u64,
+    identity_revision: u64,
+    filesystem_path: String,
+    filesystem_hidden: bool,
 }
 
 impl CompanionApp {
@@ -37,6 +45,12 @@ impl CompanionApp {
             diagnostic_filter: String::new(),
             errors_only: false,
             autoscroll: true,
+            manufacturer: String::new(),
+            product: String::new(),
+            identity_epoch: 0,
+            identity_revision: 0,
+            filesystem_path: String::new(),
+            filesystem_hidden: false,
         })
     }
 
@@ -244,22 +258,6 @@ impl CompanionApp {
             {
                 self.send(Action::Release);
             }
-            let enabled = self
-                .snapshot
-                .capabilities
-                .as_ref()
-                .is_some_and(|c| c.status.usb_enabled);
-            if ui
-                .add_enabled(
-                    self.snapshot.control_acquired
-                        && !self.snapshot.pending
-                        && !self.snapshot.job.active(),
-                    egui::Button::new(if enabled { "Disable USB" } else { "Enable USB" }),
-                )
-                .clicked()
-            {
-                self.send(Action::SetUsbEnabled(!enabled));
-            }
         });
         if let Some(caps) = &self.snapshot.capabilities {
             if !caps.overview_supported {
@@ -272,6 +270,130 @@ impl CompanionApp {
         }
         if !self.mode.is_mock() {
             ui.small("Uses the provisioned device key. No Pico button press is required.");
+        }
+    }
+
+    fn usb_controls(&mut self, ui: &mut egui::Ui) {
+        let status = self.snapshot.capabilities.as_ref().map(|caps| caps.status);
+        let can_control =
+            self.snapshot.control_acquired && !self.snapshot.pending && !self.snapshot.job.active();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(match status {
+                Some(status) if status.usb_enabled => "USB enabled",
+                Some(_) => "USB disabled",
+                None => "USB status unavailable",
+            });
+            if ui
+                .add_enabled(
+                    can_control && status.is_some_and(|status| !status.usb_enabled),
+                    egui::Button::new("Enable USB"),
+                )
+                .clicked()
+            {
+                self.send(Action::SetUsbEnabled(true));
+            }
+            if ui
+                .add_enabled(
+                    can_control
+                        && status.is_some_and(|status| status.usb_enabled || status.usb_ready),
+                    egui::Button::new("Disable USB"),
+                )
+                .clicked()
+            {
+                self.send(Action::SetUsbEnabled(false));
+            }
+        });
+        if !self.snapshot.control_acquired {
+            ui.small("Connect and acquire control to enable or disable USB.");
+        } else if self.snapshot.job.active() {
+            ui.small("Finish or cancel the keyboard effect before changing USB.");
+        } else if self.snapshot.pending {
+            ui.small("Waiting for the current command to finish.");
+        }
+    }
+
+    fn usb_identity(&mut self, ui: &mut egui::Ui) {
+        ui.heading("USB identity");
+        self.usb_controls(ui);
+        let supported = self
+            .snapshot
+            .capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.identity_supported);
+        if !supported {
+            ui.label("Connect to firmware that supports USB identity editing.");
+            return;
+        }
+        let loaded = self
+            .snapshot
+            .capabilities
+            .as_ref()
+            .and_then(|caps| caps.identity.as_ref());
+        let editable = self.snapshot.can_read_identity() && loaded.is_some();
+        ui.add_enabled_ui(editable, |ui| {
+            egui::Grid::new("usb-identity")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("Manufacturer");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.manufacturer)
+                            .char_limit(32)
+                            .desired_width(300.0),
+                    );
+                    ui.end_row();
+                    ui.label("Product");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.product)
+                            .char_limit(48)
+                            .desired_width(300.0),
+                    );
+                    ui.end_row();
+                });
+        });
+        ui.small("Printable ASCII: manufacturer up to 32 bytes, product up to 48. Empty strings are allowed.");
+        ui.label("Disable USB, save, then enable USB to apply the new names.");
+        let value = UsbIdentity::new(&self.manufacturer, &self.product);
+        let dirty = value
+            .as_ref()
+            .ok()
+            .is_some_and(|value| Some(value) != loaded);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    self.snapshot.can_read_identity(),
+                    egui::Button::new("Reload identity"),
+                )
+                .clicked()
+            {
+                self.send(Action::ReadIdentity);
+            }
+            if ui
+                .add_enabled(
+                    self.snapshot.can_save_identity() && value.is_ok() && dirty,
+                    egui::Button::new("Save identity"),
+                )
+                .clicked()
+                && let Ok(value) = value
+            {
+                self.send(Action::SaveIdentity(value));
+            }
+        });
+        if let Err(error) = UsbIdentity::new(&self.manufacturer, &self.product) {
+            ui.colored_label(ui.visuals().error_fg_color, error.message());
+        }
+        match self.snapshot.identity_update {
+            IdentityUpdate::Unknown => {
+                ui.small("Acquire control to read the saved identity.");
+            }
+            IdentityUpdate::Loaded => {
+                ui.small("Identity read from flash.");
+            }
+            IdentityUpdate::Saved => {
+                ui.small("Saved and verified in flash. Applies on the next USB start.");
+            }
+            IdentityUpdate::Failed(error) => {
+                ui.colored_label(ui.visuals().error_fg_color, error.message());
+            }
         }
     }
 
@@ -377,6 +499,189 @@ impl CompanionApp {
         });
     }
 
+    fn filesystem(&mut self, ui: &mut egui::Ui) {
+        use companion_core::filesystem::{breadcrumbs, join, parent, root};
+        ui.heading("Host filesystem");
+        let browser = self.snapshot.filesystem.clone();
+        let available = self.snapshot.can_browse();
+        if !available && !browser.loading {
+            ui.weak(
+                if self
+                    .snapshot
+                    .capabilities
+                    .as_ref()
+                    .is_some_and(|c| !c.filesystem_supported)
+                {
+                    "This firmware does not support Bluetooth filesystem browsing."
+                } else if !self.snapshot.control_acquired {
+                    "Connect and acquire control to browse the USB computer."
+                } else {
+                    "Enable USB and start the host agent on the attached computer."
+                },
+            );
+        }
+        let mut browse = None;
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(available, egui::Button::new("Home"))
+                .clicked()
+            {
+                browse = Some((String::new(), 0));
+            }
+            if ui
+                .add_enabled(available, egui::Button::new("Root"))
+                .clicked()
+            {
+                browse = Some((root(&browser.directory), 0));
+            }
+            if ui
+                .add_enabled(
+                    available && !browser.directory.is_empty(),
+                    egui::Button::new("Up"),
+                )
+                .clicked()
+            {
+                browse = Some((parent(&browser.directory), 0));
+            }
+            if ui
+                .add_enabled(available, egui::Button::new("Refresh directory"))
+                .clicked()
+            {
+                browse = Some((browser.directory.clone(), 0));
+            }
+            if ui
+                .add_enabled(browser.loading, egui::Button::new("Cancel listing"))
+                .clicked()
+            {
+                self.send(Action::CancelDirectory);
+            }
+            if browser.loading {
+                ui.spinner();
+                ui.label("Listing…");
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Path");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.filesystem_path)
+                    .char_limit(ble_protocol::filesystem::PATH_MAX)
+                    .hint_text("Empty path opens the host's home"),
+            );
+            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui
+                .add_enabled(available, egui::Button::new("Open"))
+                .clicked()
+                || enter)
+                && available
+            {
+                browse = Some((self.filesystem_path.clone(), 0));
+            }
+        });
+        if ui
+            .add_enabled(
+                available,
+                egui::Checkbox::new(&mut self.filesystem_hidden, "Show hidden files"),
+            )
+            .changed()
+        {
+            browse = Some((browser.directory.clone(), 0));
+        }
+        ui.horizontal_wrapped(|ui| {
+            for (label, path) in breadcrumbs(&browser.directory) {
+                if ui
+                    .add_enabled(available, egui::Button::new(label))
+                    .clicked()
+                {
+                    browse = Some((path, 0));
+                }
+            }
+        });
+        if let Some(error) = &browser.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        if !browser.directory.is_empty() {
+            ui.label(&browser.directory);
+            if browser.entries.is_empty() && !browser.loading && browser.error.is_none() {
+                ui.weak("This directory is empty.");
+            }
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("filesystem-entries")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                egui::Grid::new("filesystem-table")
+                    .striped(true)
+                    .num_columns(4)
+                    .show(ui, |ui| {
+                        ui.strong("Name");
+                        ui.strong("Type");
+                        ui.strong("Bytes");
+                        ui.strong("Modified (Unix seconds)");
+                        ui.end_row();
+                        for entry in &browser.entries {
+                            if let Some(path) = join(&browser.directory, &entry.name) {
+                                let response = ui.selectable_label(
+                                    browser.selected.as_ref() == Some(&path),
+                                    &entry.name,
+                                );
+                                if response.clicked() {
+                                    self.send(Action::SelectPath(path.clone()));
+                                }
+                                if response.double_clicked() && entry.directory() && available {
+                                    browse = Some((path, 0));
+                                }
+                            } else {
+                                ui.add_enabled(false, egui::Button::selectable(false, &entry.name))
+                                    .on_disabled_hover_text("Full path exceeds the 512-byte limit");
+                            }
+                            ui.label(entry.kind_label());
+                            ui.label(if entry.directory() {
+                                "—".into()
+                            } else {
+                                entry.size.to_string()
+                            });
+                            ui.label(if entry.modified == u64::MAX {
+                                "Unknown".into()
+                            } else {
+                                entry.modified.to_string()
+                            });
+                            ui.end_row();
+                        }
+                    });
+            });
+        if let Some(selected) = &browser.selected {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Selected: {selected}"));
+                if ui.button("Copy path").clicked() {
+                    ui.ctx().copy_text(selected.clone());
+                }
+            });
+        }
+        if ui
+            .add_enabled(available && browser.more, egui::Button::new("Load more"))
+            .clicked()
+        {
+            browse = Some((browser.directory.clone(), browser.cursor));
+        }
+        ui.weak(format!(
+            "{} of at most 512 entries. Double-click a folder to open it.",
+            browser.entries.len()
+        ));
+        if let Some(button) = self.snapshot.buttons.back() {
+            ui.label(format!(
+                "Last Pico button released: {}",
+                ["A", "B", "X", "Y"][*button as usize]
+            ));
+        }
+        if let Some((path, cursor)) = browse {
+            self.send(Action::Browse {
+                path,
+                cursor,
+                hidden: self.filesystem_hidden,
+            });
+        }
+    }
+
     fn diagnostics(&mut self, ui: &mut egui::Ui) {
         ui.heading("Diagnostics");
         ui.horizontal_wrapped(|ui| {
@@ -439,6 +744,31 @@ impl eframe::App for CompanionApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if self.backend.snapshots.has_changed().unwrap_or(false) {
             self.snapshot = self.backend.snapshots.borrow_and_update().clone();
+            if self.identity_epoch != self.snapshot.epoch {
+                self.identity_epoch = self.snapshot.epoch;
+                self.manufacturer.clear();
+                self.product.clear();
+            }
+            if self.snapshot.capabilities.is_none() {
+                self.manufacturer.clear();
+                self.product.clear();
+            }
+            if self.identity_revision != self.snapshot.identity_revision {
+                self.identity_revision = self.snapshot.identity_revision;
+                // A rejected save returns the current identity but retains the draft.
+                if matches!(
+                    self.snapshot.identity_update,
+                    IdentityUpdate::Loaded | IdentityUpdate::Saved
+                ) && let Some(value) = self
+                    .snapshot
+                    .capabilities
+                    .as_ref()
+                    .and_then(|caps| caps.identity.as_ref())
+                {
+                    self.manufacturer = value.value().manufacturer.into();
+                    self.product = value.value().product.into();
+                }
+            }
             if self.selected.is_none() {
                 self.selected = self
                     .snapshot
@@ -472,7 +802,11 @@ impl eframe::App for CompanionApp {
                 ui.separator();
                 self.status(ui);
                 ui.separator();
+                self.usb_identity(ui);
+                ui.separator();
                 self.keyboard(ui);
+                ui.separator();
+                self.filesystem(ui);
                 ui.separator();
                 self.diagnostics(ui);
             });
