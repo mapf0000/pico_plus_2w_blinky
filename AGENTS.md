@@ -25,7 +25,8 @@ The companion lowers bounded text to KBD1 using shared keyboard machinery.
 Hardware presets share the same non-preempting executor, scoped cancellation and
 physical Y Stop. BLE v3 authentication uses a provisioned per-device Noise PSK,
 without physical confirmation or OS pairing. No
-persistent bonds or native Python/file-transfer workflow exists yet.
+persistent bonds or native file-transfer receiver exists yet. Native Python runs
+in a bounded lazy child and yields effects through the same keyboard service.
 
 Detailed references:
 
@@ -83,6 +84,9 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 - `src/ble.rs`: bounded native BLE worker, discovery/status, authenticated control,
   keyboard upload/cancellation, credit-controlled encrypted notifications and cleanup.
 - `src/stream_smoke.rs`: read-only maximum-record and filesystem board acceptance.
+- `src/python.rs`: lazy child supervisor, deadlines, local timers/events and scoped keyboard effects.
+- `src/python_worker.rs`, `src/python_heap.rs`: restricted helper entry and 128-MiB Rust allocation budget.
+- `crates/python-runtime`: recovered restricted VM/prelude, strict IPC and generator tests.
 - `crates/companion-core`: platform-independent client state, keyboard lowering,
   correlation, deadlines and mock transport.
 
@@ -91,7 +95,7 @@ alias and `--mock` selects the deterministic mock. The default firmware supports
 BLE v3 provisioned-secret authentication, acquired control, USB on/off, verified
 USB identity saving and bounded
 keyboard effects, bounded host filesystem browsing and released-button events.
-File reception and Python scripting remain planned
+File reception remains planned
 in `NATIVE_COMPANION_BLE_PLAN.md`. Native builds must remain independent of firmware
 asset generation and browser tooling. Require an authenticated session before control. Keep device
 work out of UI callbacks, bound queues/diagnostics, and scope commands/results to
@@ -206,9 +210,10 @@ Use targeted checks while iterating. Do not rely on bare `cargo test` at the wor
 ### Native companion changes
 
 ```sh
-cargo test -p ble-protocol -p companion-core -p pico-companion
-cargo clippy -p pico-companion -p companion-core -p ble-protocol --all-targets -- -D warnings
+cargo test -p ble-protocol -p python-runtime -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol -p python-runtime --all-targets -- -D warnings
 cargo run -p pico-companion -- --mock --self-test
+cargo run -p pico-companion -- --python-self-test
 cargo build -p pico-companion --release
 ```
 
@@ -323,7 +328,12 @@ Keep keyboard-core `no_std` by default and layout features opt-in. Preserve the
 endpoints/docs change together. Hardware presets contain no interpreter.
 Reservation lasts through key-release cleanup and result publication. Disconnect
 cancels only its companion incarnation; old results cannot update a new connection.
-A future Python interpreter requires an explicit supervised-process/isolation design.
+Native Python uses the supervised child and unchanged source/effect bounds in
+docs/SCRIPTING.md. Never instantiate the VM in egui/backend/radio callbacks. Keep
+RustPython default/host_env/stdio/threading features disabled, preserve the runtime
+capability guard and child allocator budget, and never pass profiles/radio handles
+or credential environments to it. Do not equate its Rust heap budget with RSS or
+claim an OS sandbox. VM tests do not replace actual-process timeout/Stop tests.
 
 ## Build-system and dependency guidance
 

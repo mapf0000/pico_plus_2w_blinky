@@ -299,9 +299,12 @@ pub struct Snapshot {
     pub identity_update: IdentityUpdate,
     pub identity_revision: u64,
     pub job: Job,
+    /// Zero identifies the manual text demo; nonzero identifies a native script run.
+    pub job_owner: Option<u64>,
     pub filesystem: filesystem::Browser,
     pub buttons: VecDeque<u8>,
     pub dropped_buttons: u64,
+    pub buttons_received: u64,
     pub last_error: Option<Failure>,
     pub last_rtt: Option<Duration>,
     pub diagnostics: VecDeque<Diagnostic>,
@@ -376,6 +379,11 @@ pub enum Action {
         text: String,
         layout: String,
         delay_ms: u32,
+    },
+    /// General validated KBD1 submission, scoped to a native script run.
+    SendEffect {
+        bytecode: Vec<u8>,
+        owner: u64,
     },
     Cancel,
     Disconnect,

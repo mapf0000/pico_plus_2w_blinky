@@ -93,7 +93,7 @@ deadline under continuous public reads. Run with exactly one Pico in range and
 other controllers disconnected; it takes about 35 seconds and sends no valid
 encrypted command or HID effect.
 
-Python, bulk transfer and credentials remain future work.
+Bulk transfer and credentials remain future work.
 macOS is the hardware test target; Linux/Windows radio operation is unverified.
 See [the plan](../../NATIVE_COMPANION_BLE_PLAN.md) and
 [wire reference](../../docs/PROTOCOL.md).
@@ -121,3 +121,25 @@ The optional directory check lists metadata, tests a missing child path, cancels
 queued and active lists, and immediately starts fresh listings. Neither command saves flash, toggles USB, executes shell commands or sends
 HID. Values remain 20 bytes at all MTUs, with four application credits and strict
 validation. Hardware acceptance and pending platforms are in DEVICE_TESTING.md.
+
+
+## Native Python
+
+Use **Python scripting** Start/Restart/Stop or Ctrl/Cmd+Enter. The demo waits five
+seconds before typing; set layout() to the USB computer's actual input layout
+and focus a disposable editor there. The text demonstration's layout selector
+is independent. Source edits affect the next run. The interpreter runs in a lazy
+child with bounded IPC, 30-second startup/500-ms later-step deadlines and a 128-MiB
+Rust heap budget. Stop kills the child and cancels only its own effect. No system
+Python or firmware update is needed.
+
+```sh
+cargo run -p pico-companion -- --python-self-test
+# Real board, empty effects and key-release cleanup; no characters typed:
+cargo run -p pico-companion -- --profile /private/path/pico.json --python-ble-self-test
+```
+
+See [SCRIPTING.md](../../docs/SCRIPTING.md) for generators, events, exceptions,
+limits and the native trust boundary. Host modules, FileIO and imports are denied;
+the child is not an OS sandbox against native VM bugs. Source, error messages and
+keyboard contents are not sent to logs or temporary files.

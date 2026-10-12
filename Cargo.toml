@@ -4,6 +4,7 @@ members = [
   "apps/host-agent",
   "crates/build-support",
   "crates/companion-core",
+  "crates/python-runtime",
   "crates/ble-protocol",
   "crates/ble-session",
   "crates/bytecode-constants",
@@ -27,3 +28,7 @@ codegen-units = 1
 strip = true
 opt-level = "z"
 codegen-units = 1
+
+# RustPython codec bootstrap needs optimized VM frames on the native test stack.
+[profile.test.package.rustpython-vm]
+opt-level = 1

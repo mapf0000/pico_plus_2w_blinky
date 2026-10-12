@@ -42,8 +42,9 @@ bounded text effects, host filesystem browsing and filterable diagnostics.
 The browser supports Home/Root/Up, breadcrumbs, hidden files, metadata, selection
 and pagination. Enable USB and run the host agent on the attached computer.
 Released Pico buttons arrive over the encrypted notification stream. Background
-polling keeps controls available. Python, credentials and Bluetooth file transfer
-are not implemented. The host-agent USB protocol and
+polling keeps controls available. Native Python scripting runs a bounded generator
+in a lazy child process; see [SCRIPTING.md](docs/SCRIPTING.md) for the API, Stop and
+resource boundary. Credentials and Bluetooth file transfer are not implemented. The host-agent USB protocol and
 local display presets remain. Browser-dependent bulk requests fail closed:
 chunks cannot be acknowledged without a receiver.
 

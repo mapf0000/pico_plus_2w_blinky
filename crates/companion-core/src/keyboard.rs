@@ -9,9 +9,37 @@ pub fn layouts() -> &'static [&'static str] {
     keyboard_core::available_layouts()
 }
 
+#[derive(Clone, Debug)]
 pub struct Effect {
     pub bytecode: Vec<u8>,
     pub estimated_duration_ms: u64,
+}
+
+impl Effect {
+    pub fn validated(bytes: &[u8]) -> Result<Self, Failure> {
+        firmware_exec::validate_bytecode(bytes).map_err(|_| Failure::InvalidData)?;
+        let mut reader = bytecode::Reader::new(bytes).map_err(|_| Failure::InvalidData)?;
+        let mut estimated_duration_ms = 0;
+        loop {
+            match reader.read_u8().map_err(|_| Failure::InvalidData)? {
+                bytecode::OP_DELAY => {
+                    estimated_duration_ms +=
+                        u64::from(reader.read_varu32().map_err(|_| Failure::InvalidData)?)
+                }
+                bytecode::OP_TAP => {
+                    reader.read_u8().map_err(|_| Failure::InvalidData)?;
+                    reader.read_u8().map_err(|_| Failure::InvalidData)?;
+                    estimated_duration_ms += 20;
+                }
+                bytecode::OP_END => break,
+                _ => return Err(Failure::InvalidData),
+            }
+        }
+        Ok(Self {
+            bytecode: bytes.to_vec(),
+            estimated_duration_ms,
+        })
+    }
 }
 
 /// Bound source before lowering and validate the encoded effect with the same

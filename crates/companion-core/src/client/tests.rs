@@ -964,3 +964,59 @@ fn button_events_are_bounded_and_discarded_after_release_or_reconnect() {
     );
     assert!(c.snapshot.buttons.is_empty());
 }
+
+#[test]
+fn general_script_bytecode_is_validated_scoped_and_cancelled_during_refresh() {
+    let (mut client, now) = ready();
+    client.dispatch(
+        Action::SendEffect {
+            bytecode: vec![0; 4097],
+            owner: 7,
+        },
+        now,
+    );
+    assert_eq!(client.snapshot().last_error, Some(Failure::InvalidData));
+    assert!(!client.snapshot().job.active());
+    let bytecode = keyboard::text_effect("abc".into(), "win_en-US", 1000)
+        .unwrap()
+        .bytecode;
+    client.tick(now + STATUS_INTERVAL);
+    assert!(client.snapshot().refreshing);
+    client.dispatch(
+        Action::SendEffect { bytecode, owner: 7 },
+        now + STATUS_INTERVAL,
+    );
+    assert_eq!(client.snapshot().job, Job::Queued);
+    assert_eq!(client.snapshot().job_owner, Some(7));
+    client.dispatch(Action::Cancel, now + STATUS_INTERVAL);
+    assert_eq!(client.snapshot().job, Job::Finished(Outcome::Cancelled));
+    client.tick(now + STATUS_INTERVAL + LATENCY);
+    assert!(!client.snapshot().job.active());
+}
+
+#[test]
+fn general_script_bytecode_completes_and_cannot_run_after_disconnect() {
+    let (mut client, now) = ready();
+    let bytecode = keyboard::text_effect("abc".into(), "win_en-US", 0)
+        .unwrap()
+        .bytecode;
+    client.dispatch(
+        Action::SendEffect {
+            bytecode: bytecode.clone(),
+            owner: 9,
+        },
+        now,
+    );
+    assert_eq!(client.snapshot().job_owner, Some(9));
+    client.tick(now + LATENCY + Duration::from_secs(1));
+    assert_eq!(client.snapshot().job, Job::Finished(Outcome::Completed));
+    let old = client.snapshot().epoch;
+    client.dispatch(Action::Disconnect, now + LATENCY + Duration::from_secs(1));
+    client.dispatch_for_epoch(
+        old,
+        Action::SendEffect { bytecode, owner: 9 },
+        now + Duration::from_secs(2),
+    );
+    assert_eq!(client.snapshot().connection, Connection::Disconnected);
+    assert!(!client.snapshot().job.active());
+}

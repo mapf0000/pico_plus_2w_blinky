@@ -97,9 +97,41 @@ Firmware reads it through the shared flash driver at BLE startup. The companion
 creates private factory provisioning files; no BLE/USB key export exists. OS
 credential-store import and runtime key rotation are not implemented.
 
+## Native Python process and effect path
+
+The companion links python-runtime (RustPython 0.6.0/Ruff 0.16.5) but initializes
+no VM until Start. The Tokio backend owns a native Supervisor and a lazy process
+actor. The actor executes the same binary in private --python-worker mode with
+cleared environment and pipe-only bounded versioned IPC. The child never loads a
+profile, initializes egui/BLE or receives radio handles. It owns a restricted VM;
+the parent owns 30-second startup/500-ms subsequent step deadlines, hard kill and
+reaping. Child error/exit/invalid IPC faults only its correlated run.
+
+The source editor renders separate script snapshots. Start/Restart/Stop are
+bounded intents; run IDs scope Stop/child replies and connection incarnations scope
+device work. Native local scheduling implements sleep, event waits and capability
+checks. Only buttons buffer (32/drop oldest); capability transitions are delivered
+to current matching waits. Child steps use generator.send/throw. Disconnect does
+not restart the interpreter; an outstanding effect raises without output replay.
+
+General keyboard effects are strictly validated by companion-core, assigned fresh
+script-v1 IDs and scoped to a native run. The manual text demo shares this path
+and is disabled during scripting. Stop cancels only its run's queued/active HID
+job; firmware key release and local-preset independence are unchanged. No new BLE
+or USB format is required. App shutdown kills/reaps the child and disconnects.
+
+RustPython host_env/stdio/threading/default features and native stdlib are off;
+VM initialization rejects host modules/FileIO. The child enforces a 128-MiB live
+Rust allocation budget, including compiler/IPC. This is not an RSS limit or an OS
+sandbox against native VM bugs; native runtime code remains trusted. Source and
+bounded errors stay in memory/UI. See SCRIPTING.md and THREAT_MODEL.md.
+
 ## Bounds
 
 | Resource | Bound |
+| Native Python / yielded effect | One lazy child / one effect |
+| Python Rust heap / private IPC | 128 MiB live allocations / 256 KiB frame; version/run/step checked |
+| Python source / synchronous execution | 32 KiB, 1,024 lines / 30-second startup, 500-ms later step |
 | --- | --- |
 | BLE peripheral connections | 1 |
 | L2CAP channels | 3 reserved (signalling and ATT used; SMP disabled) |

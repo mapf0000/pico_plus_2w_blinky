@@ -56,8 +56,8 @@ Bluetooth-only removal (`2f6579c`). Historical sources can be read with
 | Overview: USB state, firmware version/build, host OS, agent presence/version, CDC installation stage, compatibility errors | Protected overview v1, full build/limits, version/OS/hostname/heartbeat age and CDC stage reuse existing firmware state | Populated/stale-agent and CDC-stage acceptance; installation byte progress/specific failure reasons if needed; gate future workflows by actual BLE support |
 | Start/stop USB | Repeated BLE stop/start, live macOS removal and descriptor rebuild passed | Timeout/detach and job-contention fault acceptance |
 | USB manufacturer/product editing and persistent save | Native editor, encrypted acquired read/save, verified inactive-slot transaction and USB-off lifecycle gate implemented; macOS descriptor/readback/reconnect checks passed | Independent power-cycle persistence and editor failure/draft acceptance; worst-case flash blackout measurement |
-| Python editor, generator execution, Start/Stop and errors | Text demo only; keyboard lowering, script envelopes and strict HID execution remain | Supervised interpreter, editor, generator send/throw, deadlines, local waits and capability checks |
-| Python `wait_event()` for buttons and connection/USB/agent changes | Encrypted released-button stream, 32-event native history and sampled status exist | Physical routing/Stop acceptance; supervisor event routing and lifecycle semantics |
+| Python editor, generator execution, Start/Stop and errors | Native editor and lazy restricted RustPython child implemented; bounded IPC/heap, hard deadlines, send/throw, local waits, general validated KBD1 and scoped Stop tested; empty effects passed on Pico | Real text/chord/key-release, physical Stop/local-preset contention, interactive editor and soak/platform acceptance |
+| Python `wait_event()` for buttons and connection/USB/agent changes | Native supervisor delivers bounded button history and non-replayed capability transitions; real child/mock reconnect and button waits pass | Physical button/Stop, USB/agent transition and reconnect acceptance on hardware |
 | Host filesystem navigation | Encrypted BLE list/cancel/page relay; bounded native Home/Root/Up, breadcrumbs, hidden files, metadata, selection and pagination implemented; real agent pagination/error/cancel/reconnect passed | Interactive navigation acceptance, slow-agent/soak and Windows/Linux board checks |
 | Encrypted path/default-path transfer initiation and session reconnect | Agent session/crypto/sender and shared `transfer-crypto` / `transfer-protocol` remain | Native session client, authenticated BLE relay and transfer controls |
 | Downloads: queue, progress, rate/ETA, verification, save | No native receiver; `usb/events.rs` deliberately rejects delivery | Bounded stream-to-disk receiver, verification/receipt, safe saving and transfer activity UI |
@@ -198,44 +198,46 @@ Remaining acceptance/optimization:
   existing five-second USB chunk ACK deadline cannot be copied unchanged into a
   future end-to-end BLE download path. Keep transfer backpressure fail-closed.
 
-## 3. Native Python scripting
+## 3. Native Python acceptance and resource boundary
 
-Depends on milestone 2 for complete event parity; interpreter/supervisor work can
-start independently. Preserve the former Python API instead of inventing a DSL.
+Implementation is complete. The former RustPython 0.6.0/Ruff 0.16.5 prelude and
+VM tests now live in python-runtime. The same executable starts a restricted child
+only on Start; bounded versioned IPC carries source/send/throw/results. Native
+supervision owns timers/events and one validated script-v1/KBD1 effect. Source,
+text, bytecode and diagnostic limits are retained; startup is 30 seconds and later
+steps 500 ms with hard child termination. Stop/app exit kill/reap the child and
+cancel only its scoped job. Disconnect can throw without losing generator state
+or replaying output. The editor, Start/Restart/Stop, shortcut, state/error view and
+API help are implemented. Completed evidence is in DEVICE_TESTING.md.
 
-- Recover the pure VM/prelude and tests from the old Worker. Keep RustPython 0.6.0
-  and its compatible Ruff 0.16.5 pins initially; avoid unrelated upgrades.
-  Add a supervised child process launched only on Start, potentially a helper
-  mode of the same executable, with bounded versioned IPC and hard termination.
-  No interpreter execution in egui callbacks or the BLE actor.
-- First run a small feasibility spike: generators, send/throw, infinite loops,
-  allocation exhaustion, Stop, denied imports and startup/size/peak-RAM measurement.
-  A child process provides termination/crash containment, not a filesystem/network
-  sandbox. Choose and document the isolation/resource boundary before shipping.
-  If native restrictions cannot preserve the former boundary simply, evaluate an
-  interpreter-only WASM module with a native runtime and no host/WASI capabilities.
-  This would not restore the browser frontend. Measure cost rather than assuming
-  either interpreter packaging option is the lightest.
-- Restore `layout`, `tap`, `modtap`, `text`, `sleep`, `wait_event`, `require_usb`
-  and `require_host_agent`, the existing `PicoError` subclasses and generator
-  send/throw behavior. Add a general validated keyboard-effect submission API to
-  `companion-core`; today's UI action only submits text. Reuse script v1 and KBD1.
-- Restore 32-KiB/1,024-line source limits, 30-second startup, 500-ms subsequent
-  steps, 1,024-character text and 4,096-byte KBD1, one process/effect and bounded
-  diagnostics. Establish an enforceable native memory limit; the former WASM
-  linear-memory ceiling was 128 MiB. Maintain device-effect completion deadlines.
-- Keep timers/event waits in the supervisor. Buffer at most 32 button events,
-  dropping oldest; do not replay capability transitions or events lost offline.
-  Connection loss throws into an outstanding effect without retrying keystrokes;
-  a script may catch the error and retain state while the app remains open.
-  App exit/Stop kills the child and best-effort cancels its scoped device effect.
-- Add source editor, Start/Stop, Ctrl/Cmd+Enter, explicit running/waiting/fault
-  states, bounded diagnostics and API help. Source edits affect the next run.
+The prototype uses native RustPython with host_env/stdio/threading/defaults off;
+initialization rejects host module definitions or FileIO. No profile, environment
+credentials or radio handle reaches the child. A 128-MiB live Rust allocation
+budget is enforced before allocation; it is not a total RSS/address-space limit.
+The child is crash/resource containment, not an OS sandbox against native VM bugs.
+RustPython/native code remains trusted. This explicit boundary avoids another
+runtime/browser dependency; do not silently expand Python host capabilities.
+A future stronger isolation requirement needs an OS sandbox or a capability-free
+interpreter-only WASM evaluation. See SCRIPTING.md and THREAT_MODEL.md.
 
-Acceptance: former API examples and generator tests pass, including loops,
-send/throw and exception recovery. A non-yielding script cannot freeze the UI;
-Stop and timeouts terminate it. Verify button waits, capability changes,
-disconnect/re-authentication, HID cancellation and key release on hardware.
+Remaining acceptance/release work:
+
+- Verify text, modifier chords, Stop during delay/key-down and final key release
+  against a disposable USB capture target. Empty effects passed through the real
+  generator/KBD1/BLE/Pico executor, but are not physical typing acceptance. Verify
+  physical Y Stop and local-preset contention with a script effect outstanding.
+- Accept real button waits and USB/agent capability transitions, lost/late results,
+  reconnect/re-authentication with retained generator state and no output retry.
+  Actual-process/mock tests cover these lifecycle paths; radio/hardware checks
+  remain distinct. Keep capability transitions non-replayed and buttons bounded.
+- Check the connected editor/shortcut, source edits during a run, bounded errors,
+  Restart and app shutdown interactively. Run longer soak, crash/partial IPC and
+  rapid restart/control cycles. Measure runtime CPU/RSS/stack headroom on target
+  systems, not only accounted Rust heap. Small macOS helper measurements: roughly
+  11 ms to first yield, 2.8 MiB Rust heap and 20 MiB RSS; release binary about 25 MB.
+- Validate Linux/Windows child startup, IPC, termination, memory budget and denied
+  host capabilities alongside their BLE acceptance. Native module compilation
+  alone does not establish those platforms or a full adversarial security audit.
 
 ## 4. Encrypted file reception and saving
 
@@ -318,8 +320,9 @@ to be proven. For the optional WASM spike, Wasmtime documents
 [sandbox boundaries](https://docs.wasmtime.dev/security.html) and
 [execution interruption](https://docs.wasmtime.dev/examples-interrupting-wasm.html).
 Its [configuration API](https://docs.wasmtime.dev/api/wasmtime/struct.Config.html)
-also explains why interruption needs bounded memory. No Python runtime dependency has
-been selected or added.
+also explains why interruption needs bounded memory. Native RustPython is now selected with compiled-out host capabilities and measured
+child execution; Wasmtime has not been added. Stronger OS isolation remains a
+separate release decision rather than a claim of this prototype.
 
 Use the affected suites in [AGENTS.md](AGENTS.md#validation-matrix). Extend protocol
 tests for malformed/boundary/order/ownership cases, supervisor tests for process

@@ -24,6 +24,8 @@ pub struct CompanionApp {
     identity_revision: u64,
     filesystem_path: String,
     filesystem_hidden: bool,
+    script_source: String,
+    script: crate::python::ScriptSnapshot,
 }
 
 impl CompanionApp {
@@ -51,6 +53,8 @@ impl CompanionApp {
             identity_revision: 0,
             filesystem_path: String::new(),
             filesystem_hidden: false,
+            script_source: crate::python::DEMO.into(),
+            script: crate::python::ScriptSnapshot::default(),
         })
     }
 
@@ -456,7 +460,10 @@ impl CompanionApp {
             }
             if ui
                 .add_enabled(
-                    self.snapshot.can_send() && layout_supported && validation.is_ok(),
+                    self.snapshot.can_send()
+                        && !self.script.state.active()
+                        && layout_supported
+                        && validation.is_ok(),
                     egui::Button::new("Send text"),
                 )
                 .clicked()
@@ -469,7 +476,9 @@ impl CompanionApp {
             }
             if ui
                 .add_enabled(
-                    self.snapshot.job.active() && self.snapshot.job != Job::Cancelling,
+                    self.snapshot.job.active()
+                        && !self.script.state.active()
+                        && self.snapshot.job != Job::Cancelling,
                     egui::Button::new("Cancel effect"),
                 )
                 .clicked()
@@ -682,6 +691,91 @@ impl CompanionApp {
         }
     }
 
+    fn scripting(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Python scripting");
+        ui.label("Python runs on this computer. Yield effects to control the USB computer; edits apply on the next Start.");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.script_source)
+                .font(egui::TextStyle::Monospace)
+                .code_editor()
+                .desired_rows(10)
+                .desired_width(f32::INFINITY)
+                .char_limit(python_runtime::MAX_SOURCE_BYTES),
+        );
+        let invalid = python_runtime::source_limit_error(&self.script_source);
+        let available = invalid.is_none()
+            && (!self.snapshot.job.active() || self.snapshot.job_owner == Some(self.script.run));
+        let shortcut = ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+        let mut start = shortcut && available;
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    available,
+                    egui::Button::new(if self.script.state.active() {
+                        "Restart script"
+                    } else {
+                        "Start script"
+                    }),
+                )
+                .clicked()
+            {
+                start = true;
+            }
+            if ui
+                .add_enabled(self.script.state.active(), egui::Button::new("Stop script"))
+                .clicked()
+            {
+                self.enqueue_error = self.backend.stop_script(self.script.run).err();
+            }
+            if ui.button("Use Python demo").clicked() {
+                self.script_source = crate::python::DEMO.into();
+            }
+            ui.label("Ctrl/Cmd+Enter to start");
+        });
+        if start {
+            self.enqueue_error = self
+                .backend
+                .start_script(self.snapshot.epoch, self.script_source.clone())
+                .err();
+        }
+        ui.label(self.script.state.label());
+        ui.small(format!(
+            "{} / 32,768 source bytes · {} completed keyboard effects",
+            self.script_source.len(),
+            self.script.completed_effects
+        ));
+        if let Some(layout) = &self.script.layout {
+            ui.label(format!("Script input layout: {layout}"));
+        }
+        if self.script.heap_peak != 0 {
+            ui.small(format!(
+                "Peak Python Rust heap: {:.1} MiB / 128 MiB",
+                self.script.heap_peak as f64 / 1_048_576.0
+            ));
+        }
+        if let Some(error) = invalid {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        if let Some(error) = &self.script.error {
+            egui::ScrollArea::vertical()
+                .id_salt("python-error")
+                .max_height(150.0)
+                .show(ui, |ui| {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        egui::RichText::new(error).monospace(),
+                    );
+                });
+        }
+        egui::CollapsingHeader::new("Python API and examples").show(ui, |ui| {
+            ui.monospace("layout(\"win_en-US\")\ndef main():\n    yield require_usb()\n    yield sleep(5000)\n    yield text(\"Hello\", 20)");
+            ui.label("Effects: tap(key), modtap(chord), text(value, delay_ms=10), sleep(ms), wait_event(*kinds, timeout_ms=None), require_usb(), require_host_agent().");
+            ui.label("Events: button, connection, usb, host_agent. Button values are A/B/X/Y with edge released; a timed wait returns a timer event.");
+            ui.label("Catch PicoError, DeviceDisconnected, UsbUnavailable, HostAgentUnavailable, EffectRejected or EffectCancelled. Stop terminates Python immediately without running cleanup.");
+            ui.label("Imports, files, network, host commands and credentials are unavailable. One generator/effect; startup 30 seconds, later steps 500 ms. Select the USB computer's actual input layout.");
+        });
+    }
+
     fn diagnostics(&mut self, ui: &mut egui::Ui) {
         ui.heading("Diagnostics");
         ui.horizontal_wrapped(|ui| {
@@ -777,6 +871,9 @@ impl eframe::App for CompanionApp {
                     .map(|device| device.id.clone());
             }
         }
+        if self.backend.scripts.has_changed().unwrap_or(false) {
+            self.script = self.backend.scripts.borrow_and_update().clone();
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Pico Companion");
@@ -805,6 +902,8 @@ impl eframe::App for CompanionApp {
                 self.usb_identity(ui);
                 ui.separator();
                 self.keyboard(ui);
+                ui.separator();
+                self.scripting(ui);
                 ui.separator();
                 self.filesystem(ui);
                 ui.separator();

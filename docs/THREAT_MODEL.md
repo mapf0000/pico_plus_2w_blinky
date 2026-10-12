@@ -63,6 +63,27 @@ or file contents are routed over BLE; generic bulk delivery still fails closed.
 Disconnect cancels this connection's effects, and stale IDs cannot update a new
 connection. Local jobs and physical Y Stop remain independent.
 
+Native Python has a restricted language interface in a supervised child. Its
+only external actions are bounded yielded effects; imports and unsafe builtins
+are removed, and RustPython host_env/stdio/threading/defaults/native stdlib are
+not enabled. Initialization rejects host module definitions or FileIO if dependency
+feature unification exposes them. This matters beyond Interpreter::without_stdlib:
+removing import/open names alone is not a sandbox. No control profile, credential
+environment or BLE handle is passed to the child. Source stays in private bounded
+IPC; diagnostics are a bounded current-run UI view, not application logs.
+
+The parent validates frame size/version/run/step and output capacities, owns hard
+startup/step termination, and never automatically retries keyboard output. Stop
+kills/reaps the child and cancels only its native run's job. A 128-MiB live Rust
+allocation budget bounds VM/compiler/IPC heap requests; allocations fail before
+exceeding it. Mapped code, native stacks, allocator overhead and standard-runtime
+allocations outside the global Rust allocator are additional. Neither this budget
+nor a separate process is a total RSS limit or OS sandbox. The native VM/compiler
+and their memory safety are trusted; this prototype does not contain an exploit
+in native runtime code. Stronger adversarial-native-code isolation or added host
+capabilities require an OS sandbox or a capability-free interpreter WASM design.
+Do not transfer the former browser/WASM isolation claim to this child.
+
 One connection can occupy the radio. Unauthenticated access expires 30 seconds
 after accept even under continuous reads/fragments, and disconnect has a 250-ms
 cooldown. These bounds do not prevent repeated connection attempts or radio

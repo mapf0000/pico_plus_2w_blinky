@@ -1,0 +1,17 @@
+[package]
+name = "python-runtime"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+keyboard-core = { path = "../keyboard-core", features = ["alloc", "layout_win_en_gb", "layout_win_pt_br", "layout_win_de_de", "layout_mac_en_gb", "layout_mac_pt_br", "layout_mac_de_de"] }
+rustpython-vm = { version = "=0.6.0", default-features = false, features = ["compiler", "serde"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+# RustPython 0.6.0 compiler requires the Ruff 0.16.5 AST API.
+rustpython-ruff_python_ast = "=0.16.5"
+rustpython-ruff_python_parser = "=0.16.5"
+rustpython-ruff_python_trivia = "=0.16.5"
+rustpython-ruff_source_file = "=0.16.5"
+rustpython-ruff_text_size = "=0.16.5"

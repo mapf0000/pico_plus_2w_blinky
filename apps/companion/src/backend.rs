@@ -51,13 +51,20 @@ const URGENT_CAPACITY: usize = 4;
 
 struct Intent {
     epoch: u64,
-    action: Action,
+    action: IntentAction,
+}
+
+enum IntentAction {
+    Device(Action),
+    StartScript(String),
+    StopScript(u64),
 }
 
 pub struct Backend {
     commands: mpsc::Sender<Intent>,
     urgent: mpsc::Sender<Intent>,
     pub snapshots: watch::Receiver<Snapshot>,
+    pub scripts: watch::Receiver<crate::python::ScriptSnapshot>,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -76,6 +83,7 @@ impl Backend {
         let (commands, mut command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (urgent, mut urgent_rx) = mpsc::channel(URGENT_CAPACITY);
         let (snapshots_tx, snapshots) = watch::channel(Snapshot::default());
+        let (scripts_tx, scripts) = watch::channel(crate::python::ScriptSnapshot::default());
         let (shutdown, mut shutdown_rx) = oneshot::channel();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -90,14 +98,21 @@ impl Backend {
                         Mode::Ble => Connector::Ble(crate::ble::BleTransport::new(profile)),
                     };
                     let mut client = Client::new(connector);
+                    let mut python = crate::python::Supervisor::new();
                     let mut ticker = tokio::time::interval(Duration::from_millis(50));
                     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     client.dispatch(Action::Scan, Duration::ZERO);
                     let mut revision = u64::MAX;
+                    let mut script_revision = u64::MAX;
                     loop {
                         if client.snapshot().revision != revision {
                             revision = client.snapshot().revision;
                             snapshots_tx.send_replace(client.snapshot().clone());
+                            repaint.request_repaint();
+                        }
+                        if python.snapshot.revision != script_revision {
+                            script_revision = python.snapshot.revision;
+                            scripts_tx.send_replace(python.snapshot.clone());
                             repaint.request_repaint();
                         }
                         tokio::select! {
@@ -106,16 +121,30 @@ impl Backend {
                             action = urgent_rx.recv() => {
                                 let Some(action) = action else { break; };
                                 let Intent { epoch, action } = action;
-                                client.dispatch_for_epoch(epoch, action, start.elapsed());
+                                match action {
+                                    IntentAction::StopScript(run) if python.snapshot.run == run => python.stop(&mut client,start.elapsed()),
+                                    IntentAction::Device(Action::Cancel) if epoch == client.snapshot().epoch && python.snapshot.state.active() => python.stop(&mut client,start.elapsed()),
+                                    IntentAction::Device(action) => client.dispatch_for_epoch(epoch,action,start.elapsed()),
+                                    _ => {}
+                                }
                             }
-                            _ = ticker.tick() => client.tick(start.elapsed()),
+                            _ = ticker.tick() => {
+                                client.tick(start.elapsed());
+                                python.tick(&mut client,start.elapsed());
+                            },
                             action = command_rx.recv() => {
                                 let Some(action) = action else { break; };
                                 let Intent { epoch, action } = action;
-                                client.dispatch_for_epoch(epoch, action, start.elapsed());
+                                match action {
+                                    IntentAction::StartScript(source) if epoch == client.snapshot().epoch => python.start(source,&mut client,start.elapsed()),
+                                    IntentAction::Device(Action::SendText { .. } | Action::SendEffect { .. }) if python.snapshot.state.active() => {},
+                                    IntentAction::Device(action) => client.dispatch_for_epoch(epoch,action,start.elapsed()),
+                                    _ => {}
+                                }
                             }
                         }
                     }
+                    python.shutdown(&mut client,start.elapsed()).await;
                     client.dispatch(Action::Disconnect, start.elapsed());
                     if let Connector::Ble(transport) = client.into_transport() {
                         transport.shutdown().await;
@@ -126,6 +155,7 @@ impl Backend {
             commands,
             urgent,
             snapshots,
+            scripts,
             shutdown: Some(shutdown),
             thread: Some(thread),
         })
@@ -141,13 +171,37 @@ impl Backend {
             &self.commands
         };
         sender
-            .try_send(Intent { epoch, action })
+            .try_send(Intent {
+                epoch,
+                action: IntentAction::Device(action),
+            })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => "Command queue is full; try again",
                 mpsc::error::TrySendError::Closed(_) => {
                     "Companion backend stopped; restart the app"
                 }
             })
+    }
+
+    pub fn start_script(&self, epoch: u64, source: String) -> Result<(), &'static str> {
+        if python_runtime::source_limit_error(&source).is_some() {
+            return Err("Python source exceeds its byte, line or nesting limit");
+        }
+        self.commands
+            .try_send(Intent {
+                epoch,
+                action: IntentAction::StartScript(source),
+            })
+            .map_err(|_| "Companion command queue unavailable")
+    }
+
+    pub fn stop_script(&self, run: u64) -> Result<(), &'static str> {
+        self.urgent
+            .try_send(Intent {
+                epoch: 0,
+                action: IntentAction::StopScript(run),
+            })
+            .map_err(|_| "Companion urgent queue unavailable")
     }
 }
 

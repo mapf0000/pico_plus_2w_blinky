@@ -1100,3 +1100,17 @@ connection incarnations are local correlation state, not fields in these values.
 A status error or timeout terminates the native session; reconnection is explicit
 and cannot replay control. A future authenticated command protocol must use a
 separate versioned contract; never reinterpret these read-only values as commands.
+
+
+## Private native Python IPC v1
+
+This companion-internal pipe protocol does not change BLE/script-v1/KBD1 or USB.
+A frame is LE u32 JSON length (1..262144), then exact UTF-8 JSON. Commands contain
+version 1, nonzero run/step u64 and input tagged start(source), resume(value) or
+raise(code,message). The first step is start/1; later steps strictly increment
+under the same run. Responses echo version/run/step, report accounted heap_peak,
+and return the existing effect/completed/error generator result. Unknown fields,
+invalid order, excess lengths and mismatched correlation fail closed; parent
+validation also bounds diagnostics/layout/effect fields. Each child owns one run.
+Source uses pipes rather than argv/environment/disk; process supervision and
+resource/trust limits are in SCRIPTING.md.

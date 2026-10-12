@@ -3,12 +3,19 @@ mod backend;
 mod ble;
 mod identity_smoke;
 mod profile;
+mod python;
+mod python_heap;
+mod python_smoke;
+mod python_worker;
 mod smoke;
 mod stream_smoke;
 
 use clap::Parser;
 use companion_core::mock::Scenario;
 use eframe::egui;
+
+#[global_allocator]
+static ALLOCATOR: python_heap::BudgetAllocator = python_heap::BudgetAllocator;
 
 #[derive(Parser)]
 #[command(
@@ -44,10 +51,24 @@ struct Args {
     /// Additionally browse this host-agent directory and test pagination/error/cancel.
     #[arg(long, requires = "stream_self_test")]
     test_directory: Option<String>,
+    /// Check actual Python child deadlines, memory limits and generator effects over a mock device.
+    #[arg(long, conflicts_with_all = ["profile", "create_profile", "ble", "self_test", "identity_self_test", "stream_self_test"])]
+    python_self_test: bool,
+    /// Exercise Python over real BLE with empty keyboard effects (key-release cleanup, no typing).
+    #[arg(long, requires = "profile", conflicts_with_all = ["mock", "self_test", "python_self_test", "identity_self_test", "stream_self_test"])]
+    python_ble_self_test: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args_os().len() == 2
+        && std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--python-worker"))
+    {
+        return python_worker::run();
+    }
     let mut args = Args::parse();
+    if args.python_self_test {
+        return python_smoke::run();
+    }
     if let Some(path) = &args.create_profile {
         let flash = profile::create(path)?;
         println!(
@@ -59,6 +80,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let profile = args.profile.as_deref().map(profile::load).transpose()?;
+    if args.python_ble_self_test {
+        return python_smoke::run_ble(profile.ok_or("--profile is required")?);
+    }
     args.ble = !args.mock;
     let mode = if args.ble {
         backend::Mode::Ble

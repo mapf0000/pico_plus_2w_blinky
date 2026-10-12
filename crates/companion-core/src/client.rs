@@ -91,7 +91,9 @@ impl<T: Transport> Client<T> {
             Action::SetUsbEnabled(_) | Action::ReadIdentity | Action::SaveIdentity(_) => {
                 DiagnosticContext::Usb
             }
-            Action::SendText { .. } | Action::Cancel => DiagnosticContext::Keyboard,
+            Action::SendText { .. } | Action::SendEffect { .. } | Action::Cancel => {
+                DiagnosticContext::Keyboard
+            }
             _ => DiagnosticContext::Connection,
         };
         match action {
@@ -167,7 +169,10 @@ impl<T: Transport> Client<T> {
                     CONNECT_TIMEOUT,
                 );
             }
-            Action::Acquire | Action::Release | Action::SendText { .. }
+            Action::Acquire
+            | Action::Release
+            | Action::SendText { .. }
+            | Action::SendEffect { .. }
                 if self
                     .snapshot
                     .capabilities
@@ -237,38 +242,34 @@ impl<T: Transport> Client<T> {
                         return;
                     }
                 };
-                let Some(tag) = self.tag() else {
-                    return;
-                };
-                let id = script_protocol::EffectId {
-                    request_id: tag.request,
-                    process_id: tag.epoch,
-                    effect_id: tag.request,
-                };
-                let frame = match keyboard::envelope(id, &effect.bytecode) {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        self.reject(error);
-                        return;
-                    }
-                };
-                self.snapshot.job = Job::Sending;
-                self.start(
-                    Request {
-                        tag,
-                        operation: Operation::Run(frame),
-                    },
-                    Kind::Effect(id),
-                    now,
-                    Duration::from_millis(effect.estimated_duration_ms)
-                        + REQUEST_TIMEOUT
-                        + self
+                self.send_effect(effect, 0, now);
+            }
+            Action::SendEffect { bytecode, owner } => {
+                if owner == 0 || !self.snapshot.can_send() {
+                    self.reject(
+                        if self.snapshot.connection != Connection::Connected
+                            || !self.snapshot.control_acquired
+                        {
+                            Failure::LinkLost
+                        } else if !self
                             .snapshot
                             .capabilities
                             .as_ref()
-                            .map_or(Duration::ZERO, |caps| caps.upload_timeout),
-                );
+                            .is_some_and(|c| c.status.usb_ready)
+                        {
+                            Failure::UsbUnavailable
+                        } else {
+                            Failure::Busy
+                        },
+                    );
+                    return;
+                }
+                match keyboard::Effect::validated(&bytecode) {
+                    Ok(effect) => self.send_effect(effect, owner, now),
+                    Err(error) => self.reject(error),
+                }
             }
+
             Action::Browse {
                 path,
                 cursor,
@@ -338,6 +339,41 @@ impl<T: Transport> Client<T> {
         }
     }
 
+    fn send_effect(&mut self, effect: keyboard::Effect, owner: u64, now: Duration) {
+        let Some(tag) = self.tag() else {
+            return;
+        };
+        let id = script_protocol::EffectId {
+            request_id: tag.request,
+            process_id: tag.epoch,
+            effect_id: tag.request,
+        };
+        let frame = match keyboard::envelope(id, &effect.bytecode) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.reject(error);
+                return;
+            }
+        };
+        self.snapshot.job = Job::Sending;
+        self.snapshot.job_owner = Some(owner);
+        self.start(
+            Request {
+                tag,
+                operation: Operation::Run(frame),
+            },
+            Kind::Effect(id),
+            now,
+            Duration::from_millis(effect.estimated_duration_ms)
+                + REQUEST_TIMEOUT
+                + self
+                    .snapshot
+                    .capabilities
+                    .as_ref()
+                    .map_or(Duration::ZERO, |caps| caps.upload_timeout),
+        );
+    }
+
     fn queue_behind_refresh(&mut self, mut action: Action) {
         // Exactly one intent, bounded before retention. Revalidate device state
         // when the read finishes; its result may have changed USB availability.
@@ -348,6 +384,15 @@ impl<T: Transport> Client<T> {
             | Action::SetUsbEnabled(_)
             | Action::ReadIdentity
             | Action::SaveIdentity(_) => {}
+            Action::SendEffect { bytecode, owner } => {
+                if *owner == 0 || keyboard::Effect::validated(bytecode).is_err() {
+                    self.reject(Failure::InvalidData);
+                    return;
+                }
+                bytecode.shrink_to_fit();
+                self.snapshot.job = Job::Queued;
+                self.snapshot.job_owner = Some(*owner);
+            }
             Action::SendText {
                 text,
                 layout,
@@ -368,6 +413,7 @@ impl<T: Transport> Client<T> {
                 text.shrink_to_fit();
                 layout.shrink_to_fit();
                 self.snapshot.job = Job::Queued;
+                self.snapshot.job_owner = Some(0);
             }
             _ => {
                 self.reject(Failure::QueueFull);
@@ -461,7 +507,10 @@ impl<T: Transport> Client<T> {
         }
     }
     fn cancel(&mut self, now: Duration) {
-        if matches!(self.queued, Some(Action::SendText { .. })) {
+        if matches!(
+            self.queued,
+            Some(Action::SendText { .. } | Action::SendEffect { .. })
+        ) {
             self.queued = None;
             self.snapshot.pending = false;
             self.snapshot.job = Job::Finished(Outcome::Cancelled);
@@ -566,6 +615,8 @@ impl<T: Transport> Client<T> {
                             self.snapshot.dropped_buttons.saturating_add(1);
                     }
                     self.snapshot.buttons.push_back(button);
+                    self.snapshot.buttons_received =
+                        self.snapshot.buttons_received.saturating_add(1);
                     self.changed();
                 }
                 return;
