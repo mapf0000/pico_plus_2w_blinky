@@ -24,6 +24,8 @@ pub struct CompanionApp {
     identity_revision: u64,
     filesystem_path: String,
     filesystem_hidden: bool,
+    download_path: String,
+    download_destination: String,
     script_source: String,
     script: crate::python::ScriptSnapshot,
 }
@@ -53,6 +55,8 @@ impl CompanionApp {
             identity_revision: 0,
             filesystem_path: String::new(),
             filesystem_hidden: false,
+            download_path: String::new(),
+            download_destination: String::new(),
             script_source: crate::python::DEMO.into(),
             script: crate::python::ScriptSnapshot::default(),
         })
@@ -691,6 +695,160 @@ impl CompanionApp {
         }
     }
 
+    fn downloads(&mut self, ui: &mut egui::Ui) {
+        use companion_core::download::{Command, Session, State};
+        ui.heading("Encrypted file downloads");
+        let supported = self
+            .snapshot
+            .capabilities
+            .as_ref()
+            .is_some_and(|c| c.downloads_supported);
+        let available = supported
+            && !self.snapshot.job.active()
+            && self.snapshot.control_acquired
+            && self
+                .snapshot
+                .capabilities
+                .as_ref()
+                .is_some_and(|c| c.status.host_agent_present);
+        if self.snapshot.connection != Connection::Connected {
+            ui.label("Connect to the Pico to use encrypted downloads.");
+        } else if !supported {
+            ui.label("This firmware does not support native downloads.");
+        } else if !self.snapshot.control_acquired {
+            ui.label("Acquire control to use encrypted downloads.");
+        } else if !self
+            .snapshot
+            .capabilities
+            .as_ref()
+            .is_some_and(|c| c.status.host_agent_present)
+        {
+            ui.label("Start the host agent on the computer connected to Pico USB.");
+        } else if self.snapshot.job.active() {
+            ui.label("Stop the current keyboard effect before issuing download controls.");
+        }
+        ui.label(format!(
+            "Host session: {:?}",
+            self.snapshot.downloads.session
+        ));
+        ui.label("Choose a new absolute local filename. Existing files are never overwritten. Maximum file size: 1 MiB.");
+        let mut command = None;
+        if ui
+            .add_enabled(
+                available
+                    && !self.snapshot.downloads.active()
+                    && self.snapshot.downloads.session != Session::Negotiating,
+                egui::Button::new("Connect encrypted host session"),
+            )
+            .clicked()
+        {
+            command = Some(Command::ConnectSession);
+        }
+        ui.horizontal(|ui| {
+            ui.label("Host source path");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.download_path)
+                    .char_limit(512)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+        if ui.button("Use selected filesystem path").clicked()
+            && let Some(path) = &self.snapshot.filesystem.selected
+        {
+            self.download_path = path.clone();
+        }
+        ui.horizontal(|ui| {
+            ui.label("Save to local filename");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.download_destination)
+                    .char_limit(4096)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+        let destination = std::path::PathBuf::from(&self.download_destination);
+        let ready = available && self.snapshot.downloads.session == Session::Ready;
+        let queue = Command::Queue {
+            path: self.download_path.clone(),
+            destination: destination.clone(),
+        };
+        let default = Command::QueueDefault { destination };
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(ready && queue.valid(), egui::Button::new("Queue file"))
+                .clicked()
+            {
+                command = Some(queue);
+            }
+            if ui
+                .add_enabled(
+                    ready && Command::SetDefault(self.download_path.clone()).valid(),
+                    egui::Button::new("Set host default path"),
+                )
+                .clicked()
+            {
+                command = Some(Command::SetDefault(self.download_path.clone()));
+            }
+            if ui
+                .add_enabled(
+                    ready && default.valid(),
+                    egui::Button::new("Queue host default"),
+                )
+                .clicked()
+            {
+                command = Some(default);
+            }
+            if ui
+                .add_enabled(
+                    available && self.snapshot.downloads.active(),
+                    egui::Button::new("Cancel downloads"),
+                )
+                .clicked()
+            {
+                command = Some(Command::Cancel);
+            }
+        });
+        if let Some(command) = command {
+            self.send(Action::Download(command));
+        }
+        if let Some(error) = &self.snapshot.downloads.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        for item in &self.snapshot.downloads.items {
+            ui.group(|ui| {
+                ui.label(format!(
+                    "{} — {:?}",
+                    if item.name.is_empty() {
+                        "Pending file"
+                    } else {
+                        &item.name
+                    },
+                    item.state
+                ));
+                ui.label(item.destination.display().to_string());
+                if matches!(
+                    item.state,
+                    State::Receiving | State::Verifying | State::Saved
+                ) {
+                    let fraction = if item.total == 0 {
+                        1.0
+                    } else {
+                        item.received as f32 / item.total as f32
+                    };
+                    ui.add(egui::ProgressBar::new(fraction).show_percentage());
+                    let remaining = item.total.saturating_sub(item.received) as f64
+                        / item.bytes_per_second.max(1.0);
+                    ui.small(format!(
+                        "{} / {} bytes · {:.0} bytes/s · {:.0}s remaining · {} retries",
+                        item.received, item.total, item.bytes_per_second, remaining, item.retries
+                    ));
+                }
+                if let Some(error) = &item.error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+            });
+        }
+    }
+
     fn scripting(&mut self, ui: &mut egui::Ui) {
         ui.heading("Python scripting");
         ui.label("Python runs on this computer. Yield effects to control the USB computer; edits apply on the next Start.");
@@ -906,6 +1064,8 @@ impl eframe::App for CompanionApp {
                 self.scripting(ui);
                 ui.separator();
                 self.filesystem(ui);
+                ui.separator();
+                self.downloads(ui);
                 ui.separator();
                 self.diagnostics(ui);
             });

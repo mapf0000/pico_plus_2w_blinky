@@ -25,12 +25,13 @@ pub const TAG_FILE_ABORT: u8 = 25;
 #[allow(dead_code)]
 pub const TAG_FILE_HEARTBEAT: u8 = 26;
 
-const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+// A maximum BLE record takes roughly six seconds at default ATT MTU.
+const ACK_TIMEOUT: Duration = Duration::from_secs(60);
 const RESULT_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_CHUNK_RETRIES: usize = 5;
 const NONE_CONTIGUOUS_CHUNK: u32 = u32::MAX;
 const DEFAULT_ABORT_REASON: u8 = 1;
-const INITIAL_WINDOW_CREDIT: u16 = 8;
+const INITIAL_WINDOW_CREDIT: u16 = 1;
 const MAX_WINDOW_CREDIT: u16 = 64;
 
 static NEXT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);

@@ -253,7 +253,7 @@ TrouBLE 0.6 / CYW43 0.7 share bt-hci 0.8. The packet pool has eight 128-byte
 packets and three reserved L2CAP channels; signalling/ATT are used, SMP is disabled.
 Encrypted notifications retain 20-byte ATT values at every negotiated MTU. Four
 application credits reserve packet headroom for ATT commands/replies. The linked
-stream sender owns 2,070 bytes, with a separate 2,048-byte filesystem page queue
+stream sender owns 2,071 bytes, with a separate 2,048-byte filesystem page queue
 and eight best-effort button entries; no packet-pool or flash-layout growth.
 `--stream-self-test` reports negotiated MTU, throughput and queue high-water marks.
 
@@ -430,3 +430,11 @@ without BLE and 263,552 with read-only BLE (+12,516). Allocated flash section
 bytes including the four-MiB internal image were 9,754,796 and 9,862,860.
 These are historical baselines. Current Bluetooth-only linked sizes and actual
 board validation are recorded in [DEVICE_TESTING.md](DEVICE_TESTING.md).
+
+
+Native encrypted downloads additionally reserve one 2,049-byte opaque relay record
+through final receiver credit. File crypto/plaintext and disk staging stay on the
+control computer; firmware adds no heap/PSRAM batch pool. The host sender starts
+with one chunk and uses a 60-second ACK deadline for the measured BLE path. The
+updated packaged host agent is embedded in the usual four-MiB image. Flash/key/USB
+identity regions and board wiring are unchanged. See DOWNLOADS.md and DEVICE_TESTING.md.

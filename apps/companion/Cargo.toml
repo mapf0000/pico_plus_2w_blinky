@@ -11,7 +11,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 eframe = { version = "0.36.2", default-features = false, features = [
   "accesskit", "default_fonts", "glow", "wayland", "x11",
 ] }
-tokio = { version = "1.53.2", features = ["rt", "sync", "time", "macros", "process", "io-util"] }
+tokio = { version = "1.53.2", features = ["rt", "sync", "time", "macros", "process", "io-util", "fs"] }
 
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 btleplug = "0.13.4"
@@ -24,6 +24,11 @@ serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 zeroize = "1.9.1"
 
 script-protocol = { path = "../../crates/script-protocol" }
+
+transfer-crypto = { path = "../../crates/transfer-crypto" }
+transfer-protocol = { path = "../../crates/transfer-protocol" }
+sha2 = "0.11.0"
+tempfile = "3.27.0"
 
 [features]
 # Development-only native screenshot capture; not enabled in normal builds.

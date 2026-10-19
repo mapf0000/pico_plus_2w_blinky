@@ -789,3 +789,201 @@ forced MTU 23/larger-fragment measurements, and Windows/Linux acceptance remain
 open in NATIVE_COMPANION_BLE_PLAN.md. Native Python scripting is the next
 implementation milestone; downloads require separate end-to-end backpressure and
 USB ACK timeout measurements.
+
+
+## Native Python milestone — 2026-10-12
+
+Native Python implementation is complete; physical typing and release acceptance
+remain open. The same executable starts a restricted RustPython 0.6.0 child lazily,
+with cleared environment, bounded/versioned/run-scoped IPC, 128-MiB accounted Rust
+heap, hard startup/step deadlines and kill/reap on Stop or shutdown. The recovered
+prelude supports generator send/throw, all former keyboard effects, local timers,
+button/capability waits and availability checks. General KBD1 remains strictly
+validated and uses the existing authenticated BLE/script-v1 firmware protocol.
+There is no firmware change or flash for this milestone.
+
+Passed validation: 37 companion-core, 9 native companion, 2 actual-process
+integration and 12 runtime tests (60), plus 4 layout, 9 executor, 7 build-support
+and 2 script-protocol tests (22; 82 total, excluding doc tests):
+
+```sh
+cargo test -p python-runtime -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p python-runtime --all-targets -- -D warnings
+cargo run -p pico-companion -- --python-self-test
+target/release/pico-companion --python-self-test
+target/release/pico-companion --mock --self-test
+cargo build -p pico-companion --release
+cargo test -p keyboard-core --features 'std layout_win_en_gb layout_win_pt_br layout_win_de_de layout_mac_en_gb layout_mac_pt_br layout_mac_de_de'
+cargo test -p firmware-exec -p build-support -p script-protocol
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+cargo fmt --all -- --check
+git diff --check
+```
+
+Actual-process acceptance covered five mock keyboard completions, button delivery
+through client/IPC, retained generator state across disconnect/throw/reconnect
+without replay, a non-yielding subsequent step killed after 500 ms, denied imports,
+a failed 256-MiB Python allocation, repeated allocation pressure and recovery,
+Stop during non-yielding startup followed by a fresh child, and scoped HID
+cancellation. Malformed lengths, unknown versions, bad command order, invalid
+keyboard/output bounds and extra JSON fields are rejected. Repeated allocation
+pressure recovered at 127.72 MiB accounted peak; small release runs used roughly
+2.81 MiB. A small waiting helper measured approximately 11 ms to first yield and
+20 MiB RSS on Apple Silicon macOS. These are individual measurements, not worst-case
+RSS/stack guarantees. Native release size is roughly 25 MB (previously 8.1 MB).
+The existing embedded proc-macro-error2 future-incompatibility notice remains.
+
+Real Pico acceptance passed with the existing milestone-2 firmware:
+
+```sh
+cargo run -p pico-companion -- --profile <private-profile> --python-ble-self-test
+```
+
+It discovered/connected/authenticated/acquired, evaluated require_usb() and
+submitted three empty KBD1 effects through the actual generator/client/BLE/Pico
+executor with correlated completions. No characters were typed; empty effects
+still perform key-release cleanup. USB was not toggled, saved Yoyo/Xolo identity
+was preserved, and no profile contents were printed or passed to the child.
+The board was initially still in BOOTSEL, causing discovery to time out;
+`picotool reboot` started its existing firmware, after which the test passed.
+
+The actual updated native window was launched with the private profile. Visual
+rendering, typed text/chords, Stop during delay/key-down, final key release,
+physical button/Y Stop/local-preset contention and USB/agent transitions still
+need user/hardware acceptance. Longer soak and Linux/Windows process/BLE checks
+remain open in NATIVE_COMPANION_BLE_PLAN.md. The child restricts Python host
+capabilities and contains crashes/resource exhaustion; it is not an OS sandbox
+against native VM vulnerabilities. The 128-MiB limit counts Rust allocations,
+not total RSS/address space. See SCRIPTING.md and THREAT_MODEL.md.
+
+
+## 2026-10-12: encrypted native downloads
+
+Implemented transfer-v2 host-session/default/source controls, bounded native
+queue/history and disk-backed receive/verify/save through the acquired BLE v3
+connection. Download-v1 is advertised by Info flag 64 and uses encrypted inner
+command 9, admission code 13 and stream kind 4. The BLE-only cancellation barrier
+is tag 0 with no body; USB TLV tags/transfer-v2 formats are unchanged. Update the
+companion and firmware together: the previous companion rejects the new Info
+flag. New companions still decode the earlier v3 firmware flags. The updated
+host agent starts with one chunk credit and a 60-second ACK deadline; firmware
+withholds its one-credit USB ACK until native record validation/disk work and
+final BLE credit. Stream inactivity is 30 seconds.
+
+One firmware record (2,049 bytes), one owned native disk task, one retained ATT
+write and one owned two-fragment ACK bound active buffering; the encrypted stream
+maximum is 2,071 bytes, up one byte. Queue/history bounds are four/eight and the
+provisional per-file limit is 1 MiB. Plaintext stages in an anonymous file, then
+passes length/count/SHA-256 verification and a bounded copy/readback hash before
+no-overwrite persistence and an encrypted receipt. Host filenames are sanitized
+display metadata, never local paths; received content is not opened or executed.
+See DOWNLOADS.md and THREAT_MODEL.md for trusted local-directory, source bootstrap,
+plaintext-at-rest, final-save cancellation and platform durability boundaries.
+No PSRAM pool, allocator, flash layout, provisioning key, pins or saved Yoyo/Xolo
+USB identity was changed.
+
+Software validation passed:
+
+```sh
+cargo test -p ble-protocol -p ble-session -p transfer-crypto -p transfer-protocol -p python-runtime -p companion-core -p pico-companion -p host-agent
+cargo test -p pico_rust --lib --no-default-features
+cargo clippy -p pico-companion -p companion-core -p ble-protocol --all-targets -- -D warnings
+cargo clippy -p host-agent --all-targets -- -D warnings
+cargo clippy -p pico_rust --lib --tests --no-default-features -- -D warnings
+cargo build -p pico-companion --release
+target/release/pico-companion --mock --self-test
+target/release/pico-companion --python-self-test
+scripts/build-host-agent
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+cargo fmt --all -- --check
+git diff --check
+```
+
+The affected suites passed 182 non-doc tests in total: BLE protocol 16, session 8,
+companion core 39, host unit 25 plus macOS PTY 6, native companion 25 plus actual
+process integration 2, Python runtime 12, transfer crypto 3, transfer protocol 6,
+and pure firmware 40. Coverage includes maximum/truncated/malformed records,
+AEAD tampering, strict chunk indices/lengths (including u32::MAX), manifest/close
+size/count/hash, exact retry idempotency, staging corruption before final copy,
+no-overwrite destination races, queue/receipt ordering, source transfer-ID reuse,
+stale session errors, write failure and cancellation cleanup. Retained disk, ATT
+write and ACK tasks survive cancellation of their radio wait. Two consecutive
+missing-source requests return bounded generic session errors and leave the host
+worker running. Clippy and release builds passed; the existing embedded
+proc-macro-error2 future-incompatibility notice remains.
+
+The final flashed ELF allocates 104,056 bytes of SRAM and 4,839,624 bytes of flash
+sections plus 3,612 bytes of initialized data in flash (4,843,236 bytes total,
+including the four-MiB internal agent image). Its load segments do not overlap the
+two provisioning slots at 0x10BFC000..0x10BFE000. These are linked static sizes,
+not runtime stack headroom measurements.
+
+Hardware testing was explicitly authorized. The user supplied BOOTSEL; three
+ELF deployments were loaded, verified and rebooted using:
+
+```sh
+picotool load -u -v -x -t elf target/thumbv8m.main-none-eabihf/release/pico_rust
+```
+
+The final firmware includes between-record relay-state cleanup on Cancel and
+finite rejection/disconnect reason logging without keys, credentials or contents.
+A local updated agent served disposable ignored fixtures over USB CDC. Headless
+checks used the existing private profile (never printed) and explicit fresh local
+filenames:
+
+```sh
+target/release/pico-companion --profile <private-profile> --download-self-test \
+  --test-file <disposable-host-file> --test-destination <new-local-filename>
+# Empty/default-path check: add --test-default-path.
+# Cancellation checks: add --test-cancel-after-ms 3000 or 15000.
+```
+
+Preliminary failures are kept separate from acceptance: the first run let a new
+control overtake the final session-record ACK, occupying the one-slot bridge.
+Flushing ACKs before commands allowed an 8,195-byte byte-exact save with zero
+retries (44.852 seconds), but that early harness run then misreported idle session
+cleanup as a failure; it is receive/save evidence, not a complete CLI pass.
+After the second flash, authentication/control initially disconnected, including
+a verified handshake followed by a lost encrypted read. Cold restart alone did
+not resolve it; the provisioning key was preserved. Firmware diagnostics later
+identified invalid upload framing. Retaining only one ATT write passed three
+cancellation cycles but failed the fourth. The final companion also owns the
+whole sealed two-fragment ACK across refresh preemption; it never reseals that ACK
+under another token. This is the tested ordering correction. Do not attribute
+every earlier authentication interruption to an unobserved radio cause.
+
+On the final companion, five consecutive cancellation/reconnect cycles passed
+with exit 0, fresh encrypted host sessions and no local destination or named
+staging leftovers. Two cycles cancelled after 2,002 accepted bytes; the others
+cancelled during the first chunk. The updated firmware released USB relay waits
+and accepted subsequent sessions beyond its four-slot relay capacity. The
+empty/default-path save passed on the retained-write build with exit 0 and a
+source-side encrypted completion receipt.
+
+The final owned-ACK build saved the full 8,195-byte fixture in 39.797 seconds
+with zero retries and exit 0 after control release/disconnect. Local byte and
+SHA-256 comparisons matched the source, and the agent logged an encrypted file
+transfer completion, confirming receipt delivery. A missing-source request
+returned the bounded generic host failure with no destination; the next fresh
+connection then saved an empty default-path file in 2.808 seconds with exit 0 and
+an encrypted host receipt. No named staging or cancellation destinations remained.
+
+After the user independently power-cycled the final firmware, the companion
+authenticated/acquired with the unchanged profile, cancelled a file, drained the
+old stream/barrier, established a fresh host session on the same BLE connection,
+received a second manifest and cancelled again. Exit was 0, both source sessions
+established and no destination/named staging remained. The first same-link attempt
+had used the general four-second backend deadline while the client allowed 30
+seconds; draining the old maximum record exceeded four seconds. Download commands
+now share the core's 30-second deadline, while priority Cancel retains its shorter
+four-second radio guard. The accepted command adds
+`--test-cancel-after-ms 3000 --test-restart-after-cancel` to the headless check above.
+This is one cold-start result, not repeated reboot/soak acceptance.
+
+The actual native window is launched with the private profile for interactive
+review. Headless checks establish transport/crypto/disk behavior; they do not
+establish connected widget input/rendering acceptance. Release binary size is
+approximately 25 MB. Full/slow/unwritable disk, source mutation/disappearance,
+forced USB/agent loss, abrupt app exit/final-save races, saturated HID/physical Stop, maximum file
+size/counter lifetime, independent cold-start soak, forced MTU 23 and real
+Windows/Linux BLE/filesystem checks remain open in NATIVE_COMPANION_BLE_PLAN.md.

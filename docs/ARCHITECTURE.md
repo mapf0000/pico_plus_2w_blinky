@@ -65,17 +65,36 @@ BLE I/O. The result persists until a subsequent command. The companion requests 
 until a correlated terminal result, timeout or disconnect. A stalled observer
 cannot retain the HID reservation forever.
 
-USB CDC control framing, host-agent dispatcher, encrypted bulk formats and
-bootstrap remain compatible. Browser bulk delivery is unavailable:
-`usb/events.rs` explicitly refuses relay delivery, so firmware aborts instead
-of acknowledging chunks without a receiver. Filesystem pages use a separate
-`ble_relay_core` ownership/queue policy and `ble_relay` CDC adapter; generic binary
-queues stay unavailable. One page and eight released buttons feed one 2,070-byte
-encrypted ciphertext sender with four application credits. The native radio actor
-subscribes, validates/decrypts and acknowledges bounded batches; it also pumps
-notifications between HID polls. Finite results have separate nonce/replay state.
-`companion-core::filesystem` owns the bounded native browser model. A BLE status/control connection
-never counts as a bulk receiver. Native bulk workflows require a separate design.
+USB CDC framing, host-agent dispatcher, transfer-v2 crypto and bootstrap remain
+compatible. Info flag 64 separately enables native downloads, independently of
+filesystem flag 32. `usb/events.rs` maps retained internal binary kinds to one
+bounded transfer record in `ble_download_core`; `ble_download` scopes it to acquired
+control. Its ticket remains owned until the BLE sender receives the native final
+ACK. Cancel/reset release the USB wait and cancel its relay state. A BLE-only
+barrier drains cancelled bytes before another host session starts. File keys stay
+in the agent and native receiver; the Pico only validates public structure/order.
+
+`downloads.rs` and the recovered `download_crypto.rs` implement a separate host
+Noise session and one bounded file receiver. The radio actor retains the owned
+async disk task across normal command/refresh preemption, and withholds the final
+record ACK until authentication/disk work finish. ACKs flush before new controls;
+sealed host controls retain nonce order and cannot be replayed after interruption.
+The actor retains one 20-byte ATT write across preemption and owns the full
+two-fragment ACK until completion, before sending a newer command token. Cleanup
+bounds the drain and closes the peripheral before a new connection incarnation.
+The task streams plaintext into an anonymous file, hashes incrementally, verifies
+manifest/close totals and digest, copies with bounded buffers to a private save
+file, fsyncs and persists without overwrite before issuing the encrypted receipt.
+No untrusted filename determines a local path and no saved content executes.
+Four requests/eight history entries and a provisional 1-MiB file limit are bounded.
+Source errors, slow/full disk, control/USB loss, disconnect and app exit terminate
+work without automatic retry. See DOWNLOADS.md for crash and filesystem limits.
+
+Filesystem pages use the independent `ble_relay_core` policy and CDC adapter.
+One page, eight buttons and one transfer record feed the single 2,071-byte encrypted
+sender with four fragment credits. Native notification reassembly is bounded and
+has distinct nonce/replay state from finite replies. Notifications are pumped
+between HID polls; general credential/text events remain unavailable.
 
 The build helper installs `memory.x`, embeds the internal four-MiB FAT16 agent
 artifact and generates typed keyboard presets. It has no subprocess browser
@@ -129,17 +148,18 @@ bounded errors stay in memory/UI. See SCRIPTING.md and THREAT_MODEL.md.
 ## Bounds
 
 | Resource | Bound |
+| --- | --- |
+| Native downloads | One receiver/task; four requests/eight history entries; 1 MiB file; bounded anonymous staging and verified save copy |
 | Native Python / yielded effect | One lazy child / one effect |
 | Python Rust heap / private IPC | 128 MiB live allocations / 256 KiB frame; version/run/step checked |
 | Python source / synchronous execution | 32 KiB, 1,024 lines / 30-second startup, 500-ms later step |
-| --- | --- |
 | BLE peripheral connections | 1 |
 | L2CAP channels | 3 reserved (signalling and ATT used; SMP disabled) |
 | Shared BLE packet pool | 8 × 128 bytes, plus fixed metadata |
 | GATT command write | 20 bytes maximum; 8-byte header, 12-byte payload |
 | Reassembly | 1 × 4,142 ciphertext bytes + 4,126-byte plaintext scratch |
 | Response | 1 × 304 bytes; ordinary snapshot 48; sequential 20-byte reads; one active effect correlation |
-| Stream sender / relay queue | 1 × 2,070 ciphertext bytes / 1 × 2,048-byte page + 8 buttons; 4 fragment credits |
+| Stream sender / relay queue | 1 × 2,071 ciphertext bytes / 1 × 2,048-byte page + 8 buttons; 4 fragment credits |
 | Native filesystem / button history | 512 entries / 32 releases; reset on disconnect |
 | HID program/queued command | 4,096-byte maximum; one reservation |
 | Companion radio requests/events | 4 / 16 |

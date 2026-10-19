@@ -660,6 +660,9 @@ dependencies = [
 [[package]]
 name = "ble-protocol"
 version = "0.1.0"
+dependencies = [
+ "transfer-protocol",
+]
 
 [[package]]
 name = "ble-session"
@@ -4558,7 +4561,11 @@ dependencies = [
  "script-protocol",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
  "tokio",
+ "transfer-crypto",
+ "transfer-protocol",
  "uuid",
  "zeroize",
 ]

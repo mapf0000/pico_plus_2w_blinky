@@ -29,7 +29,7 @@ All integers are little-endian; reserved bytes must be zero.
 
 Info: bytes 0–3 `PBLE`, byte 4 version `3`, byte 5 mandatory control flag `4`
 plus optional overview-v1 flag `8`, USB-identity-v1 flag `16` and stream/filesystem-v1
-flag `32` (current value `60`),
+flag `32` and native-download-v1 flag `64` (current value `124`),
 bytes 6–7 zero, bytes 8–19 printable ASCII build label with zero padding.
 Status: byte 0 version, byte 1 flags (bit 0 USB enabled, bit 1 USB ready,
 bit 2 agent recently present), bytes 2–3 zero, bytes 4–11 uptime seconds `u64`.
@@ -107,7 +107,7 @@ and contained command/result token are different fields.
 Info flag `32` negotiates this extension. The companion subscribes to Events before
 Acquire, then sends encrypted inner kind `6` FlowStart. No plaintext stream is
 accepted on Auth/Command. Notifications use outer kind `7`, the same 8-byte header
-and zero-padded 20-byte values, with a 2,070-byte ciphertext maximum. At MTU 23 or
+and zero-padded 20-byte values, with a 2,071-byte ciphertext maximum. At MTU 23 or
 larger, values remain 20 bytes; larger fragments are a separate optimization.
 
 The server-to-client stream uses the same directional Noise key with a **disjoint
@@ -132,7 +132,7 @@ into bounded application storage. This is a directory/event receipt, not a disk
 save or a USB transfer-chunk ACK. The sender owns one ciphertext, and the relay
 owns at most one directory page plus eight best-effort buttons. Four credits leave
 ATT request/reply headroom in the unchanged eight-packet pool. Send waits are
-bounded at 100 ms. An unfinished stream disconnects after five seconds without
+bounded at 100 ms. An unfinished stream disconnects after 30 seconds without
 GATT activity; command uploads/finite reads may postpone pumping. The client
 bounds listing/probe I/O at 30 seconds, and browser requests at 35 seconds.
 
@@ -521,7 +521,7 @@ Record types are 1 manifest, 2 chunk, and 3 close. Manifest and close use index 
 | Encrypted chunks per accepted WebSocket batch | 8 |
 | Initial/advertised sender window | 8 chunks |
 | Maximum accepted window | 64 chunks |
-| ACK timeout / retry limit | 5 seconds / 5 retries |
+| ACK timeout / retry limit | 60 seconds / 5 retries |
 | Browser-receipt timeout | 300 seconds |
 
 ### `FILE_OPEN` — tag 20
@@ -1114,3 +1114,58 @@ invalid order, excess lengths and mismatched correlation fail closed; parent
 validation also bounds diagnostics/layout/effect fields. Each child owns one run.
 Source uses pipes rather than argv/environment/disk; process supervision and
 resource/trust limits are in SCRIPTING.md.
+
+
+## Native encrypted download relay v1
+
+Negotiated by Info flag `64` in BLE v3; requires flag `32`, authenticated acquired
+control and a current host agent. New companions can connect to earlier v3 firmware
+with downloads disabled. Earlier companions reject this newly advertised flag;
+update companion and firmware together. Existing USB/session/file encodings stay
+transfer-v2; no tag or file-cipher nonce is reinterpreted.
+
+Inner encrypted Command kind `9` has payload `[1,0,session-envelope...]` (at most
+770 bytes) or `[1,1]` Cancel. Session envelopes use existing tag-32 bytes; malformed,
+unknown-version or trailing cancel data is rejected. Admission returns ordinary
+32-byte encrypted snapshot with the command token and code `13` DownloadAccepted;
+this means the bounded USB control queue accepted work, not host success. Codes
+10/11 remain directory acceptance/cancellation and 12 agent unavailable. Cancellation
+bypasses the normal native queue, drops older queued download commands, releases
+the connection-owned relay wait and removes its USB transfer state.
+
+PES1 stream kind `4` carries `tag: u8` followed by exact existing USB payload:
+33 session, 20 secure open, 21 secure chunk, 23 secure close, 25 abort. Maximum body
+is 2,049 bytes, plaintext 2,055 and ciphertext 2,071. All fit the unchanged 4,142-byte
+reassembly/session envelope capacity; ATT values remain 20 bytes with twelve
+payload bytes and four fragment credits. Special BLE-only tag `0` with **empty**
+body is the cancellation barrier; it is never a USB TLV tag. The sender drains an
+old record before this barrier, and the native receiver discards cancelled data
+but validates/decrypts outer records and grants their credits. New host negotiation
+waits for the barrier, preserving monotonic stream nonces and incarnation scope.
+
+One firmware ticket/record remains owned through final native ACK. Intermediate
+fragment credits only bound reassembly; the final ACK follows host-record AEAD,
+ordering/length checks and completed bounded disk work. A command/auto-generated
+host control cannot overtake a pending final ACK. USB open/chunk/close forwarding
+waits for this final receipt, then may issue its existing ACK/result. A stalled or
+invalid disk receiver cannot be acknowledged as successful. Native async disk work
+is retained across background-poll preemption; interrupted sealed host controls
+fail closed instead of being replayed into Noise's implicit nonce sequence.
+
+The sender initially permits one chunk and firmware grants one chunk credit; the
+maximum allowed ACK credit remains unchanged. ACK wait is 60 seconds/five exact
+ciphertext retries, result/receipt wait remains 300 seconds. BLE stream inactivity
+is 30 seconds and bridge/receiver inactivity 60 seconds. Generic matching-session
+kind-5 session errors report unavailable source/default-path/transfer failure;
+obsolete error session IDs are discarded. Progress is computed by the native
+receiver; old JSON transfer events and PSRAM chunk batches are not restored.
+
+Native close verifies manifest size, public/close chunk counts, exact written bytes
+and incremental SHA-256 before safe local saving. The encrypted receipt follows
+fsync and no-overwrite persistence, and host success still requires both
+FILE_RESULT OK and this receipt. A lost receipt can leave a saved file; no automatic
+retry or resume occurs. Limits: one active file/task, four queued/active requests,
+eight history entries, provisional 1 MiB per file. File/counter/disk limits and
+safe path/crash behavior are specified in DOWNLOADS.md. Host filenames never
+become local paths, no downloaded content executes, and BLE control keys stay
+separate from the unattended host-transfer trust boundary.

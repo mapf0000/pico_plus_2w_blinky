@@ -3,11 +3,12 @@ use crate::{Error, FRAME_LEN, KIND_STREAM, PAYLOAD_LEN, fragment};
 pub const VERSION: u8 = 1;
 pub const WINDOW: u8 = 4;
 pub const HEADER: usize = 6;
-pub const PLAINTEXT_MAX: usize = HEADER + super::filesystem::PAGE_MAX;
+pub const PLAINTEXT_MAX: usize = HEADER + super::download::RECORD_MAX;
 pub const CIPHERTEXT_MAX: usize = PLAINTEXT_MAX + 16;
 pub const FILESYSTEM: u8 = 1;
 pub const BUTTON: u8 = 2;
 pub const PROBE: u8 = 3;
+pub const DOWNLOAD: u8 = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flow {
     Start,
@@ -67,6 +68,9 @@ pub fn decode(b: &[u8]) -> Result<(u8, &[u8]), Error> {
 }
 fn validate(kind: u8, body: &[u8]) -> Result<(), Error> {
     match kind {
+        DOWNLOAD => {
+            super::download::record(body)?;
+        }
         FILESYSTEM => {
             super::filesystem::Page::decode(body)?;
         }

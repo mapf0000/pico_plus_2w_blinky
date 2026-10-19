@@ -1,6 +1,7 @@
 mod app;
 mod backend;
 mod ble;
+mod download_smoke;
 mod identity_smoke;
 mod profile;
 mod python;
@@ -23,6 +24,22 @@ static ALLOCATOR: python_heap::BudgetAllocator = python_heap::BudgetAllocator;
     about = "Native Pico companion feasibility app (mock or Bluetooth control)"
 )]
 struct Args {
+    /// Receive and verify a real host file through BLE; writes the chosen new local filename.
+    #[arg(long,requires_all=["profile","test_file","test_destination"],conflicts_with_all=["mock","self_test","identity_self_test","stream_self_test","python_self_test","python_ble_self_test"])]
+    download_self_test: bool,
+    /// Also exercise encrypted Set default / Queue default with --test-file.
+    #[arg(long, requires = "download_self_test")]
+    test_default_path: bool,
+    #[arg(long, requires = "download_self_test")]
+    test_file: Option<String>,
+    #[arg(long, requires = "download_self_test")]
+    test_destination: Option<std::path::PathBuf>,
+    /// Cancel after this many milliseconds instead of saving (disposable test source only).
+    #[arg(long, requires = "download_self_test")]
+    test_cancel_after_ms: Option<u64>,
+    /// After cancelling, restart the host session on the same BLE link and cancel again.
+    #[arg(long, requires_all = ["download_self_test", "test_cancel_after_ms"])]
+    test_restart_after_cancel: bool,
     /// Private per-device provisioning profile; required to acquire real BLE control.
     #[arg(long, conflicts_with_all = ["mock", "create_profile"])]
     profile: Option<std::path::PathBuf>,
@@ -80,6 +97,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let profile = args.profile.as_deref().map(profile::load).transpose()?;
+    if args.download_self_test {
+        return download_smoke::run(
+            profile.ok_or("--profile is required")?,
+            args.test_file.ok_or("--test-file is required")?,
+            args.test_destination
+                .ok_or("--test-destination is required")?,
+            args.test_cancel_after_ms,
+            args.test_default_path,
+            args.test_restart_after_cancel,
+        );
+    }
     if args.python_ble_self_test {
         return python_smoke::run_ble(profile.ok_or("--profile is required")?);
     }
@@ -295,3 +323,6 @@ fn ble_smoke(
         thread::sleep(Duration::from_millis(50));
     }
 }
+
+mod download_crypto;
+mod downloads;

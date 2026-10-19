@@ -3,3 +3,6 @@ name = "ble-protocol"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+
+[dependencies]
+transfer-protocol = { path = "../transfer-protocol" }

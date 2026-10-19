@@ -80,7 +80,9 @@ impl Transport for BleTransport {
     fn submit(&mut self, request: Request, _: Duration) -> Result<(), Failure> {
         if matches!(
             request.operation,
-            Operation::Cancel(_) | Operation::CancelDirectory
+            Operation::Cancel(_)
+                | Operation::CancelDirectory
+                | Operation::Download(companion_core::download::Command::Cancel)
         ) {
             self.cancel.send_replace(Some(Command {
                 generation: *self.reset.borrow(),
@@ -109,7 +111,22 @@ impl Transport for BleTransport {
     }
 }
 
+type DownloadTask =
+    tokio::task::JoinHandle<(crate::downloads::Receiver, Result<Vec<Vec<u8>>, String>)>;
 struct Radio {
+    write_task: Option<tokio::task::JoinHandle<Result<(), Failure>>>,
+    ack_task: Option<tokio::task::JoinHandle<Result<(), Failure>>>,
+    downloads_disabled: bool,
+    download_barrier: bool,
+    downloads_supported: bool,
+    downloader: Option<crate::downloads::Receiver>,
+    download_task: Option<DownloadTask>,
+    download_record: bool,
+    download_finalizing: bool,
+    download_ack: Option<(u16, u16)>,
+    download_outbox: std::collections::VecDeque<Vec<u8>>,
+    download_sending: bool,
+    download_view: companion_core::download::View,
     notifications:
         Option<Pin<Box<dyn futures_util::Stream<Item = btleplug::api::ValueNotification> + Send>>>,
     receiver: ble_protocol::Receiver,
@@ -131,6 +148,19 @@ struct Radio {
 impl Default for Radio {
     fn default() -> Self {
         Self {
+            write_task: None,
+            ack_task: None,
+            downloads_disabled: true,
+            download_barrier: false,
+            downloads_supported: false,
+            downloader: Some(crate::downloads::Receiver::new()),
+            download_task: None,
+            download_record: false,
+            download_finalizing: false,
+            download_ack: None,
+            download_outbox: std::collections::VecDeque::new(),
+            download_sending: false,
+            download_view: companion_core::download::View::default(),
             notifications: None,
             receiver: ble_protocol::Receiver::new_stream(),
             fragments: 0,
@@ -150,6 +180,12 @@ impl Default for Radio {
     }
 }
 trait RadioIo {
+    fn connection_epoch(&self) -> Option<u64> {
+        None
+    }
+    fn maintenance(&mut self) -> impl std::future::Future<Output = Result<(), Failure>> + Send {
+        async { Ok(()) }
+    }
     fn idle(
         &mut self,
         _: &mpsc::Sender<Event>,
@@ -166,6 +202,22 @@ trait RadioIo {
 }
 
 impl RadioIo for Radio {
+    fn connection_epoch(&self) -> Option<u64> {
+        Some(self.epoch)
+    }
+    async fn maintenance(&mut self) -> Result<(), Failure> {
+        if self.download_sending {
+            return Err(Failure::LinkLost);
+        }
+        // A new command may otherwise abandon a partially uploaded final ACK.
+        self.flush_ack().await?;
+        while let Some(bytes) = self.download_outbox.pop_front() {
+            self.download_sending = true;
+            self.download_command(&bytes).await?;
+            self.download_sending = false;
+        }
+        Ok(())
+    }
     async fn idle(&mut self, events: &mpsc::Sender<Event>) -> Result<(), Failure> {
         match self.next_stream(events).await {
             Ok(_) => Ok(()),
@@ -177,6 +229,21 @@ impl RadioIo for Radio {
     }
 
     async fn cleanup(&mut self) {
+        self.reset_downloads("Connection closed; downloads were not retried")
+            .await;
+        let _ = tokio::time::timeout(CLEANUP_TIMEOUT, async {
+            self.finish_ack().await?;
+            self.finish_write().await
+        })
+        .await;
+        if let Some(task) = self.write_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = self.ack_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         self.active = None;
         self.notifications = None;
         self.receiver = ble_protocol::Receiver::new_stream();
@@ -203,7 +270,41 @@ impl RadioIo for Radio {
     ) -> Result<Reply, Failure> {
         let tag = request.tag;
         self.events = Some(events.clone());
+        self.flush_ack().await?;
+        if self.download_sending {
+            return Err(Failure::LinkLost);
+        }
+        if matches!(
+            request.operation,
+            Operation::Download(companion_core::download::Command::Cancel)
+        ) {
+            self.reset_downloads("Downloads cancelled").await;
+            self.cancel_download_device().await?;
+            return Ok(Reply::DownloadAccepted);
+        }
+        if matches!(request.operation, Operation::Download(_)) {
+            self.finish_download(events).await?;
+        }
         match request.operation {
+            Operation::Download(command) => {
+                if matches!(command, companion_core::download::Command::ConnectSession) {
+                    while self.download_barrier {
+                        let _ = self.next_stream(events).await?;
+                    }
+                    self.downloads_disabled = false;
+                }
+                if !self.downloads_supported {
+                    return Err(Failure::Incompatible);
+                }
+                let mut receiver = self.downloader.take().ok_or(Failure::Busy)?;
+                self.download_record = false;
+                self.download_task = Some(tokio::spawn(async move {
+                    let result = receiver.command(command).await;
+                    (receiver, result)
+                }));
+                self.finish_download(events).await?;
+                Ok(Reply::DownloadAccepted)
+            }
             Operation::Scan => {
                 self.devices.clear();
                 if self.adapter.is_none() {
@@ -286,6 +387,7 @@ impl RadioIo for Radio {
                 let info = ble_protocol::Info::decode(&bytes).map_err(protocol_failure)?;
                 self.epoch = tag.epoch;
                 self.streams = info.streams;
+                self.downloads_supported = info.downloads;
                 if info.streams {
                     let events_char = peripheral
                         .characteristics()
@@ -307,6 +409,7 @@ impl RadioIo for Radio {
                     read_status(&peripheral).await?
                 };
                 Ok(Reply::Connected(Capabilities {
+                    downloads_supported: info.downloads,
                     read_only: false,
                     script_version: script_protocol::VERSION,
                     upload_timeout: Duration::from_secs(60),
@@ -367,6 +470,10 @@ impl RadioIo for Radio {
                 )?))
             }
             Operation::Release => {
+                self.finish_download(events).await?;
+                self.maintenance().await?;
+                self.reset_downloads("Control released; downloads were not retried")
+                    .await;
                 let code = self.control(ble_protocol::RELEASE).await?;
                 if code == ble_protocol::Code::Released {
                     Ok(Reply::Released)
@@ -435,6 +542,13 @@ impl RadioIo for Radio {
                     .await
             }
             Operation::SetUsbEnabled(enabled) => {
+                if !enabled && self.downloads_supported {
+                    self.finish_download(events).await?;
+                    self.maintenance().await?;
+                    self.reset_downloads("USB stopped; downloads were not retried")
+                        .await;
+                    self.cancel_download_device().await?;
+                }
                 let code = self
                     .control(if enabled {
                         ble_protocol::USB_ON
@@ -503,6 +617,142 @@ impl RadioIo for Radio {
 }
 
 impl Radio {
+    async fn finish_ack(&mut self) -> Result<(), Failure> {
+        let Some(task) = self.ack_task.as_mut() else {
+            return Ok(());
+        };
+        let result = task.await;
+        self.ack_task = None;
+        result.map_err(|_| Failure::LinkLost)?
+    }
+    async fn finish_write(&mut self) -> Result<(), Failure> {
+        let Some(task) = self.write_task.as_mut() else {
+            return Ok(());
+        };
+        let result = task.await;
+        self.write_task = None;
+        result.map_err(|_| Failure::LinkLost)?
+    }
+    async fn reset_downloads(&mut self, message: &str) {
+        let interrupted = self.download_view.active()
+            || self.download_view.session == companion_core::download::Session::Negotiating;
+        let failed = self.download_view.session == companion_core::download::Session::Failed;
+        if let Some(task) = self.download_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(mut receiver) = self.downloader.take() {
+            receiver.fail(message);
+            self.download_view = receiver.view;
+        } else {
+            self.download_view =
+                crate::downloads::Receiver::failed_view(self.download_view.clone(), message);
+        }
+        if !interrupted && !failed {
+            self.download_view.session = companion_core::download::Session::Idle;
+            self.download_view.error = None;
+        }
+        if message == "Downloads cancelled" {
+            if self.download_finalizing {
+                self.download_view.error=Some("Cancelled during final saving; a verified file may exist at the chosen filename".into());
+            }
+            for item in &mut self.download_view.items {
+                if item.state == companion_core::download::State::Failed
+                    && item.error.as_deref() == Some(message)
+                {
+                    item.state = companion_core::download::State::Aborted;
+                }
+            }
+        }
+        self.downloader = Some(crate::downloads::Receiver::new());
+        self.downloader.as_mut().unwrap().view = self.download_view.clone();
+        if let Some(ack) = self.download_ack.take() {
+            self.ack = Some(ack);
+        }
+        self.downloads_disabled = true;
+        self.download_finalizing = false;
+        self.download_barrier = false;
+        self.download_outbox.clear();
+        self.download_sending = false;
+        if let Some(events) = &self.events {
+            let _ = events.try_send(Event::Downloads {
+                epoch: self.epoch,
+                view: self.download_view.clone(),
+            });
+        }
+    }
+    async fn finish_download(&mut self, events: &mpsc::Sender<Event>) -> Result<(), Failure> {
+        let Some(task) = self.download_task.as_mut() else {
+            return Ok(());
+        };
+        let joined = task.await;
+        self.download_task = None;
+        let (mut receiver, result) = joined.map_err(|_| Failure::InvalidData)?;
+        let fatal = self.download_record && result.is_err();
+        match result {
+            Ok(out) => {
+                if self.download_outbox.len() + out.len() > 4 {
+                    return Err(Failure::QueueFull);
+                }
+                self.download_outbox.extend(out);
+            }
+            Err(error) => {
+                if fatal {
+                    receiver.fail(&error);
+                } else {
+                    receiver.view.error = Some(error);
+                }
+            }
+        }
+        self.download_view = receiver.view.clone();
+        self.download_finalizing = false;
+        self.downloader = Some(receiver);
+        events
+            .try_send(Event::Downloads {
+                epoch: self.epoch,
+                view: self.download_view.clone(),
+            })
+            .map_err(|_| Failure::QueueFull)?;
+        if fatal {
+            return Err(Failure::InvalidData);
+        }
+        if let Some(ack) = self.download_ack.take() {
+            self.ack = Some(ack);
+            self.flush_ack().await?;
+        }
+        Ok(())
+    }
+    async fn cancel_download_device(&mut self) -> Result<(), Failure> {
+        self.download_barrier = true;
+        let token = self.next_token()?;
+        self.upload(ble_protocol::KIND_DOWNLOAD, token, &[1, 1])
+            .await?;
+        let plain = self.protected_response().await?;
+        if plain.len() != ble_protocol::SNAPSHOT_LEN {
+            return Err(Failure::InvalidData);
+        }
+        let result = ble_protocol::ResultValue::decode(&plain[..20]).map_err(protocol_failure)?;
+        if result.token != token || result.code != ble_protocol::Code::DownloadAccepted {
+            return Err(Failure::Rejected);
+        }
+        Ok(())
+    }
+    async fn download_command(&mut self, bytes: &[u8]) -> Result<(), Failure> {
+        let mut body = vec![1, 0];
+        body.extend_from_slice(bytes);
+        let token = self.next_token()?;
+        self.upload(ble_protocol::KIND_DOWNLOAD, token, &body)
+            .await?;
+        let plain = self.protected_response().await?;
+        if plain.len() != ble_protocol::SNAPSHOT_LEN {
+            return Err(Failure::InvalidData);
+        }
+        let result = ble_protocol::ResultValue::decode(&plain[..20]).map_err(protocol_failure)?;
+        if result.token != token || result.code != ble_protocol::Code::DownloadAccepted {
+            return Err(code_failure(result.code));
+        }
+        Ok(())
+    }
     async fn flow(&mut self, flow: ble_protocol::stream::Flow) -> Result<(), Failure> {
         let (body, n) = flow.encode();
         let token = self.next_token()?;
@@ -510,10 +760,50 @@ impl Radio {
             .await
     }
     async fn flush_ack(&mut self) -> Result<(), Failure> {
-        if let Some((sequence, offset)) = self.ack {
-            self.flow(ble_protocol::stream::Flow::Ack { sequence, offset })
-                .await?;
-            self.ack = None;
+        // An ACK is only two ATT writes. Retain the entire sealed ACK so a
+        // refresh can neither abandon it nor reseal it with a newer token.
+        self.finish_ack().await?;
+        self.finish_write().await?;
+        if let Some((sequence, offset)) = self.ack.take() {
+            let peripheral = self.connected.as_ref().ok_or(Failure::LinkLost)?.clone();
+            let characteristic = peripheral
+                .characteristics()
+                .into_iter()
+                .find(|c| {
+                    c.service_uuid == SERVICE
+                        && c.uuid == COMMAND
+                        && c.properties.contains(CharPropFlags::WRITE)
+                })
+                .ok_or(Failure::Incompatible)?;
+            let (body, n) = ble_protocol::stream::Flow::Ack { sequence, offset }.encode();
+            let token = self.next_token()?;
+            let mut plaintext = [0; 8];
+            plaintext[0] = ble_protocol::KIND_FLOW;
+            plaintext[1..n + 1].copy_from_slice(&body[..n]);
+            let mut encrypted = [0; 24];
+            let length = self
+                .crypto
+                .as_mut()
+                .ok_or(Failure::Authentication)?
+                .seal(token, &plaintext[..n + 1], &mut encrypted)
+                .map_err(|_| Failure::Authentication)?;
+            self.ack_task = Some(tokio::spawn(async move {
+                for offset in (0..length).step_by(ble_protocol::PAYLOAD_LEN) {
+                    let (frame, n) = ble_protocol::fragment(
+                        ble_protocol::KIND_RECORD,
+                        token,
+                        &encrypted[..length],
+                        offset,
+                    )
+                    .map_err(protocol_failure)?;
+                    peripheral
+                        .write(&characteristic, &frame[..n], WriteType::WithResponse)
+                        .await
+                        .map_err(failure)?;
+                }
+                Ok(())
+            }));
+            self.finish_ack().await?;
         }
         Ok(())
     }
@@ -543,11 +833,18 @@ impl Radio {
         &mut self,
         events: &mpsc::Sender<Event>,
     ) -> Result<Option<(u8, Vec<u8>)>, Failure> {
+        self.finish_download(events).await?;
+        if self.downloader.as_ref().is_some_and(|r| r.expired()) {
+            return Err(Failure::Timeout);
+        }
         self.flush_ack().await?;
         let Some(notifications) = self.notifications.as_mut() else {
             return std::future::pending().await;
         };
-        let packet = notifications.next().await.ok_or(Failure::LinkLost)?;
+        let packet = tokio::select! {
+            packet=notifications.next()=>packet.ok_or(Failure::LinkLost)?,
+            _=tokio::time::sleep(Duration::from_secs(1))=>return Ok(None),
+        };
         self.consume_notification(packet, events).await
     }
     async fn next_record(
@@ -555,6 +852,7 @@ impl Radio {
         events: &mpsc::Sender<Event>,
     ) -> Result<(u8, Vec<u8>), Failure> {
         loop {
+            self.maintenance().await?;
             if let Some(record) = self.next_stream(events).await? {
                 return Ok(record);
             }
@@ -583,6 +881,22 @@ impl Radio {
                 .map_err(|_| Failure::Authentication)?;
             let (kind, body) =
                 ble_protocol::stream::decode(&plain[..n]).map_err(protocol_failure)?;
+            if kind == ble_protocol::stream::DOWNLOAD && body == [ble_protocol::download::CANCELLED]
+            {
+                self.download_barrier = false;
+            } else if kind == ble_protocol::stream::DOWNLOAD && !self.downloads_disabled {
+                let mut receiver = self.downloader.take().ok_or(Failure::Busy)?;
+                let record = body.to_vec();
+                self.download_record = true;
+                self.download_finalizing = body.first() == Some(&ble_protocol::download::CLOSE);
+                self.download_ack = Some((sequence, offset as u16));
+                self.fragments = 0;
+                self.download_task = Some(tokio::spawn(async move {
+                    let result = receiver.record(&record).await;
+                    (receiver, result)
+                }));
+                return Ok(None);
+            }
             if kind == ble_protocol::stream::BUTTON {
                 events
                     .try_send(Event::Button {
@@ -607,8 +921,13 @@ impl Radio {
         let Some(events) = self.events.clone() else {
             return Ok(());
         };
+        self.finish_download(&events).await?;
+        self.maintenance().await?;
         self.flush_ack().await?;
         for _ in 0..8 {
+            if self.download_task.is_some() {
+                break;
+            }
             let packet = self
                 .notifications
                 .as_mut()
@@ -694,7 +1013,13 @@ impl Radio {
         token: u16,
         bytes: &[u8],
     ) -> Result<(), Failure> {
-        let peripheral = self.connected.as_ref().ok_or(Failure::LinkLost)?;
+        // Dropping a platform write future does not retract its ATT request.
+        // Retain exactly one write through preemption, and finish it before a
+        // newer token can enter the platform queue. Cancel still abandons the
+        // remaining fragments of the old message after this bounded ATT write.
+        self.finish_ack().await?;
+        self.finish_write().await?;
+        let peripheral = self.connected.as_ref().ok_or(Failure::LinkLost)?.clone();
         let characteristic = peripheral
             .characteristics()
             .into_iter()
@@ -707,10 +1032,15 @@ impl Radio {
         for offset in (0..bytes.len()).step_by(ble_protocol::PAYLOAD_LEN) {
             let (frame, length) =
                 ble_protocol::fragment(kind, token, bytes, offset).map_err(protocol_failure)?;
-            peripheral
-                .write(&characteristic, &frame[..length], WriteType::WithResponse)
-                .await
-                .map_err(failure)?;
+            let peripheral = peripheral.clone();
+            let characteristic = characteristic.clone();
+            self.write_task = Some(tokio::spawn(async move {
+                peripheral
+                    .write(&characteristic, &frame[..length], WriteType::WithResponse)
+                    .await
+                    .map_err(failure)
+            }));
+            self.finish_write().await?;
         }
         Ok(())
     }
@@ -878,7 +1208,20 @@ async fn run(
 ) {
     let mut urgent = None;
     let mut cancelled_tag = None;
+    let mut cancelled_download_before: Option<companion_core::Tag> = None;
     loop {
+        let maintained = tokio::select! {biased;
+            _=&mut stop=>break,
+            changed=reset.changed()=>{if changed.is_err(){break;}reset.borrow_and_update();radio.cleanup().await;continue;},
+            changed=cancel.changed()=>{if changed.is_err(){break;}urgent=cancel.borrow_and_update().clone();continue;},
+            result=tokio::time::timeout(Duration::from_secs(30),radio.maintenance())=>result.unwrap_or(Err(Failure::Timeout)),
+        };
+        if maintained.is_err() {
+            if let Some(epoch) = radio.connection_epoch() {
+                let _ = events.try_send(Event::Lost { epoch });
+            }
+            radio.cleanup().await;
+        }
         let command = if let Some(command) = urgent.take() {
             command
         } else {
@@ -905,7 +1248,20 @@ async fn run(
         let tag = command.request.tag;
         if matches!(
             command.request.operation,
-            Operation::Cancel(_) | Operation::CancelDirectory
+            Operation::Download(companion_core::download::Command::Cancel)
+        ) {
+            cancelled_download_before = Some(tag);
+        } else if matches!(command.request.operation, Operation::Download(_))
+            && cancelled_download_before
+                .is_some_and(|c| c.epoch == tag.epoch && c.request > tag.request)
+        {
+            continue;
+        }
+        if matches!(
+            command.request.operation,
+            Operation::Cancel(_)
+                | Operation::CancelDirectory
+                | Operation::Download(companion_core::download::Command::Cancel)
         ) {
             cancelled_tag = Some(tag);
         } else if matches!(
@@ -921,6 +1277,8 @@ async fn run(
             Operation::Overview => Duration::from_secs(8),
             Operation::Run(_) => Duration::from_secs(300),
             Operation::ListDirectory { .. } | Operation::StreamProbe => Duration::from_secs(30),
+            Operation::Download(companion_core::download::Command::Cancel) => IO_TIMEOUT,
+            Operation::Download(_) => companion_core::download::COMMAND_TIMEOUT,
             _ => IO_TIMEOUT,
         };
         let result = tokio::select! {
@@ -969,6 +1327,148 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[tokio::test]
+    async fn preempted_att_write_finishes_before_a_new_write_can_start() {
+        let mut radio = Radio::default();
+        let (finished, mut completion) = mpsc::channel(1);
+        radio.write_task = Some(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            finished.send(()).await.unwrap();
+            Ok(())
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), radio.finish_write())
+                .await
+                .is_err()
+        );
+        assert!(radio.write_task.is_some());
+        assert!(completion.try_recv().is_err());
+        radio.finish_write().await.unwrap();
+        assert_eq!(completion.try_recv(), Ok(()));
+        assert!(radio.write_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn preempted_ack_keeps_both_fragments_under_one_owner() {
+        let mut radio = Radio::default();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let worker_writes = writes.clone();
+        radio.ack_task = Some(tokio::spawn(async move {
+            worker_writes.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            worker_writes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), radio.finish_ack())
+                .await
+                .is_err()
+        );
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        assert!(radio.ack_task.is_some());
+        radio.finish_ack().await.unwrap();
+        assert_eq!(writes.load(Ordering::SeqCst), 2);
+        assert!(radio.ack_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_radio_wait_retains_the_disk_worker_and_its_result() {
+        let mut radio = Radio::default();
+        let (events, mut received) = mpsc::channel(4);
+        radio.download_task = Some(tokio::spawn(async {
+            let mut receiver = crate::downloads::Receiver::new();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let result = receiver
+                .command(companion_core::download::Command::ConnectSession)
+                .await;
+            (receiver, result)
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), radio.finish_download(&events))
+                .await
+                .is_err()
+        );
+        assert!(radio.download_task.is_some());
+        radio.finish_download(&events).await.unwrap();
+        assert!(radio.download_task.is_none());
+        assert!(radio.downloader.is_some());
+        assert_eq!(radio.download_outbox.len(), 1);
+        assert!(
+            matches!(received.try_recv().unwrap(),Event::Downloads{view,..} if view.session==companion_core::download::Session::Negotiating)
+        );
+    }
+
+    #[tokio::test]
+    async fn urgent_download_cancel_prevents_older_unstarted_commands() {
+        struct DownloadRadio(Arc<AtomicUsize>);
+        impl RadioIo for DownloadRadio {
+            async fn cleanup(&mut self) {}
+            async fn request(
+                &mut self,
+                request: Request,
+                _: &mpsc::Sender<Event>,
+            ) -> Result<Reply, Failure> {
+                match request.operation {
+                    Operation::Scan => std::future::pending().await,
+                    Operation::Download(companion_core::download::Command::Cancel) => {
+                        Ok(Reply::DownloadAccepted)
+                    }
+                    Operation::Download(_) => {
+                        self.0.fetch_add(1, Ordering::Relaxed);
+                        Ok(Reply::DownloadAccepted)
+                    }
+                    _ => Err(Failure::NotReady),
+                }
+            }
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut t = BleTransport::spawn(DownloadRadio(count.clone()));
+        t.submit(
+            Request {
+                tag: Tag {
+                    epoch: 1,
+                    request: 1,
+                },
+                operation: Operation::Scan,
+            },
+            Duration::ZERO,
+        )
+        .unwrap();
+        tokio::task::yield_now().await;
+        t.submit(
+            Request {
+                tag: Tag {
+                    epoch: 1,
+                    request: 2,
+                },
+                operation: Operation::Download(companion_core::download::Command::ConnectSession),
+            },
+            Duration::ZERO,
+        )
+        .unwrap();
+        t.submit(
+            Request {
+                tag: Tag {
+                    epoch: 1,
+                    request: 3,
+                },
+                operation: Operation::Download(companion_core::download::Command::Cancel),
+            },
+            Duration::ZERO,
+        )
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+        assert!(matches!(
+            t.poll(Duration::ZERO),
+            Some(Event::Reply {
+                reply: Reply::DownloadAccepted,
+                ..
+            })
+        ));
+        t.shutdown().await;
+    }
 
     struct StalledRadio(Arc<AtomicUsize>);
     impl RadioIo for StalledRadio {

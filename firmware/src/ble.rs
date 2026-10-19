@@ -170,6 +170,7 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
             let mut stream_sequence = 0u16;
             let mut stream = ble_protocol::stream::Sender::new();
             let mut stream_at = Instant::now();
+            let mut download_record = false;
             let mut probe = false;
             let mut authenticated = false;
             let mut acquired = false;
@@ -186,7 +187,7 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                 // Send at most one notification between GATT events. Credits bound the
                 // controller queue; a stalled receiver cannot block Cancel or local Stop.
                 if stream.enabled() && acquired {
-                    if !stream.idle() && stream_at.elapsed() > Duration::from_secs(5) {
+                    if !stream.idle() && stream_at.elapsed() > Duration::from_secs(30) {
                         log::warn!("ble: stream ACK inactivity expiry");
                         break; // lost ACK: discard this incarnation, never replay its page
                     }
@@ -212,7 +213,11 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                             )
                             .ok()
                         } else {
-                            crate::ble_relay::take(&mut record)
+                            {
+                                let download = crate::ble_download::take(&mut record);
+                                download_record = download.is_some();
+                                download.or_else(|| crate::ble_relay::take(&mut record))
+                            }
                         };
                         if let Some(length) = length {
                             let Some(next) = stream_sequence.checked_add(1) else {
@@ -267,7 +272,10 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                     }
                 };
                 match event {
-                    GattConnectionEvent::Disconnected { .. } => break,
+                    GattConnectionEvent::Disconnected { reason } => {
+                        log::info!("ble: peer disconnected: {:?}", reason);
+                        break;
+                    }
                     GattConnectionEvent::Gatt { event } => {
                         stream_at = Instant::now(); // command uploads/finite reads may postpone stream pumping
                         let reply = match event {
@@ -290,6 +298,7 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                             {
                                 let is_auth = write.handle() == server.pico.auth.handle;
                                 if (is_auth && crypto.is_some()) || (!is_auth && crypto.is_none()) {
+                                    log::warn!("ble: write on wrong authentication lane");
                                     break;
                                 }
                                 if upload_at.elapsed() > Duration::from_secs(5) {
@@ -298,7 +307,10 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                                 upload_at = Instant::now();
                                 let message = match receiver.push(write.data()) {
                                     Ok(value) => value,
-                                    Err(_) => break,
+                                    Err(_) => {
+                                        log::warn!("ble: invalid upload framing");
+                                        break;
+                                    }
                                 };
                                 if let Some(message) = message {
                                     if is_auth {
@@ -314,6 +326,7 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                                             ble_session::Handshake::new(false, profile, ephemeral);
                                         ble_session::erase(&mut ephemeral);
                                         if handshake.read(message.payload).is_err() {
+                                            log::warn!("ble: handshake rejected");
                                             break;
                                         }
                                         let mut answer = [0; ble_session::HANDSHAKE_LEN];
@@ -346,6 +359,7 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                                             message.payload,
                                             &mut plaintext,
                                         ) else {
+                                            log::warn!("ble: protected record rejected");
                                             break;
                                         };
                                         let Some((&kind, body)) = plaintext[..length].split_first()
@@ -359,11 +373,21 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                                             let valid = match Flow::decode(body) {
                                                 Ok(Flow::Start) => {
                                                     crate::ble_relay::activate(owner.0);
+                                                    crate::ble_download::activate(owner.0);
                                                     stream.start().is_ok()
                                                 }
                                                 Ok(Flow::Ack { sequence, offset }) => {
                                                     stream_at = Instant::now();
-                                                    stream.ack(sequence, offset).is_ok()
+                                                    {
+                                                        let valid =
+                                                            stream.ack(sequence, offset).is_ok();
+                                                        if valid && stream.idle() && download_record
+                                                        {
+                                                            crate::ble_download::ack();
+                                                            download_record = false;
+                                                        }
+                                                        valid
+                                                    }
                                                 }
                                                 Ok(Flow::Probe) if stream.idle() && !probe => {
                                                     probe = true;
@@ -413,6 +437,13 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                                                 }
                                                 _ => Code::Rejected,
                                             });
+                                        }
+                                        if kind == ble_protocol::KIND_DOWNLOAD
+                                            && acquired
+                                            && stream.enabled()
+                                        {
+                                            filesystem_code =
+                                                Some(crate::ble_download::command(owner.0, body));
                                         }
                                         let wants_overview = kind == ble_protocol::KIND_CONTROL
                                             && body == [ble_protocol::READ_OVERVIEW]
@@ -466,6 +497,7 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
                                             stream.reset();
                                             probe = false;
                                             crate::ble_relay::reset();
+                                            crate::ble_download::reset();
                                         }
                                         ble_session::erase(&mut plaintext);
                                         let Some(next) = response_sequence.checked_add(1) else {
@@ -548,6 +580,7 @@ pub async fn task(driver: cyw43::bluetooth::BtDriver<'static>, address: [u8; 6])
             }
             stream.reset();
             crate::ble_relay::reset();
+            crate::ble_download::reset();
             ble_session::erase(&mut plaintext);
             connection.raw().disconnect();
             drop(crypto);

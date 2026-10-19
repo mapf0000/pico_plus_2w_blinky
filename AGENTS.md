@@ -8,7 +8,7 @@ This Rust workspace produces three cooperating pieces:
 
 - RP2350B firmware for the Pimoroni Pico Plus 2 W.
 - A native Rust/egui companion controlling the board over Bluetooth.
-- A host-side serial agent that handles commands, filesystem browsing, credentials, and USB bulk-transfer protocol handling (native receiver deferred).
+- A host-side serial agent that handles commands, filesystem browsing, credentials, and encrypted USB file-transfer sending.
 
 The primary hardware has 16 MiB flash, 8 MiB PSRAM and 520 KiB SRAM. Firmware
 uses `no_std` and Embassy. WLAN, HTTP/WebSocket, frontend assets and the Python
@@ -25,7 +25,7 @@ The companion lowers bounded text to KBD1 using shared keyboard machinery.
 Hardware presets share the same non-preempting executor, scoped cancellation and
 physical Y Stop. BLE v3 authentication uses a provisioned per-device Noise PSK,
 without physical confirmation or OS pairing. No
-persistent bonds or native file-transfer receiver exists yet. Native Python runs
+persistent bonds exist. Encrypted native downloads use a bounded disk receiver. Native Python runs
 in a bounded lazy child and yields effects through the same keyboard service.
 
 Detailed references:
@@ -40,7 +40,7 @@ Detailed references:
 - Treat all firmware capacities as part of the design. Check `heapless` capacities, channel depths, BLE packet/fragment limits, TLV limits, flash layout, stack usage, and PSRAM/SRAM placement when increasing payloads or concurrency.
 - Keep target-specific flags isolated. The root `.cargo/config.toml` scopes linker flags to `thumbv8m.main-none-eabihf`; the firmware config selects the Cortex-M target. Do not add a root default target.
 - Preserve protocol compatibility across firmware, companion, and host agent. Protocol changes are never complete when only one endpoint compiles.
-- Preserve backpressure in the file-transfer path. Firmware must never acknowledge chunks without a native receiver; the current unavailable relay rejects delivery.
+- Preserve backpressure in the file-transfer path. Firmware must never acknowledge chunks until native final-record credit; the companion must authenticate and finish bounded disk work before granting that credit.
 - Do not hand-edit generated build output. Change its source or generator instead.
 - Do not flash hardware as part of routine validation unless the task explicitly calls for device testing and hardware is available.
 - Never log passwords, database credentials, transferred file contents, or other secrets. Credential environment variables exist for tests/headless use only.
@@ -84,6 +84,8 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 - `src/ble.rs`: bounded native BLE worker, discovery/status, authenticated control,
   keyboard upload/cancellation, credit-controlled encrypted notifications and cleanup.
 - `src/stream_smoke.rs`: read-only maximum-record and filesystem board acceptance.
+- `src/downloads.rs`, `src/download_crypto.rs`: one authenticated stream-to-disk receiver, safe saving and host session independent of the BLE control key.
+- `src/download_smoke.rs`: explicit headless board reception/cancellation check.
 - `src/python.rs`: lazy child supervisor, deadlines, local timers/events and scoped keyboard effects.
 - `src/python_worker.rs`, `src/python_heap.rs`: restricted helper entry and 128-MiB Rust allocation budget.
 - `crates/python-runtime`: recovered restricted VM/prelude, strict IPC and generator tests.
@@ -95,8 +97,8 @@ alias and `--mock` selects the deterministic mock. The default firmware supports
 BLE v3 provisioned-secret authentication, acquired control, USB on/off, verified
 USB identity saving and bounded
 keyboard effects, bounded host filesystem browsing and released-button events.
-File reception remains planned
-in `NATIVE_COMPANION_BLE_PLAN.md`. Native builds must remain independent of firmware
+Encrypted file reception is implemented; limits and acceptance are tracked
+in `docs/DOWNLOADS.md` and `NATIVE_COMPANION_BLE_PLAN.md`. Native builds must remain independent of firmware
 asset generation and browser tooling. Require an authenticated session before control. Keep device
 work out of UI callbacks, bound queues/diagnostics, and scope commands/results to
 a connection incarnation.
@@ -108,6 +110,7 @@ a connection incarnation.
 - `script-protocol`: versioned correlated companion-to-firmware effect envelopes.
 - `ble-protocol`: `no_std` v3 information/status/snapshot/overview-v1/identity-v1 codecs, UUIDs and MTU-23
   handshake/encrypted-record fragmentation.
+- `transfer-protocol`, `transfer-crypto`: preserved transfer-v2 envelopes, per-file AEAD and independent host Noise session.
 - `bytecode-constants`: cross-target bytecode limits.
 - `ble-session`: allocation-free Noise PSK sessions and versioned key provisioning.
 - `build-support`: typed keyboard-preset generation, linker setup, and internal FAT agent-image generation.

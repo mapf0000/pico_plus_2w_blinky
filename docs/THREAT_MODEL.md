@@ -58,8 +58,7 @@ agent responses from claiming a replacement connection. Metadata is not evidence
 of trust. The event lane uses disjoint nonces/AD and independent replay counters;
 partial notification headers are not authenticated until the record completes.
 Four credits and fixed queues bound a stalled or corrupt stream. Final directory
-ACK means validated bounded storage, not a file receipt. No shell, credentials
-or file contents are routed over BLE; generic bulk delivery still fails closed.
+ACK means validated bounded storage, not a file receipt. Shell execution and credential controls are not routed as generic BLE controls; encrypted file records use the separate bounded receiver below.
 Disconnect cancels this connection's effects, and stale IDs cannot update a new
 connection. Local jobs and physical Y Stop remain independent.
 
@@ -90,12 +89,33 @@ cooldown. These bounds do not prevent repeated connection attempts or radio
 jamming; strong denial-of-service resistance is outside the prototype. Crypto
 unit tests/compilation do not establish hardware/platform acceptance.
 
+Native downloads require advertised support, acquired BLE control and a separate
+host transfer-v2 session. The provisioned BLE key does not authenticate the source
+computer or file: unattended bootstrap protects against passive observers, while
+malicious Pico firmware/USB relay can replace bootstrap material. File keys are
+never delivered to firmware. AEAD protects manifest/chunks/close; size/count and
+incremental SHA-256 must verify before a local save and encrypted receipt. Source
+errors are bounded generic session envelopes; obsolete session IDs cannot fail a
+fresh receiver. No file contents, path controls, bootstrap secrets or keys enter
+application diagnostics or the Python child.
+
+The local destination is explicitly chosen and independent of host filenames.
+No-overwrite saving rejects existing files/symlinks and never opens or
+executes content. Anonymous plaintext staging is OS-cleaned after last handle
+close; verified final save uses a private named temporary file. An abrupt exit in
+that final copy/persist interval may leave a verified temporary file. Saved files
+are plaintext at rest; OS/user accounts and filesystem durability remain trusted.
+One owned disk task/relay record and fixed queue/file limits bound memory/storage
+work. Final BLE credit follows accepted disk work, USB credit follows that receipt,
+and host success requires both relay completion and encrypted receiver receipt.
+Disk failure, malformed records, deadline/counter exhaustion and connection loss
+fail closed without output replay. Cancellation can race final persistence, and a lost final receipt can leave a successfully
+saved file; retry must choose a new filename explicitly. See DOWNLOADS.md.
+
 The WLAN/AP/browser frontend and Python Worker have been removed. The following
 sections retain the previous USB bulk-crypto design as a historical reference.
-Browser/Wi-Fi authorization descriptions are not current functionality. The
-host-agent bulk protocol is preserved, but firmware refuses delivery without a
-receiver and does not acknowledge file chunks. Bluetooth bulk transfer requires
-a separate authenticated receiver and backpressure design.
+Browser/Wi-Fi authorization descriptions are not current functionality. The current native receiver preserves the host-agent transfer-v2 protocol and
+only grants final credit after authentication and bounded disk work.
 
 # Threat model
 

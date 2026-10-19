@@ -164,6 +164,7 @@ pub struct Status {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Capabilities {
+    pub downloads_supported: bool,
     pub script_version: u8,
     pub read_only: bool,
     pub firmware: String,
@@ -282,6 +283,7 @@ pub struct Diagnostic {
 
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
+    pub downloads: download::View,
     pub revision: u64,
     pub epoch: u64,
     pub connection: Connection,
@@ -360,6 +362,7 @@ impl Snapshot {
 
 #[derive(Clone, Debug)]
 pub enum Action {
+    Download(download::Command),
     ClearDiagnostics,
     Browse {
         path: String,
@@ -397,6 +400,7 @@ pub struct Tag {
 
 #[derive(Clone, Debug)]
 pub enum Operation {
+    Download(download::Command),
     ListDirectory {
         path: String,
         cursor: u32,
@@ -425,6 +429,7 @@ pub struct Request {
 
 #[derive(Clone, Debug)]
 pub enum Reply {
+    DownloadAccepted,
     Directory(Vec<u8>),
     DirectoryCancelled,
     StreamMeasured {
@@ -453,6 +458,7 @@ pub enum Reply {
 
 #[derive(Clone, Debug)]
 pub enum Event {
+    Downloads { epoch: u64, view: download::View },
     Button { epoch: u64, button: u8 },
     Reply { tag: Tag, reply: Reply },
     Lost { epoch: u64 },
@@ -465,3 +471,5 @@ pub trait Transport {
     fn poll(&mut self, now: Duration) -> Option<Event>;
     fn close(&mut self);
 }
+
+pub mod download;

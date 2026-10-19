@@ -182,3 +182,6 @@ mod log_buffer;
 mod psram_pool;
 mod usb;
 // mod usb_ctrl; // disabled: control CDC removed to keep only keyboard + logging
+
+mod ble_download;
+pub mod ble_download_core;

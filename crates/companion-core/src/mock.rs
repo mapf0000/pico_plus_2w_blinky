@@ -217,6 +217,7 @@ impl Transport for MockTransport {
                     tag,
                     now,
                     Reply::Connected(Capabilities {
+                        downloads_supported: false,
                         upload_timeout: Duration::ZERO,
                         read_only: false,
                         script_version: if self.scenario == Scenario::Incompatible {

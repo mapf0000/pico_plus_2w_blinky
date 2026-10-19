@@ -7,6 +7,7 @@ use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
+    Download,
     Scan,
     Connect,
     Acquire,
@@ -112,6 +113,27 @@ impl<T: Transport> Client<T> {
                     self.reject(Failure::InvalidData);
                 }
             }
+            Action::Download(crate::download::Command::Cancel) => {
+                if !self.snapshot.control_acquired
+                    || self.snapshot.job.active()
+                    || self
+                        .pending
+                        .as_ref()
+                        .is_some_and(|p| !p.kind.background() && p.kind != Kind::Download)
+                {
+                    self.reject(Failure::Busy);
+                    return;
+                }
+                self.pending = None;
+                self.snapshot.pending = false;
+                self.queued = None;
+                self.issue(
+                    Operation::Download(crate::download::Command::Cancel),
+                    Kind::Download,
+                    now,
+                    crate::download::COMMAND_TIMEOUT,
+                );
+            }
             Action::CancelDirectory => self.cancel_directory(now),
             action @ Action::Browse { .. }
                 if self
@@ -136,6 +158,29 @@ impl<T: Transport> Client<T> {
                 self.queue_behind_refresh(action)
             }
             _ if self.pending.is_some() => self.reject(Failure::QueueFull),
+            Action::Download(command) => {
+                if !command.valid() {
+                    self.reject(Failure::InvalidData);
+                    return;
+                }
+                if self.snapshot.job.active()
+                    || !self.snapshot.control_acquired
+                    || !self
+                        .snapshot
+                        .capabilities
+                        .as_ref()
+                        .is_some_and(|c| c.downloads_supported && c.status.host_agent_present)
+                {
+                    self.reject(Failure::NotReady);
+                    return;
+                }
+                self.issue(
+                    Operation::Download(command),
+                    Kind::Download,
+                    now,
+                    crate::download::COMMAND_TIMEOUT,
+                );
+            }
             Action::Scan => {
                 self.disconnect(None);
                 self.snapshot.devices.clear();
@@ -378,6 +423,7 @@ impl<T: Transport> Client<T> {
         // Exactly one intent, bounded before retention. Revalidate device state
         // when the read finishes; its result may have changed USB availability.
         match &mut action {
+            Action::Download(command) if command.valid() => {}
             Action::Browse { path, .. } if crate::filesystem::valid_path(path) => {}
             Action::Acquire
             | Action::Release
@@ -607,6 +653,16 @@ impl<T: Transport> Client<T> {
     fn receive(&mut self, event: Event, now: Duration) {
         self.now = now;
         let (tag, reply) = match event {
+            Event::Downloads { epoch, view } => {
+                if epoch == self.epoch
+                    && self.snapshot.connection == Connection::Connected
+                    && self.snapshot.control_acquired
+                {
+                    self.snapshot.downloads = view;
+                    self.changed();
+                }
+                return;
+            }
             Event::Button { epoch, button } => {
                 if epoch == self.epoch && self.snapshot.control_acquired && button < 4 {
                     if self.snapshot.buttons.len() == 32 {
@@ -643,6 +699,7 @@ impl<T: Transport> Client<T> {
         let kind = pending.kind;
         let deadline = pending.deadline;
         self.context = match kind {
+            Kind::Download => DiagnosticContext::Status,
             Kind::Scan => DiagnosticContext::Discovery,
             Kind::Connect => DiagnosticContext::Connection,
             Kind::Acquire | Kind::Release => DiagnosticContext::Control,
@@ -657,6 +714,7 @@ impl<T: Transport> Client<T> {
             return;
         }
         match (kind, reply) {
+            (Kind::Download, Reply::DownloadAccepted) => {}
             (Kind::Filesystem { cursor, hidden }, Reply::Directory(bytes)) => {
                 let path = self.snapshot.filesystem.directory.clone();
                 if let Err(error) =
@@ -846,6 +904,24 @@ impl<T: Transport> Client<T> {
         self.snapshot.last_status_update = None;
         self.snapshot.last_overview_update = None;
         self.snapshot.identity_update = IdentityUpdate::Unknown;
+        let downloading = self.snapshot.downloads.active();
+        for item in &mut self.snapshot.downloads.items {
+            if matches!(
+                item.state,
+                crate::download::State::Queued
+                    | crate::download::State::Requested
+                    | crate::download::State::Receiving
+                    | crate::download::State::Verifying
+            ) {
+                item.state = crate::download::State::Failed;
+                item.error = Some("Connection ended; download was not retried".into());
+            }
+        }
+        self.snapshot.downloads.session = crate::download::Session::Idle;
+        if downloading {
+            self.snapshot.downloads.error =
+                Some("Connection ended; download was not retried".into());
+        }
         self.snapshot.control_acquired = false;
         self.snapshot.capabilities = None;
         self.snapshot.filesystem = crate::filesystem::Browser::default();

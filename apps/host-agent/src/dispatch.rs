@@ -292,6 +292,9 @@ async fn handle_secure_action(action: SecureAction, state: &mut DispatchState) -
         SecureAction::StartDefaultTransfer => {
             let Some(path) = state.default_transfer_path.clone() else {
                 warn!("rejected secure default transfer: no default path is configured");
+                if let Some((session_id, _)) = state.secure_transfer.session_material() {
+                    send_transfer_error(&state.outbound, &session_id).await;
+                }
                 return Ok(());
             };
             let Some((session_id, session_master)) = state.secure_transfer.session_material()
@@ -337,11 +340,13 @@ fn spawn_transfer_worker(
 ) {
     tokio::spawn(async move {
         while let Some(request) = request_rx.recv().await {
+            let session_id = request.session_id;
             match file_transfer::send_request(&outbound, &mut feedback_rx, request).await {
                 Ok(()) => {
                     info!("encrypted file transfer finished");
                 }
                 Err(err) => {
+                    send_transfer_error(&outbound, &session_id).await;
                     warn!(
                         error = %format!("{err:#}"),
                         "encrypted file transfer failed"
@@ -932,9 +937,68 @@ fn format_hex(bytes: &Bytes) -> String {
         .join(" ")
 }
 
+async fn send_transfer_error(
+    outbound: &mpsc::Sender<Frame>,
+    id: &[u8; transfer_protocol::SESSION_ID_LEN],
+) {
+    let mut bytes = [0; 64];
+    if let Ok(n) = transfer_protocol::encode_session_envelope(
+        &mut bytes,
+        transfer_protocol::SESSION_KIND_ERROR,
+        id,
+        b"transfer failed",
+    ) {
+        let _ = outbound
+            .send(Frame::new(
+                crate::secure_transfer::TO_BROWSER_TAG,
+                bytes::Bytes::copy_from_slice(&bytes[..n]),
+            ))
+            .await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_source_requests_report_the_session_and_keep_worker_alive() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let missing = std::env::temp_dir().join(format!(
+            "pico-missing-source-{}-{nonce}",
+            std::process::id()
+        ));
+        assert!(!missing.exists());
+        let (outbound, mut inbound) = mpsc::channel(2);
+        let (_feedback, feedback_rx) = mpsc::channel(2);
+        let (requests, request_rx) = mpsc::channel(2);
+        spawn_transfer_worker(outbound, feedback_rx, request_rx);
+        for session_id in [
+            [7; transfer_protocol::SESSION_ID_LEN],
+            [8; transfer_protocol::SESSION_ID_LEN],
+        ] {
+            requests
+                .send(file_transfer::TransferRequest {
+                    path: missing.clone(),
+                    session_id,
+                    session_master: zeroize::Zeroizing::new([1; 32]),
+                })
+                .await
+                .unwrap();
+            let frame = tokio::time::timeout(Duration::from_secs(2), inbound.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(frame.tag, crate::secure_transfer::TO_BROWSER_TAG);
+            let envelope = transfer_protocol::decode_session_envelope(&frame.payload).unwrap();
+            assert_eq!(envelope.kind, transfer_protocol::SESSION_KIND_ERROR);
+            assert_eq!(envelope.session_id, session_id);
+            assert_eq!(envelope.body, b"transfer failed");
+        }
+    }
 
     #[tokio::test]
     async fn agent_identity_sends_compatible_status_then_host_os() {

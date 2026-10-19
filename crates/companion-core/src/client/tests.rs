@@ -253,6 +253,7 @@ fn rejects_unbounded_metadata_and_mismatched_reply_kinds() {
         Event::Reply {
             tag,
             reply: Reply::Connected(Capabilities {
+                downloads_supported: false,
                 upload_timeout: Duration::ZERO,
                 read_only: false,
                 firmware: "mock".into(),
@@ -1019,4 +1020,68 @@ fn general_script_bytecode_completes_and_cannot_run_after_disconnect() {
     );
     assert_eq!(client.snapshot().connection, Connection::Disconnected);
     assert!(!client.snapshot().job.active());
+}
+
+#[test]
+fn download_cancel_discards_queued_work_and_never_retires_a_keyboard_job() {
+    use crate::download::Command;
+    let (mut c, now) = ready();
+    c.snapshot
+        .capabilities
+        .as_mut()
+        .unwrap()
+        .downloads_supported = true;
+    c.snapshot
+        .capabilities
+        .as_mut()
+        .unwrap()
+        .status
+        .host_agent_present = true;
+    c.tick(now + STATUS_INTERVAL);
+    assert!(c.pending.as_ref().unwrap().kind.background());
+    c.dispatch(
+        Action::Download(Command::Queue {
+            path: "/source".into(),
+            destination: std::env::temp_dir().join("new.bin"),
+        }),
+        now + STATUS_INTERVAL,
+    );
+    assert!(c.queued.is_some());
+    c.dispatch(Action::Download(Command::Cancel), now + STATUS_INTERVAL);
+    assert!(c.queued.is_none());
+    assert_eq!(c.pending.as_ref().unwrap().kind, Kind::Download);
+    let tag = c.pending.as_ref().unwrap().tag;
+    c.receive(
+        Event::Reply {
+            tag,
+            reply: Reply::DownloadAccepted,
+        },
+        now + STATUS_INTERVAL,
+    );
+    c.dispatch(text(5000), now + STATUS_INTERVAL);
+    let original = c.pending.as_ref().unwrap().tag;
+    c.dispatch(Action::Download(Command::Cancel), now + STATUS_INTERVAL);
+    assert_eq!(c.snapshot.last_error, Some(Failure::Busy));
+    assert_eq!(c.pending.as_ref().unwrap().tag, original);
+}
+#[test]
+fn old_download_snapshots_cannot_revive_released_or_replaced_connections() {
+    use crate::download::{Session, View};
+    let (mut c, now) = ready();
+    let epoch = c.snapshot.epoch;
+    let view = View {
+        session: Session::Ready,
+        ..Default::default()
+    };
+    c.receive(
+        Event::Downloads {
+            epoch,
+            view: view.clone(),
+        },
+        now,
+    );
+    assert_eq!(c.snapshot.downloads.session, Session::Ready);
+    c.dispatch(Action::Disconnect, now);
+    c.receive(Event::Downloads { epoch, view }, now);
+    assert_eq!(c.snapshot.downloads.session, Session::Idle);
 }

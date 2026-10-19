@@ -8,3 +8,5 @@ pub mod display_core;
 pub mod host;
 
 pub mod ble_relay_core;
+
+pub mod ble_download_core;

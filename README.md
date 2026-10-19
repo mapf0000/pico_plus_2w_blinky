@@ -44,9 +44,10 @@ and pagination. Enable USB and run the host agent on the attached computer.
 Released Pico buttons arrive over the encrypted notification stream. Background
 polling keeps controls available. Native Python scripting runs a bounded generator
 in a lazy child process; see [SCRIPTING.md](docs/SCRIPTING.md) for the API, Stop and
-resource boundary. Credentials and Bluetooth file transfer are not implemented. The host-agent USB protocol and
-local display presets remain. Browser-dependent bulk requests fail closed:
-chunks cannot be acknowledged without a receiver.
+resource boundary. Encrypted Bluetooth downloads stream to disk with verification
+and explicit saving; see [DOWNLOADS.md](docs/DOWNLOADS.md). Credentials remain
+unimplemented. The host-agent USB protocol and local display presets remain.
+USB chunk acknowledgements wait for native receiver credit.
 
 In **USB identity**, edit the manufacturer/product, choose **Disable USB**, then
 **Save identity** and **Enable USB** to apply the names. Both USB buttons are next

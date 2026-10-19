@@ -56,6 +56,11 @@ impl RelayState {
         self.transfers.get_mut(index)
     }
 
+    pub(super) fn cancel(&mut self, id: u64) {
+        if self.remove(id).is_some() {
+            set_transfer_view_state(TransferViewState::Aborted);
+        }
+    }
     fn remove(&mut self, transfer_id: u64) -> Option<RelayTransferState> {
         let index = self.index_of(transfer_id)?;
         Some(self.transfers.swap_remove(index))
@@ -144,7 +149,7 @@ where
             max_packet,
             open.transfer_id,
             FILE_ABORT_REASON_CAPACITY,
-            "secure browser relay unavailable",
+            "native encrypted relay unavailable",
         )
         .await?;
         return Ok(());
@@ -237,7 +242,7 @@ where
             max_packet,
             transfer_id,
             FILE_ABORT_REASON_CAPACITY,
-            "secure browser relay unavailable",
+            "native encrypted relay unavailable",
         )
         .await?;
         return Ok(());
@@ -316,7 +321,7 @@ where
             max_packet,
             close.transfer_id,
             FILE_ABORT_REASON_CAPACITY,
-            "secure browser relay unavailable",
+            "native encrypted relay unavailable",
         )
         .await?;
         return Ok(());
@@ -349,6 +354,7 @@ where
         return Ok(());
     };
     let _ = relay.remove(transfer_id);
+    let _ = crate::ble_download::queue(ble_protocol::download::ABORT, payload);
     set_transfer_view_state(TransferViewState::Aborted);
     send_file_result(
         class,

@@ -1,6 +1,6 @@
 # Native companion: remaining feature-parity plan
 
-Updated 2026-10-11. This is the active backlog for replacing the former Web UI
+Updated 2026-10-12. This is the active backlog for replacing the former Web UI
 with the native Rust/egui Bluetooth companion. Completed implementation and test
 history belong in [DEVICE_TESTING.md](docs/DEVICE_TESTING.md); remove completed
 items from this backlog as milestones land.
@@ -59,8 +59,8 @@ Bluetooth-only removal (`2f6579c`). Historical sources can be read with
 | Python editor, generator execution, Start/Stop and errors | Native editor and lazy restricted RustPython child implemented; bounded IPC/heap, hard deadlines, send/throw, local waits, general validated KBD1 and scoped Stop tested; empty effects passed on Pico | Real text/chord/key-release, physical Stop/local-preset contention, interactive editor and soak/platform acceptance |
 | Python `wait_event()` for buttons and connection/USB/agent changes | Native supervisor delivers bounded button history and non-replayed capability transitions; real child/mock reconnect and button waits pass | Physical button/Stop, USB/agent transition and reconnect acceptance on hardware |
 | Host filesystem navigation | Encrypted BLE list/cancel/page relay; bounded native Home/Root/Up, breadcrumbs, hidden files, metadata, selection and pagination implemented; real agent pagination/error/cancel/reconnect passed | Interactive navigation acceptance, slow-agent/soak and Windows/Linux board checks |
-| Encrypted path/default-path transfer initiation and session reconnect | Agent session/crypto/sender and shared `transfer-crypto` / `transfer-protocol` remain | Native session client, authenticated BLE relay and transfer controls |
-| Downloads: queue, progress, rate/ETA, verification, save | No native receiver; `usb/events.rs` deliberately rejects delivery | Bounded stream-to-disk receiver, verification/receipt, safe saving and transfer activity UI |
+| Encrypted path/default-path transfer initiation and session reconnect | Independent host Noise client, encrypted BLE/USB relay, source/default controls and cancellation barrier implemented | Queued batches, USB/agent-loss and longer soak checks |
+| Downloads: queue, progress, rate/ETA, verification, save | One disk receiver, four requests/eight history items, authenticated manifest/chunks/close, SHA-256, no-overwrite saving and encrypted receipt implemented; 8,195-byte Pico transfer matched source and completed its encrypted receipt; empty/default and five cancel/reconnect cycles passed | Queued batches, slower/full disk and platform checks; evaluate 1-MiB/counter limit and save dialog polish |
 | Connection loss and reconnect | Explicit reconnect and incarnation checks exist | Convenient recovery with fresh secret-authenticated sessions, stale-response rejection and no execution replay; platform acceptance |
 
 Historical evidence: `apps/frontend/src/app.rs`, `ui/overview.rs`, `ui/scripts.rs`,
@@ -98,12 +98,14 @@ See [the wire specification](docs/PROTOCOL.md#bluetooth-control-v3),
 
 Remaining:
 
-- Record independent power-cycle authentication, missing-key device behavior,
+- Record missing-key device behavior,
   forced default ATT MTU, interrupted maximum upload/response, Cancel latency,
   v3 HID/key release and local-preset contention. Unattended acquire/release,
   encrypted status/reconnect, wrong key, unauthenticated command rejection, timeout
   under continuous reads and key persistence across ELF deployment have passed
-  on macOS/Pico. Measure standalone handshake time and stack headroom;
+  on macOS/Pico. One independent cold-start authentication/session-reset run also
+  passed during milestone 4; longer cold-start soak remains open. Measure standalone
+  handshake time and stack headroom;
   compilation/linked static size does not establish runtime stack usage or entropy.
 - Import/select profiles into each supported OS credential store and reconnect
   without repeatedly supplying a file. Current `--profile PATH` is a private-file
@@ -170,7 +172,7 @@ stream nonces and four-fragment credits. The relay owns one 2,048-byte page and
 at most eight best-effort buttons; native browsing accumulates at most 512 entries.
 Filesystem v1 and the sole USB CDC owner are unchanged. Native list/cancel, page
 validation, target-platform navigation and consumed-button exclusions are covered
-by portable tests. Generic file-transfer sinks remain unavailable until milestone 4.
+by portable tests. Milestone 4 adds a separate bounded encrypted-download sink.
 See [DEVICE_TESTING.md](docs/DEVICE_TESTING.md) for board measurements and commands.
 
 Remaining acceptance/optimization:
@@ -192,11 +194,10 @@ Remaining acceptance/optimization:
   cover default-MTU fragmentation. Evaluate larger fragments only with measured
   gains and an explicit packet-pool/characteristic review; the pool remains eight
   128-byte packets. Do not increase every firmware buffer for throughput.
-- Set download-specific credits/timeouts from measurements before milestone 4.
-  Maximum 2,048-byte probe payloads currently take roughly 5.4–5.7 seconds
-  (about 360–380 bytes/s); directory/probe I/O allows 30 seconds. The host sender's
-  existing five-second USB chunk ACK deadline cannot be copied unchanged into a
-  future end-to-end BLE download path. Keep transfer backpressure fail-closed.
+- Measure throughput improvements only after download recovery acceptance.
+  Maximum 2,048-byte probe payloads take roughly 5.4–5.7 seconds
+  (about 360–380 bytes/s); milestone 4 now uses one chunk credit, 30-second stream
+  inactivity and a 60-second host ACK deadline. Keep backpressure fail-closed.
 
 ## 3. Native Python acceptance and resource boundary
 
@@ -239,41 +240,56 @@ Remaining acceptance/release work:
   host capabilities alongside their BLE acceptance. Native module compilation
   alone does not establish those platforms or a full adversarial security audit.
 
-## 4. Encrypted file reception and saving
+## 4. Encrypted downloads: acceptance and transport limits
 
-Depends on milestone 2. Reuse transfer/session v2 and the current host agent;
-port pure session/store logic from the old `transfer/secure.rs` and `store.rs`.
-Replace browser IndexedDB/download adapters with native streaming storage.
+Implementation is complete. The recovered transfer-v2 session client is separate
+from BLE control authentication; the Pico forwards ciphertext through a new
+negotiated download-v1 command/stream extension. One firmware record remains owned
+through native final credit, which follows authentication and bounded disk work.
+USB ACKs wait for that credit; ACKs flush before new control uploads. Initial/relay
+chunk credit is one and the host ACK timeout is 60 seconds rather than the former
+five-second browser setting. Async disk tasks survive ordinary radio preemption,
+while uncertain sealed host controls fail closed instead of replaying Noise nonces.
+One ATT write and the full two-fragment ACK retain ownership across preemption
+so older platform requests complete before newer tokens; finite firmware
+rejection/disconnect reasons omit secrets.
 
-- Establish the existing in-memory Noise session with the host agent over the
-  secret-authenticated, acquired BLE connection. Retain per-file AEAD, strict lengths,
-  ordering, SHA-256 and the encrypted final receipt; no plaintext downgrade.
-  The control PSK authenticates the companion/Pico session, not the source computer
-  or file. Keep it separate from the host file-transfer session and keys.
-- Carry session envelopes and encrypted open/chunk/close records through the
-  bounded relay. Retain firmware's public structure/order checks without giving
-  it file keys. USB ACK credit must reflect bounded downstream capacity; BLE
-  receiver credit advances only as authenticated records are accepted into bounded
-  storage work. Never ACK dropped records or equate notifications with disk writes.
-  Final success requires verification and the native receiver's encrypted receipt.
-- Stream to app-owned temporary files on a worker, update the hash incrementally,
-  and bound staging work, active transfers, history and cumulative storage.
-  Handle full disk, write failures, app exit and disconnect with abort/cleanup.
-  Never allocate a whole file in memory or restore the PSRAM WebSocket batch pool.
-- Restore encrypted path input, Queue transfer, Set as default, Queue default and
-  session reconnect. Show queued/receiving/verifying/finished/failed/aborted state,
-  byte progress, rate/ETA and useful error/retry counts. Retry transport records
-  only under the existing exact-ciphertext rules; never reuse a nonce with new data.
-- Save verified files through an explicit destination choice. Treat host filenames
-  as display metadata, not local paths: prevent traversal, overwrite surprises and
-  symlink escapes. Never automatically open, execute or interpret downloaded files.
+The native UI provides source/default controls, an explicit absolute destination,
+bounded queue/history, progress/rate/ETA, errors, received-retry counts and Cancel.
+Plaintext stages into an anonymous disk file, then verifies length/count/SHA-256,
+copies with bounded buffers into a private save file and persists
+without overwrite before sending the encrypted receipt. Host filenames never
+choose the local path; no content is opened or executed. Cancellation releases
+USB waits, removes relay state, discards old queued commands and drains a barrier
+before a fresh session. Source errors and USB/control/disconnect/app exit terminate
+work without automatic retry. See DOWNLOADS.md and DEVICE_TESTING.md.
 
-Acceptance: byte-exact multi-chunk and empty-file reception; authenticated manifest,
-ordering/length/hash failures; malformed/duplicate records, retry/timeout, slow/full
-disk, disconnect and saturated queues. Demonstrate a representative real file and
-record throughput and control latency. Revise credits/timeouts from measurements,
-including the existing five-second USB ACK timeout. Four firmware relay states do
-not automatically justify four simultaneous native downloads.
+Remaining acceptance/release work:
+
+- Accept queued multi-file batches and forced disconnect on the revised build.
+  The full 8,195-byte download, encrypted completion receipt, empty/default path,
+  missing-source failure/reconnect, five cancellation/reconnect cycles and a
+  same-link host-session restart after cancellation passed on macOS/Pico.
+  Preliminary ordering failures are recorded separately; keep repeated cold-start
+  and longer soak acceptance open.
+- Exercise truly slow/full/unwritable disk, source disappearance/mutation,
+  USB/agent loss, app exit during receiving and final saving, corrupt/duplicate
+  records and saturated queues on hardware. Native crypto/disk tests cover bounds,
+  wrong ordering/length/hash, tampering, no-overwrite races, retries, queue ordering,
+  stale errors and simulated write failure. Actual process/radio waits preserve
+  task ownership; mocks do not establish real disconnect or disk behavior.
+- Measure larger transfers, cancellation/control latency and longer soak on
+  each target OS. The provisional per-file limit is 1 MiB because 16-bit command/
+  stream counters constrain a connection's lifetime at default MTU. A used
+  connection or a long queued batch can exhaust counters earlier; fail closed,
+  reconnect explicitly and do not claim resumable downloads. Larger payloads/
+  counters need a versioned design and matched Pico/native tests.
+- Polish explicit destination selection with a native save dialog and clearer
+  terminal/history presentation. Anonymous unverified staging is OS-cleaned;
+  abrupt exit during verified final copy/persist may leave a private verified
+  `.pico-download-*` file. Review reclaim/durability and cumulative saved-storage
+  policy without deleting user files. Windows ACL/filesystem and Linux/Windows
+  radio acceptance are still required.
 
 ## 5. Recovery, packaging and release acceptance
 
@@ -314,9 +330,10 @@ throughput evidence belongs in DEVICE_TESTING.md and does not establish other
 platforms or larger-fragment performance. See the
 [btleplug Peripheral API](https://docs.rs/btleplug/latest/btleplug/api/trait.Peripheral.html).
 
-The old Worker already has native RustPython tests and uses
-`Interpreter::without_stdlib`; reuse is feasible, while native isolation remains
-to be proven. For the optional WASM spike, Wasmtime documents
+The former Worker's RustPython tests and `Interpreter::without_stdlib` prelude
+are now reused in the native child. Its restricted host interface and resource
+containment are tested; a stronger native isolation boundary remains release work.
+For the optional WASM spike, Wasmtime documents
 [sandbox boundaries](https://docs.wasmtime.dev/security.html) and
 [execution interruption](https://docs.wasmtime.dev/examples-interrupting-wasm.html).
 Its [configuration API](https://docs.wasmtime.dev/api/wasmtime/struct.Config.html)

@@ -11,6 +11,8 @@ const CONTROL: u8 = 4; // PSK-protected control; incompatible with v2 pairing
 const OVERVIEW_FLAG: u8 = 8;
 const IDENTITY_FLAG: u8 = 16;
 const STREAM_FLAG: u8 = 32;
+const DOWNLOAD_FLAG: u8 = 64;
+pub mod download;
 pub mod filesystem;
 pub mod identity;
 mod overview;
@@ -31,6 +33,7 @@ pub struct Info {
     pub overview: bool,
     pub identity: bool,
     pub streams: bool,
+    pub downloads: bool,
 }
 
 impl Info {
@@ -40,6 +43,7 @@ impl Info {
             overview: true,
             identity: true,
             streams: true,
+            downloads: true,
         };
         for (out, input) in value.build.iter_mut().zip(build.bytes()) {
             *out = if input.is_ascii_graphic() {
@@ -62,7 +66,8 @@ impl Info {
         bytes[5] = CONTROL
             | if self.overview { OVERVIEW_FLAG } else { 0 }
             | if self.identity { IDENTITY_FLAG } else { 0 }
-            | if self.streams { STREAM_FLAG } else { 0 };
+            | if self.streams { STREAM_FLAG } else { 0 }
+            | if self.downloads { DOWNLOAD_FLAG } else { 0 };
         bytes[8..].copy_from_slice(&self.build);
         bytes
     }
@@ -76,7 +81,9 @@ impl Info {
         }
         if &bytes[..4] != b"PBLE"
             || bytes[5] & CONTROL == 0
-            || bytes[5] & !(CONTROL | OVERVIEW_FLAG | IDENTITY_FLAG | STREAM_FLAG) != 0
+            || bytes[5] & !(CONTROL | OVERVIEW_FLAG | IDENTITY_FLAG | STREAM_FLAG | DOWNLOAD_FLAG)
+                != 0
+            || (bytes[5] & DOWNLOAD_FLAG != 0 && bytes[5] & STREAM_FLAG == 0)
             || bytes[6..8] != [0, 0]
         {
             return Err(Error::Invalid);
@@ -88,6 +95,7 @@ impl Info {
             overview: bytes[5] & OVERVIEW_FLAG != 0,
             identity: bytes[5] & IDENTITY_FLAG != 0,
             streams: bytes[5] & STREAM_FLAG != 0,
+            downloads: bytes[5] & DOWNLOAD_FLAG != 0,
         };
         let end = label.build.iter().position(|b| *b == 0).unwrap_or(12);
         if end == 0
@@ -161,9 +169,10 @@ mod tests {
         legacy.overview = false;
         legacy.identity = false;
         legacy.streams = false;
+        legacy.downloads = false;
         assert_eq!(Info::decode(&legacy.encode()), Ok(legacy));
         assert_eq!(legacy.encode()[5], 4);
-        for flags in [4, 12, 20, 28, 60] {
+        for flags in [4, 12, 20, 28, 60, 124] {
             let mut encoded = info.encode();
             encoded[5] = flags;
             let decoded = Info::decode(&encoded).unwrap();
@@ -220,6 +229,7 @@ pub const EVENTS_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000007;
 pub const KIND_FLOW: u8 = 6;
 pub const KIND_STREAM: u8 = 7;
 pub const KIND_FILESYSTEM: u8 = 8;
+pub const KIND_DOWNLOAD: u8 = 9;
 pub const RESULT_UUID: u128 = 0x7069636f_0001_4c32_9b89_5d7a00000006;
 pub const FRAME_LEN: usize = 20;
 pub const HEADER_LEN: usize = 8;
@@ -327,6 +337,7 @@ pub enum Code {
     DirectoryAccepted = 10,
     DirectoryCancelled = 11,
     AgentUnavailable = 12,
+    DownloadAccepted = 13,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResultValue {
@@ -365,6 +376,7 @@ impl ResultValue {
             10 => Code::DirectoryAccepted,
             11 => Code::DirectoryCancelled,
             12 => Code::AgentUnavailable,
+            13 => Code::DownloadAccepted,
             _ => return Err(Error::Invalid),
         };
         let token = u16::from_le_bytes([bytes[2], bytes[3]]);

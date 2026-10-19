@@ -81,7 +81,7 @@ OS/hostname/heartbeat age, CDC installer stage and execution/USB limits after
 control acquisition, targeting a ten-second refresh while idle. Heartbeat age is
 sampled at overview time; live presence/USB status targets a one-second interval.
 Displayed layouts are the companion's compiled lowering choices. USB protocol versions do not imply native workflows; Info flag 32 negotiates
-filesystem/button streaming, while downloads remain unavailable.
+filesystem/button streaming. Info flag 64 separately advertises native encrypted downloads.
 
 Update both app and firmware for the overview extension: older v3 companions
 reject its newly advertised Info flag. New companions can use older v3 firmware
@@ -93,7 +93,7 @@ deadline under continuous public reads. Run with exactly one Pico in range and
 other controllers disconnected; it takes about 35 seconds and sends no valid
 encrypted command or HID effect.
 
-Bulk transfer and credentials remain future work.
+Encrypted file downloads are implemented; credentials remain optional future work.
 macOS is the hardware test target; Linux/Windows radio operation is unverified.
 See [the plan](../../NATIVE_COMPANION_BLE_PLAN.md) and
 [wire reference](../../docs/PROTOCOL.md).
@@ -143,3 +143,19 @@ See [SCRIPTING.md](../../docs/SCRIPTING.md) for generators, events, exceptions,
 limits and the native trust boundary. Host modules, FileIO and imports are denied;
 the child is not an OS sandbox against native VM bugs. Source, error messages and
 keyboard contents are not sent to logs or temporary files.
+
+
+## Encrypted downloads
+
+Acquire control and connect the encrypted host session in **Encrypted file downloads**.
+Enter a host source path and an absolute new local filename, then Queue file.
+The default-path buttons use the USB host agent's in-memory default candidate.
+Files authenticate, stream to anonymous disk staging, verify size/count/SHA-256,
+and save without overwriting an existing destination before sending their receipt.
+One file receives, four requests/eight history entries are bounded. The provisional
+limit is 1 MiB per file; disconnect/cancellation requires an explicit fresh session
+and never resumes output. See [DOWNLOADS.md](../../docs/DOWNLOADS.md) for limits,
+backpressure, cancellation, disk/crash behavior and headless board tests.
+Update both companion and firmware for Info flag 64. New companions can connect
+to older v3 firmware and report downloads unsupported; older companions reject
+this new feature bit. Use the updated host agent (60-second ACK timeout/one credit).

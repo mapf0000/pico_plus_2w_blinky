@@ -781,6 +781,12 @@ mod tests {
             serde_json::from_str::<StepResult>(r#"{"status":"completed","unexpected":true}"#,)
                 .is_err()
         );
+        assert!(
+            serde_json::from_str::<StepResult>(
+                r#"{"status":"effect","effect":{"kind":"require_usb","unexpected":true}}"#,
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -29,6 +29,9 @@ pub enum CtrlCommand {
     SecureTransfer {
         payload: Vec<u8, MAX_SECURE_TRANSFER_FRAME>,
     },
+    AbortTransfer {
+        transfer_id: u64,
+    },
     ListDirectory {
         request_id: u64,
         cursor: u32,
@@ -110,7 +113,7 @@ pub const MAX_TRANSFER_PATH_LEN: usize = 512;
 pub const MAX_SECURE_TRANSFER_FRAME: usize = transfer_protocol::MAX_SECURE_SESSION_FRAME;
 const MAX_RELAY_TRANSFERS: usize = 4;
 const NONE_CONTIGUOUS_CHUNK: u32 = u32::MAX;
-const DEFAULT_ACK_WINDOW_CREDIT: u16 = 8;
+const DEFAULT_ACK_WINDOW_CREDIT: u16 = 1;
 const PROGRESS_EMIT_EVERY_CHUNKS: u32 = 64;
 
 struct UsbBenchmarkState {
@@ -503,6 +506,9 @@ where
         };
         match event {
             Either::First(cmd) => {
+                if let CtrlCommand::AbortTransfer { transfer_id } = &cmd {
+                    relay.cancel(*transfer_id);
+                }
                 super::bootstrap::CAN_ARM.store(false, Ordering::Release);
                 if let Err(err) = handle_command(&mut class, max_packet, cmd).await {
                     log::warn!("usb: control send error: {:?}", err);
@@ -571,6 +577,9 @@ where
                 payload.as_slice(),
             )
             .await
+        }
+        CtrlCommand::AbortTransfer { transfer_id } => {
+            send_file_abort_command(class, max_packet, transfer_id).await
         }
         CtrlCommand::ListDirectory {
             request_id,
@@ -811,4 +820,15 @@ where
 fn tlv_header(tag: u8, len: u32) -> [u8; TLV_HEADER_LEN] {
     let len_bytes = len.to_le_bytes();
     [tag, len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]
+}
+
+async fn send_file_abort_command<'d, D: Driver<'d>>(
+    class: &mut CdcAcmClass<'d, D>,
+    max_packet: usize,
+    id: u64,
+) -> Result<(), EndpointError> {
+    let mut payload = [0; 11];
+    payload[..8].copy_from_slice(&id.to_le_bytes());
+    payload[8] = 1;
+    send_tlv(class, max_packet, TAG_FILE_ABORT, &payload).await
 }
