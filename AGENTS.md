@@ -78,7 +78,8 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 ### Native companion: `apps/companion/`
 
 - `src/app.rs`: native egui rendering and controls.
-- `src/backend.rs`: bounded UI commands, Tokio backend and shutdown.
+- `src/backend.rs`: bounded UI/profile commands, Tokio backend and shutdown.
+- `src/desktop.rs`, `src/profiles.rs`: one local operation worker, native dialogs, bounded non-secret catalog and macOS Keychain. No secrets in snapshots or Python; no keychain/file work in UI or radio callbacks.
 - `src/smoke.rs`: deterministic headless mock lifecycle check.
 - `src/identity_smoke.rs`: explicit reversible BLE/flash/USB identity hardware check (`--identity-self-test`, requires a private profile).
 - `src/ble.rs`: bounded native BLE worker, discovery/status, authenticated control,
@@ -118,6 +119,7 @@ a connection incarnation.
 ### Scripts and configuration
 
 - `scripts/pico-run`: Cargo runner that flashes with `picotool`, waits for USB CDC, and streams logs.
+- `scripts/build-companion`: builds/verifies a local ad-hoc signed macOS app under Cargo target output; no install/flash.
 - `scripts/build-host-agent`: release-builds a host agent and copies it to `apps/host-agent/artifacts/<target>/`.
 - `scripts/fw-deploy-with-agent`: builds the local host agent, packages it, then builds/flashes firmware.
 - `.cargo/config.toml`: target-scoped runner/linker flags and Cargo aliases.
@@ -304,8 +306,9 @@ Do not silently reuse an existing tag or reinterpret a payload without versionin
   no plaintext fallback, numeric confirmation or OS pairing gate. Handshake payloads
   remain empty; completing NNpsk0 alone does not grant control.
 - Keep control keys out of Git, logs, command arguments and the USB target/agent.
-  Provision only through a trusted route. Private profile files are a prototype;
-  OS credential-store integration and authenticated rotation remain planned.
+  Provision only through a trusted route. Factory/CLI profiles remain private files;
+  macOS Keychain import/selection is implemented. Windows/Linux native stores and
+  authenticated rotation remain planned.
 - Reserved key region `0x10BFC000..0x10BFE000` must agree with `ble-session` and
   `memory.x`. Ordinary firmware ELF updates must have no load segment there.
 - Keep TrouBLE diagnostic logging disabled: upstream security logs include key material.

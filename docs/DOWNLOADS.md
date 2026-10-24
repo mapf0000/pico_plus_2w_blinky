@@ -11,7 +11,10 @@ see THREAT_MODEL.md for the existing unattended bootstrap boundary.
 Acquire control, then open **Encrypted file downloads** and select **Connect
 encrypted host session**. Enter the source path on the USB computer (or use a
 selected filesystem path) and a **new absolute local filename** on the control
-computer. Select **Queue file**. **Set host default path** and **Queue host default**
+computer, using **Choose…** or an absolute filename. The native picker only
+selects a destination; it does not create, overwrite or queue a file. Existing
+files and symlinks are rejected. Results from an old connection or an edited
+destination draft are discarded. Select **Queue file**. **Set host default path** and **Queue host default**
 reuse the agent's in-memory default candidate; they do not change local saving.
 Existing destinations are rejected, including symlinks. Host filenames are display
 metadata and never choose the local destination. Downloaded files are never opened

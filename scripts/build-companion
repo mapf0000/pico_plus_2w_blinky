@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Build a local macOS app bundle. Does not install, notarize or access a device."""
+import json
+import os
+from pathlib import Path
+import plistlib
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+def main():
+    if sys.platform != "darwin":
+        raise SystemExit("This bundle builder targets macOS; use cargo build -p pico-companion --release elsewhere.")
+    if len(sys.argv) != 1:
+        raise SystemExit("Usage: scripts/build-companion")
+    root = Path(__file__).resolve().parent.parent
+    metadata = json.loads(subprocess.check_output(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=root
+    ))
+    package = next(p for p in metadata["packages"] if p["name"] == "pico-companion")
+    target = Path(metadata["target_directory"])
+    identifier = "org.pico-rust.companion"
+    output = target / "Pico Companion.app"
+    # Only replace artifacts produced by this builder; never an unrelated bundle/symlink.
+    if output.is_symlink():
+        raise SystemExit("Refusing to replace a symlink at the output path.")
+    if output.exists():
+        try:
+            with (output / "Contents/Info.plist").open("rb") as handle:
+                previous = plistlib.load(handle)
+            if previous.get("CFBundleIdentifier") != identifier:
+                raise ValueError("Different bundle identifier")
+        except (OSError, ValueError, plistlib.InvalidFileException) as error:
+            raise SystemExit("Refusing to replace an unrelated app bundle.") from error
+    subprocess.run(["cargo", "build", "-p", "pico-companion", "--release"], cwd=root, check=True)
+    with tempfile.TemporaryDirectory(prefix=".companion-bundle-", dir=target) as staging:
+        bundle = Path(staging) / output.name
+        executable = bundle / "Contents/MacOS/pico-companion"
+        executable.parent.mkdir(parents=True)
+        shutil.copy2(target / "release/pico-companion", executable)
+        purpose = "Connect securely to your Pico over Bluetooth to control its USB tools and receive files."
+        info = {
+            "CFBundleIdentifier": identifier,
+            "CFBundleName": "Pico Companion",
+            "CFBundleDisplayName": "Pico Companion",
+            "CFBundleExecutable": executable.name,
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": package["version"],
+            "CFBundleVersion": package["version"],
+            "NSPrincipalClass": "NSApplication",
+            "NSHighResolutionCapable": True,
+            "NSBluetoothAlwaysUsageDescription": purpose,
+            "NSBluetoothPeripheralUsageDescription": purpose,
+        }
+        with (bundle / "Contents/Info.plist").open("wb") as handle:
+            plistlib.dump(info, handle)
+        # Local ad-hoc signature only. Distribution identity/notarization remains release work.
+        subprocess.run(["codesign", "--force", "--sign", "-", str(bundle)], check=True)
+        subprocess.run(["codesign", "--verify", "--deep", "--strict", str(bundle)], check=True)
+        # Keep the previous verified artifact until the new bundle has passed validation.
+        if output.exists():
+            previous = Path(staging) / "previous.app"
+            os.replace(output, previous)
+            try:
+                os.replace(bundle, output)
+            except OSError:
+                os.replace(previous, output)
+                raise
+        else:
+            os.replace(bundle, output)
+    print(output)
+
+
+if __name__ == "__main__":
+    main()

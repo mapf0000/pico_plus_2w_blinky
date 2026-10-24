@@ -32,6 +32,97 @@ fn text(delay_ms: u32) -> Action {
 }
 
 #[test]
+fn reconnect_rediscovers_previous_device_without_reacquiring_or_replaying_effects() {
+    let (mut client, now) = ready();
+    client.dispatch(text(5000), now);
+    client.tick(now + LATENCY);
+    let old_epoch = client.snapshot.epoch;
+    let now = now + LATENCY;
+    client.dispatch(Action::Disconnect, now);
+    client.dispatch(Action::Reconnect, now);
+    assert!(client.snapshot.epoch > old_epoch);
+    assert_eq!(client.snapshot.connection, Connection::Scanning);
+    client.dispatch_for_epoch(old_epoch, text(0), now);
+    client.tick(now + LATENCY);
+    assert_eq!(client.snapshot.connection, Connection::Connecting);
+    client.tick(now + LATENCY * 2);
+    assert_eq!(client.snapshot.connection, Connection::Connected);
+    assert!(!client.snapshot.control_acquired);
+    assert!(!client.snapshot.job.active());
+    assert_eq!(client.snapshot.job, Job::Finished(Outcome::Disconnected));
+    assert_eq!(client.snapshot.selected.as_ref().unwrap().id, "mock-pico-1");
+}
+
+#[test]
+fn reconnect_never_falls_back_to_a_different_discovered_device() {
+    let (mut client, now) = ready();
+    client.dispatch(Action::Disconnect, now);
+    client.dispatch(Action::Reconnect, now);
+    let tag = client.pending.as_ref().unwrap().tag;
+    client.transport.events_for_test_clear();
+    client.receive(
+        Event::Reply {
+            tag,
+            reply: Reply::Devices(vec![Device {
+                id: "another-pico".into(),
+                name: "Other Pico".into(),
+            }]),
+        },
+        now + LATENCY,
+    );
+    assert_eq!(client.snapshot.last_error, Some(Failure::DeviceNotFound));
+    assert_eq!(client.snapshot.connection, Connection::Disconnected);
+    assert!(!client.snapshot.control_acquired);
+    assert!(client.pending.is_none());
+}
+
+#[test]
+fn cancelling_reconnect_discards_its_late_scan_result() {
+    let (mut client, now) = ready();
+    client.dispatch(Action::Disconnect, now);
+    client.dispatch(Action::Reconnect, now);
+    let tag = client.pending.as_ref().unwrap().tag;
+    client.dispatch(Action::Disconnect, now);
+    client.receive(
+        Event::Reply {
+            tag,
+            reply: Reply::Devices(vec![Device {
+                id: "mock-pico-1".into(),
+                name: "Pico".into(),
+            }]),
+        },
+        now + LATENCY,
+    );
+    assert_eq!(client.snapshot.connection, Connection::Disconnected);
+    assert!(client.pending.is_none());
+}
+
+#[test]
+fn replacing_credentials_rejects_live_connections_and_invalidates_old_intents() {
+    let (mut client, now) = ready();
+    assert!(matches!(
+        client.replace_transport(MockTransport::new(Scenario::Normal), now),
+        Err(Failure::NotReady)
+    ));
+    assert!(client.snapshot.control_acquired);
+    let old_epoch = client.snapshot.epoch;
+    client.dispatch(Action::Disconnect, now);
+    let _old = client
+        .replace_transport(MockTransport::new(Scenario::Normal), now)
+        .unwrap_or_else(|_| panic!("idle replacement failed"));
+    assert!(client.snapshot.epoch > old_epoch);
+    assert!(!client.snapshot.control_acquired);
+    assert!(client.snapshot.selected.is_none());
+    assert!(client.snapshot.devices.is_empty());
+    client.dispatch_for_epoch(old_epoch, Action::Scan, now);
+    assert_eq!(client.snapshot.connection, Connection::Disconnected);
+    client.dispatch(Action::Scan, now);
+    client.tick(now + LATENCY);
+    assert!(!client.snapshot.devices.is_empty());
+    assert!(!client.snapshot.control_acquired);
+}
+
+#[test]
 fn requires_control_and_usb_before_keyboard_submission() {
     let (mut client, now) = connected(Scenario::Normal);
     client.dispatch(text(0), now);

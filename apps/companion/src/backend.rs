@@ -55,6 +55,10 @@ struct Intent {
 }
 
 enum IntentAction {
+    SetProfile {
+        profile: Option<ble_session::provisioning::Profile>,
+        reply: oneshot::Sender<Result<(), &'static str>>,
+    },
     Device(Action),
     StartScript(String),
     StopScript(u64),
@@ -136,6 +140,33 @@ impl Backend {
                                 let Some(action) = action else { break; };
                                 let Intent { epoch, action } = action;
                                 match action {
+                                    IntentAction::SetProfile { profile, reply } => {
+                                        let result = if epoch != client.snapshot().epoch
+                                            || python.snapshot.state.active()
+                                            || !matches!(client.snapshot().connection,
+                                                companion_core::Connection::Disconnected
+                                                | companion_core::Connection::Failed(_)
+                                                | companion_core::Connection::Scanning) {
+                                            Err("Disconnect and stop Python before changing profiles")
+                                        } else if mode.is_mock() {
+                                            Err("Profiles are unavailable in mock mode")
+                                        } else {
+                                            match client.replace_transport(
+                                                Connector::Ble(crate::ble::BleTransport::new(profile)),
+                                                start.elapsed()) {
+                                                Ok(old) => {
+                                                    if let Connector::Ble(old) = old { old.shutdown().await; }
+                                                    client.dispatch(Action::Scan, start.elapsed());
+                                                    Ok(())
+                                                },
+                                                Err(_) => Err("Could not change connection configuration"),
+                                            }
+                                        };
+                                        snapshots_tx.send_replace(client.snapshot().clone());
+                                        revision = client.snapshot().revision;
+                                        let _ = reply.send(result);
+                                        repaint.request_repaint();
+                                    },
                                     IntentAction::StartScript(source) if epoch == client.snapshot().epoch => python.start(source,&mut client,start.elapsed()),
                                     IntentAction::Device(Action::SendText { .. } | Action::SendEffect { .. }) if python.snapshot.state.active() => {},
                                     IntentAction::Device(action) => client.dispatch_for_epoch(epoch,action,start.elapsed()),
@@ -186,6 +217,21 @@ impl Backend {
             })
     }
 
+    pub fn set_profile(
+        &self,
+        epoch: u64,
+        profile: Option<ble_session::provisioning::Profile>,
+    ) -> Result<oneshot::Receiver<Result<(), &'static str>>, &'static str> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .try_send(Intent {
+                epoch,
+                action: IntentAction::SetProfile { profile, reply },
+            })
+            .map_err(|_| "Profile command queue unavailable")?;
+        Ok(result)
+    }
+
     pub fn start_script(&self, epoch: u64, source: String) -> Result<(), &'static str> {
         if python_runtime::source_limit_error(&source).is_some() {
             return Err("Python source exceeds its byte, line or nesting limit");
@@ -224,6 +270,63 @@ impl Drop for Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_change_cannot_interrupt_a_live_owned_keyboard_job() {
+        let backend =
+            Backend::start(Mode::Mock(Scenario::Normal), egui::Context::default()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let wait = |predicate: &dyn Fn(&Snapshot) -> bool| {
+            while !predicate(&backend.snapshots.borrow()) {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait(&|s| !s.devices.is_empty());
+        backend
+            .send(
+                backend.snapshots.borrow().epoch,
+                Action::Connect("mock-pico-1".into()),
+            )
+            .unwrap();
+        wait(&|s| s.connection == companion_core::Connection::Connected);
+        backend
+            .send(backend.snapshots.borrow().epoch, Action::Acquire)
+            .unwrap();
+        wait(&|s| s.control_acquired && !s.pending);
+        backend
+            .send(
+                backend.snapshots.borrow().epoch,
+                Action::SendText {
+                    text: "test".into(),
+                    layout: "win_en-US".into(),
+                    delay_ms: 5000,
+                },
+            )
+            .unwrap();
+        wait(&|s| s.job == companion_core::Job::Running);
+        let mut result = backend
+            .set_profile(
+                backend.snapshots.borrow().epoch,
+                ble_session::provisioning::Profile::new([7; 16], [9; 32]),
+            )
+            .unwrap();
+        loop {
+            match result.try_recv() {
+                Ok(result) => {
+                    assert!(result.is_err());
+                    break;
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => panic!("profile reply channel closed"),
+            }
+        }
+        assert!(backend.snapshots.borrow().control_acquired);
+        assert_eq!(backend.snapshots.borrow().job, companion_core::Job::Running);
+    }
 
     #[test]
     fn shutdown_interrupts_a_pending_connection_and_queued_commands() {

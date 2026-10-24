@@ -1,7 +1,10 @@
 # Native companion: desktop styling and usability upgrade plan
 
-Created 2026-10-11. Status: proposed implementation backlog; no UI changes are
-implemented by this document. Scope: the native Rust/egui desktop companion on
+Created 2026-10-11; updated 2026-10-19. Status: shell/theme redesign remains
+proposed. Native profile import/selection, macOS Keychain, deliberate reconnect,
+explicit initial device selection and a download save picker have landed through
+the feature plan. Their connected/interactive acceptance remains open.
+Scope: the native Rust/egui desktop companion on
 macOS, Windows and Linux, with macOS as the first visual and hardware acceptance
 platform. No mobile or browser design is included.
 
@@ -75,8 +78,8 @@ Include accessible and compact desktop layouts from the first implementation.
 
 Design slots for profiles, scripting, filesystem browsing and transfers, but ship
 their operational UI only with the corresponding backend capability from the BLE
-plan. In-app profile import/selection and OS credential storage belong to its
-authentication/recovery milestones. Native menus, OS settings deep links and
+plan. In-app import/selection and macOS Keychain are implemented by its recovery
+milestone; Windows/Linux stores and native interaction acceptance remain there. Native menus, OS settings deep links and
 native file dialogs require small platform integration checks before commitment.
 
 ### Constraints that the redesign must preserve
@@ -627,7 +630,7 @@ to implement an interpreter or transfer stack within the styling phase.
 
 | Workflow | Desktop presentation contract | Dependency |
 | --- | --- | --- |
-| Profiles | Native import/selection, non-secret device/profile names, matching/missing/wrong-profile states; no key display or automatic export | BLE plan milestones 0 and 5; credential-store boundary |
+| Profiles | Native import/selection, non-secret device/profile names, matching/missing/wrong-profile states; no key display or automatic export | macOS implemented in milestones 0/5; interactive/other-platform acceptance open |
 | Scripts | Editor-focused workspace, explicit Start/Stop, running/waiting/fault strip, API help and diagnostics; source editing affects next run | Milestone 3 and its supervised interpreter/isolation acceptance |
 | Files | Path/breadcrumb bar, Home/Root/Up, hidden toggle, paginated bounded rows, metadata/selection, loading/empty/error states | Milestone 2; validated correlated page relay |
 | Transfers | Queue/activity list, receiving/verifying/verified/failed/aborted states, measured progress/rate/ETA, explicit destination choice after verification | Milestone 4; real bounded native receiver/backpressure |

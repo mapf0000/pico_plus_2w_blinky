@@ -5,6 +5,10 @@ use companion_core::{
 use eframe::egui;
 
 const DEMO_TEXT: &str = "Hello from Pico!";
+struct ProfileInstall {
+    result: tokio::sync::oneshot::Receiver<Result<(), &'static str>>,
+    id: String,
+}
 
 pub struct CompanionApp {
     backend: Backend,
@@ -28,6 +32,12 @@ pub struct CompanionApp {
     download_destination: String,
     script_source: String,
     script: crate::python::ScriptSnapshot,
+    desktop: crate::desktop::Desktop,
+    catalog: crate::profiles::Catalog,
+    active_profile: Option<String>,
+    profile_install: Option<ProfileInstall>,
+    desktop_error: Option<&'static str>,
+    destination_error: Option<&'static str>,
 }
 
 impl CompanionApp {
@@ -36,6 +46,9 @@ impl CompanionApp {
         mode: Mode,
         profile: Option<ble_session::provisioning::Profile>,
     ) -> std::io::Result<Self> {
+        let active_profile = profile.as_ref().map(crate::profiles::id);
+        let desktop =
+            crate::desktop::Desktop::new(cc.egui_ctx.clone(), !mode.is_mock(), profile.is_none())?;
         let backend = Backend::start_with_profile(mode, profile, cc.egui_ctx.clone())?;
         Ok(Self {
             backend,
@@ -59,7 +72,136 @@ impl CompanionApp {
             download_destination: String::new(),
             script_source: crate::python::DEMO.into(),
             script: crate::python::ScriptSnapshot::default(),
+            desktop,
+            catalog: crate::profiles::Catalog::default(),
+            active_profile,
+            profile_install: None,
+            desktop_error: None,
+            destination_error: None,
         })
+    }
+
+    fn desktop_busy(&self) -> bool {
+        self.desktop.busy || self.profile_install.is_some()
+    }
+
+    fn poll_desktop(&mut self) {
+        if let Some(pending) = &mut self.profile_install {
+            match pending.result.try_recv() {
+                Ok(Ok(())) => {
+                    self.active_profile = Some(pending.id.clone());
+                    self.selected = None;
+                    self.desktop_error = None;
+                    self.profile_install = None;
+                }
+                Ok(Err(error)) => {
+                    self.desktop_error = Some(error);
+                    self.profile_install = None;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.desktop_error = Some("Profile update stopped; restart the app");
+                    self.profile_install = None;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(reply) = self.desktop.poll() {
+            match reply {
+                crate::desktop::Reply::Profiles { catalog, profile } => {
+                    self.desktop_error = None;
+                    self.catalog = catalog;
+                    if let Some(profile) = profile {
+                        let id = crate::profiles::id(&profile);
+                        let epoch = self.backend.snapshots.borrow().epoch;
+                        match self.backend.set_profile(epoch, Some(profile)) {
+                            Ok(result) => {
+                                self.profile_install = Some(ProfileInstall { result, id })
+                            }
+                            Err(error) => self.desktop_error = Some(error),
+                        }
+                    }
+                }
+                crate::desktop::Reply::Destination {
+                    path,
+                    context,
+                    draft,
+                } => {
+                    self.destination_error = crate::desktop::apply_destination(
+                        context,
+                        &draft,
+                        &path,
+                        crate::desktop::DestinationContext::from_snapshot(
+                            &self.backend.snapshots.borrow(),
+                        ),
+                        &mut self.download_destination,
+                    )
+                    .err();
+                }
+                crate::desktop::Reply::DestinationError(error) => {
+                    self.destination_error = Some(error)
+                }
+                crate::desktop::Reply::Error(error) => self.desktop_error = Some(error),
+                crate::desktop::Reply::Cancelled => {}
+            }
+        }
+    }
+
+    fn profiles(&mut self, ui: &mut egui::Ui) {
+        if self.mode.is_mock() {
+            return;
+        }
+        let label = self.active_profile.as_ref().map_or_else(
+            || "No profile loaded · public status only".into(),
+            |id| {
+                let name = self
+                    .catalog
+                    .profiles
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .map_or("Launch profile", |p| p.name.as_str());
+                format!("{name} · {}", &id[..8])
+            },
+        );
+        let supported = cfg!(target_os = "macos");
+        let change = supported
+            && !self.desktop_busy()
+            && !self.script.state.active()
+            && !self.snapshot.job.active()
+            && !matches!(
+                self.snapshot.connection,
+                Connection::Connected | Connection::Connecting
+            );
+        egui::CollapsingHeader::new(format!("Provisioning profile · {label}"))
+            .id_salt("profiles").default_open(self.active_profile.is_none()).show(ui, |ui| {
+                ui.label("Import once to keep the device key in macOS Keychain. The last selection loads on next launch.");
+                let mut selection = self.active_profile.clone();
+                ui.add_enabled_ui(change, |ui| {
+                    egui::ComboBox::from_id_salt("profile-selection").selected_text(&label).show_ui(ui, |ui| {
+                        for profile in &self.catalog.profiles {
+                            ui.selectable_value(&mut selection, Some(profile.id.clone()),
+                                format!("{} · {}", profile.name, &profile.id[..8]));
+                        }
+                    });
+                });
+                if selection != self.active_profile && let Some(id) = selection {
+                    self.desktop_error = self.desktop.select(id).err();
+                }
+                ui.horizontal_wrapped(|ui| {
+                    if ui.add_enabled(change, egui::Button::new("Import profile…")).clicked() {
+                        self.desktop_error = self.desktop.import().err();
+                    }
+                    if ui.add_enabled(change, egui::Button::new("Load last saved profile")).clicked() {
+                        self.desktop_error = self.desktop.load().err();
+                    }
+                });
+                if !supported { ui.label(crate::profiles::Error::Unsupported.message()); }
+                else if !change && !self.desktop_busy() {
+                    ui.small("Disconnect and stop Python before changing the active profile.");
+                }
+            });
+        if self.desktop_busy() {
+            ui.label("Waiting for local dialog or credential storage…");
+        }
     }
 
     fn send(&mut self, action: Action) {
@@ -76,7 +218,9 @@ impl CompanionApp {
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(
-                    !self.snapshot.pending && self.snapshot.connection != Connection::Connected,
+                    !self.desktop_busy()
+                        && !self.snapshot.pending
+                        && self.snapshot.connection != Connection::Connected,
                     egui::Button::new(if self.mode.is_mock() {
                         "Scan mock devices"
                     } else {
@@ -91,6 +235,7 @@ impl CompanionApp {
             if ui
                 .add_enabled(
                     !transitioning
+                        && !self.desktop_busy()
                         && !self.snapshot.pending
                         && self.selected.is_some()
                         && self.snapshot.connection != Connection::Connected,
@@ -100,6 +245,21 @@ impl CompanionApp {
                 && let Some(id) = &self.selected
             {
                 self.send(Action::Connect(id.clone()));
+            }
+            if ui
+                .add_enabled(
+                    !self.desktop_busy()
+                        && !self.snapshot.pending
+                        && matches!(
+                            self.snapshot.connection,
+                            Connection::Disconnected | Connection::Failed(_)
+                        )
+                        && self.snapshot.selected.is_some(),
+                    egui::Button::new("Reconnect previous Pico"),
+                )
+                .clicked()
+            {
+                self.send(Action::Reconnect);
             }
             if ui
                 .add_enabled(
@@ -243,6 +403,7 @@ impl CompanionApp {
         }
         ui.horizontal_wrapped(|ui| {
             let can_acquire = self.snapshot.connection == Connection::Connected
+                && (self.mode.is_mock() || self.active_profile.is_some())
                 && self.snapshot.compatible()
                 && !self.snapshot.control_acquired
                 && !self.snapshot.pending;
@@ -764,7 +925,22 @@ impl CompanionApp {
                     .char_limit(4096)
                     .desired_width(f32::INFINITY),
             );
+            if ui
+                .add_enabled(!self.desktop_busy(), egui::Button::new("Choose…"))
+                .clicked()
+            {
+                self.destination_error = self
+                    .desktop
+                    .destination(
+                        crate::desktop::DestinationContext::from_snapshot(&self.snapshot),
+                        self.download_destination.clone(),
+                    )
+                    .err();
+            }
         });
+        if let Some(error) = self.destination_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
         let destination = std::path::PathBuf::from(&self.download_destination);
         let ready = available && self.snapshot.downloads.session == Session::Ready;
         let queue = Command::Queue {
@@ -994,8 +1170,25 @@ impl CompanionApp {
 
 impl eframe::App for CompanionApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_desktop();
         if self.backend.snapshots.has_changed().unwrap_or(false) {
             self.snapshot = self.backend.snapshots.borrow_and_update().clone();
+            if self.snapshot.connection == Connection::Connected {
+                self.selected = self
+                    .snapshot
+                    .selected
+                    .as_ref()
+                    .map(|device| device.id.clone());
+            } else if !matches!(
+                self.snapshot.connection,
+                Connection::Scanning | Connection::Connecting
+            ) && self
+                .selected
+                .as_ref()
+                .is_some_and(|id| !self.snapshot.devices.iter().any(|d| &d.id == id))
+            {
+                self.selected = None;
+            }
             if self.identity_epoch != self.snapshot.epoch {
                 self.identity_epoch = self.snapshot.epoch;
                 self.manufacturer.clear();
@@ -1021,13 +1214,6 @@ impl eframe::App for CompanionApp {
                     self.product = value.value().product.into();
                 }
             }
-            if self.selected.is_none() {
-                self.selected = self
-                    .snapshot
-                    .devices
-                    .first()
-                    .map(|device| device.id.clone());
-            }
         }
         if self.backend.scripts.has_changed().unwrap_or(false) {
             self.script = self.backend.scripts.borrow_and_update().clone();
@@ -1049,10 +1235,19 @@ impl eframe::App for CompanionApp {
                 if let Some(error) = self.enqueue_error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
+                if let Some(error) = self.desktop_error {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                        if ui.button("Dismiss").clicked() {
+                            self.desktop_error = None;
+                        }
+                    });
+                }
                 if let Some(error) = self.snapshot.last_error {
                     ui.colored_label(ui.visuals().error_fg_color, error.message());
                 }
                 ui.separator();
+                self.profiles(ui);
                 self.connection(ui);
                 ui.separator();
                 self.status(ui);

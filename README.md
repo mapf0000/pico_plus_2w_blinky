@@ -27,8 +27,16 @@ The app authenticates on connect using the profile and encrypts commands/results
 No Pico button press, display, OS pairing or Bluetooth bond is required, including
 reconnect. Firmware without a provisioned key exposes public status but refuses
 control. BLE v3 deliberately rejects older apps/firmware. Physical Y Stop remains.
-The prototype stores the profile in a private file; OS credential-store import
-and authenticated remote key rotation are still planned.
+On macOS, use **Provisioning profile → Import profile…** to import the existing
+private JSON into Keychain. The last saved selection loads on next launch;
+`--profile PATH` remains a session-only override. Changing profiles requires
+disconnecting and stopping Python. **Reconnect previous Pico** rediscovers that
+device and authenticates again; acquire control explicitly afterward. Windows/Linux
+credential stores and authenticated remote key rotation remain planned.
+
+Build a local macOS app with `scripts/build-companion`, then open
+`target/Pico Companion.app`. The bundle has Bluetooth permission descriptions
+and an ad-hoc local signature; distribution signing/notarization is separate.
 
 Select the input layout used by the USB target. Set an initial delay, send text,
 and focus a disposable editor on that target. Cancel stops the current effect;
@@ -45,7 +53,8 @@ Released Pico buttons arrive over the encrypted notification stream. Background
 polling keeps controls available. Native Python scripting runs a bounded generator
 in a lazy child process; see [SCRIPTING.md](docs/SCRIPTING.md) for the API, Stop and
 resource boundary. Encrypted Bluetooth downloads stream to disk with verification
-and explicit saving; see [DOWNLOADS.md](docs/DOWNLOADS.md). Credentials remain
+and explicit saving; choose a new local filename with **Choose…**. See
+[DOWNLOADS.md](docs/DOWNLOADS.md). USB-target credential prompts remain
 unimplemented. The host-agent USB protocol and local display presets remain.
 USB chunk acknowledgements wait for native receiver credit.
 

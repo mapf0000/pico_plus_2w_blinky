@@ -1,9 +1,11 @@
 mod app;
 mod backend;
 mod ble;
+mod desktop;
 mod download_smoke;
 mod identity_smoke;
 mod profile;
+mod profiles;
 mod python;
 mod python_heap;
 mod python_smoke;
@@ -24,6 +26,9 @@ static ALLOCATOR: python_heap::BudgetAllocator = python_heap::BudgetAllocator;
     about = "Native Pico companion feasibility app (mock or Bluetooth control)"
 )]
 struct Args {
+    /// Test one disposable native credential, without a profile, radio or firmware access.
+    #[arg(long, conflicts_with_all = ["profile", "mock", "ble", "self_test", "create_profile", "python_self_test"])]
+    credential_store_self_test: bool,
     /// Receive and verify a real host file through BLE; writes the chosen new local filename.
     #[arg(long,requires_all=["profile","test_file","test_destination"],conflicts_with_all=["mock","self_test","identity_self_test","stream_self_test","python_self_test","python_ble_self_test"])]
     download_self_test: bool,
@@ -83,6 +88,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return python_worker::run();
     }
     let mut args = Args::parse();
+    if args.credential_store_self_test {
+        return profiles::self_test();
+    }
     if args.python_self_test {
         return python_smoke::run();
     }
@@ -184,7 +192,6 @@ fn ble_smoke(
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut phase = Phase::Scan;
     let mut revision = 0;
-    let mut device_id = None;
     let mut initial_uptime = None;
     let mut last_sample = None;
     loop {
@@ -202,7 +209,6 @@ fn ble_smoke(
                         .devices
                         .first()
                         .ok_or("No Pico BLE devices found")?;
-                    device_id = Some(device.id.clone());
                     backend.send(snapshot.epoch, Action::Connect(device.id.clone()))?;
                     phase = Phase::Connect;
                 }
@@ -287,13 +293,13 @@ fn ble_smoke(
                     phase = Phase::Disconnect;
                 }
                 Phase::Disconnect if snapshot.connection == Connection::Disconnected => {
-                    backend.send(
-                        snapshot.epoch,
-                        Action::Connect(device_id.clone().ok_or("Missing device")?),
-                    )?;
+                    backend.send(snapshot.epoch, Action::Reconnect)?;
                     phase = Phase::Reconnect;
                 }
                 Phase::Reconnect if snapshot.connection == Connection::Connected => {
+                    if snapshot.control_acquired {
+                        return Err("Reconnect unexpectedly reacquired control".into());
+                    }
                     if authenticated {
                         backend.send(snapshot.epoch, Action::Acquire)?;
                         phase = Phase::ReAcquire;

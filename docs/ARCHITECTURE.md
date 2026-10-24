@@ -25,6 +25,24 @@ filter/clear/autoscroll are native UI controls.
 Reset and cancel bypass the four-slot normal command queue. No device I/O runs
 in egui callbacks. Reconnect is explicit; effects are never replayed.
 
+`desktop.rs` owns one background local operation, with one request/result slot.
+Native dialog futures start on the window thread and are awaited on that worker;
+profile loading, Keychain and destination filesystem checks stay off egui and the
+radio/backend executors. Destination replies carry their connection epoch/state and
+original draft, so late dialogs cannot replace newer work. Closing a window does
+not join a blocked native permission/dialog operation or defer BLE/HID cleanup.
+
+`profiles.rs` separates a bounded non-secret catalog from macOS Keychain records.
+Import is add-only for credentials, with an exclusive OS-released catalog lock
+and verified input bounds. Startup restores the last selection unless a CLI
+profile overrides it. Active profile replacement goes through a bounded backend
+intent, requires no live connection/owned job/active Python, advances the core
+epoch and drains the old radio before scanning with the replacement. Secret
+profiles never enter snapshots, diagnostics or Python. Reconnect scans for the
+previous device and authenticates fresh, without reacquiring control or replay.
+`scripts/build-companion` produces a local macOS bundle with Bluetooth permission
+metadata; the Python helper remains the same executable in worker mode.
+
 `firmware/src/main.rs` initializes the board, USB supervisor, watchdog, display,
 PSRAM diagnostics, persistent USB identity and CYW43 once. Its mandatory
 `new_with_bluetooth` driver uses the board's existing RM2 PIO pins/divider/DMA.

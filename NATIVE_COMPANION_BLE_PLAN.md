@@ -1,6 +1,6 @@
 # Native companion: remaining feature-parity plan
 
-Updated 2026-10-12. This is the active backlog for replacing the former Web UI
+Updated 2026-10-19. This is the active backlog for replacing the former Web UI
 with the native Rust/egui Bluetooth companion. Completed implementation and test
 history belong in [DEVICE_TESTING.md](docs/DEVICE_TESTING.md); remove completed
 items from this backlog as milestones land.
@@ -52,7 +52,7 @@ Bluetooth-only removal (`2f6579c`). Historical sources can be read with
 
 | Former workflow | Current companion / reusable code | Remaining work |
 | --- | --- | --- |
-| Unattended authorization (new deployment requirement) | BLE v3 Noise PSK, private provisioning profile, encrypted control/snapshots and no physical gate implemented | Board acceptance, OS credential-store import/profile selection and authenticated atomic rotation |
+| Unattended authorization (new deployment requirement) | BLE v3 Noise PSK, encrypted control/snapshots and no physical gate; macOS native import/selection with Keychain implemented | Remaining board acceptance, native import/relaunch acceptance, Windows/Linux credential stores and authenticated atomic rotation |
 | Overview: USB state, firmware version/build, host OS, agent presence/version, CDC installation stage, compatibility errors | Protected overview v1, full build/limits, version/OS/hostname/heartbeat age and CDC stage reuse existing firmware state | Populated/stale-agent and CDC-stage acceptance; installation byte progress/specific failure reasons if needed; gate future workflows by actual BLE support |
 | Start/stop USB | Repeated BLE stop/start, live macOS removal and descriptor rebuild passed | Timeout/detach and job-contention fault acceptance |
 | USB manufacturer/product editing and persistent save | Native editor, encrypted acquired read/save, verified inactive-slot transaction and USB-off lifecycle gate implemented; macOS descriptor/readback/reconnect checks passed | Independent power-cycle persistence and editor failure/draft acceptance; worst-case flash blackout measurement |
@@ -60,8 +60,8 @@ Bluetooth-only removal (`2f6579c`). Historical sources can be read with
 | Python `wait_event()` for buttons and connection/USB/agent changes | Native supervisor delivers bounded button history and non-replayed capability transitions; real child/mock reconnect and button waits pass | Physical button/Stop, USB/agent transition and reconnect acceptance on hardware |
 | Host filesystem navigation | Encrypted BLE list/cancel/page relay; bounded native Home/Root/Up, breadcrumbs, hidden files, metadata, selection and pagination implemented; real agent pagination/error/cancel/reconnect passed | Interactive navigation acceptance, slow-agent/soak and Windows/Linux board checks |
 | Encrypted path/default-path transfer initiation and session reconnect | Independent host Noise client, encrypted BLE/USB relay, source/default controls and cancellation barrier implemented | Queued batches, USB/agent-loss and longer soak checks |
-| Downloads: queue, progress, rate/ETA, verification, save | One disk receiver, four requests/eight history items, authenticated manifest/chunks/close, SHA-256, no-overwrite saving and encrypted receipt implemented; 8,195-byte Pico transfer matched source and completed its encrypted receipt; empty/default and five cancel/reconnect cycles passed | Queued batches, slower/full disk and platform checks; evaluate 1-MiB/counter limit and save dialog polish |
-| Connection loss and reconnect | Explicit reconnect and incarnation checks exist | Convenient recovery with fresh secret-authenticated sessions, stale-response rejection and no execution replay; platform acceptance |
+| Downloads: queue, progress, rate/ETA, verification, save | One disk receiver, four requests/eight history items, authenticated manifest/chunks/close, SHA-256, no-overwrite saving and encrypted receipt implemented; 8,195-byte Pico transfer matched source and completed its encrypted receipt; empty/default and five cancel/reconnect cycles passed | Queued batches, slower/full disk and platform checks; evaluate 1-MiB/counter limit and native save-picker acceptance |
+| Connection loss and reconnect | Deliberate reconnect rediscovers the previous device, creates a fresh authenticated session and leaves control released; profile replacement invalidates old intents | Real radio/reboot/soak and platform acceptance; no effect replay or fallback to another device |
 
 Historical evidence: `apps/frontend/src/app.rs`, `ui/overview.rs`, `ui/scripts.rs`,
 `ui/transfers.rs`, `ui/diagnostics.rs`, `api.rs`, `python.rs`,
@@ -107,11 +107,12 @@ Remaining:
   passed during milestone 4; longer cold-start soak remains open. Measure standalone
   handshake time and stack headroom;
   compilation/linked static size does not establish runtime stack usage or entropy.
-- Import/select profiles into each supported OS credential store and reconnect
-  without repeatedly supplying a file. Current `--profile PATH` is a private-file
-  prototype; macOS/Linux permissions are checked, Windows ACL handling is not
-  accepted. Keep explicit trusted provisioning export and secure external backups.
-  Do not place production credentials only under `target/`.
+- Accept the macOS native import/selection/relaunch workflow and Keychain
+  lock/permission prompts interactively. The native store's disposable round-trip,
+  no-overwrite and cleanup check passed; portable tests cover catalog bounds,
+  storage denial/missing keys/conflicts and commit rollback. Implement Windows/Linux
+  native stores and accept Windows file ACLs. CLI private files remain available;
+  retain trusted external provisioning backups rather than relying on build output.
 - Implement authenticated atomic key rotation after agreeing its recovery behavior.
   Proposed flow: generate and securely persist the new profile on the trusted PC
   first; rotate only over an authenticated acquired idle connection; write/verify
@@ -284,8 +285,9 @@ Remaining acceptance/release work:
   connection or a long queued batch can exhaust counters earlier; fail closed,
   reconnect explicitly and do not claim resumable downloads. Larger payloads/
   counters need a versioned design and matched Pico/native tests.
-- Polish explicit destination selection with a native save dialog and clearer
-  terminal/history presentation. Anonymous unverified staging is OS-cleaned;
+- Accept the implemented native destination picker interactively and polish
+  terminal/history presentation. The picker rejects existing files/symlinks and
+  drops stale epoch/draft results; the receiver retains its final no-overwrite guard. Anonymous unverified staging is OS-cleaned;
   abrupt exit during verified final copy/persist may leave a private verified
   `.pico-download-*` file. Review reclaim/durability and cumulative saved-storage
   policy without deleting user files. Windows ACL/filesystem and Linux/Windows
@@ -293,16 +295,27 @@ Remaining acceptance/release work:
 
 ## 5. Recovery, packaging and release acceptance
 
-- Complete in-app profile import/selection and convenient reconnect, building on
-  the implemented CLI profile workflow and actionable wrong-key error. Reconnect
-  uses a fresh session without Pico interaction; preserve intentional control
-  acquisition and never replay effects. OS bonding is not a prerequisite.
+macOS import/selection, Keychain records, bounded non-secret catalog, deliberate
+reconnect and a local app bundle are implemented. The native destination picker
+also landed. Completed software/native-store evidence is in DEVICE_TESTING.md.
+
+Remaining:
+
+- Accept profile import/selection/relaunch and denied/locked Keychain recovery
+  through the native window. Validate real radio reconnect with the new deliberate
+  action, cancellation during rediscovery and stale-result rejection. Profile
+  changes must remain disconnected/idle, control acquisition explicit, and effects
+  non-replayed. Implement/accept Windows/Linux native stores separately.
 - Test repeated connect/control/cancel/disconnect cycles, soak, app shutdown and
   device reboot. Measure idle CPU/RAM, startup and release artifact size, including
   interpreter and staging components; keep heavyweight work lazy.
-- Package the macOS app with the required Bluetooth permission metadata and helper
-  discovery. Then validate real Windows/Linux BLE and their installation/permission
-  paths; compilation alone is not platform acceptance. Do not add an updater first.
+- Accept the built macOS app's Bluetooth/Keychain permission prompts, native
+  file dialogs, independent installation and signed-upgrade behavior. The local
+  builder adds Bluetooth purpose strings and an ad-hoc signature; packaged Python
+  self-tests verify same-executable helper startup. Distribution signing/notarization
+  and real Windows/Linux installation/BLE checks remain. Do not add an updater first.
+- Apply the desktop shell/theme/navigation and persistent Stop work in
+  NATIVE_COMPANION_UI_UX_PLAN.md; the current single scrolling page remains.
 - Update README/operator workflows, AGENTS, architecture, protocol, scripting,
   threat model and device acceptance records with each implemented milestone.
   Legacy WebSocket sections should remain clearly historical until migrated.

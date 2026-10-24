@@ -25,10 +25,20 @@ display data and never grant control, enable code execution or reveal the PSK.
 The finite metadata response introduces no file-stream ACK or transfer credit.
 
 Key possession authorizes the device, rather than identifying a particular PC.
-The prototype stores keys in private profile files on the trusted control PC and
-plaintext dedicated Pico flash; CRC only detects corruption. Unix loaders reject
-group/world-readable profiles. OS credential-store integration, Windows ACL
-acceptance, remote authenticated rotation and revocation are unfinished. Both the
+Factory/CLI profiles remain private files on the trusted PC, and the Pico key
+remains in plaintext dedicated flash; CRC only detects corruption. Unix loaders
+reject group/world-readable files. The native macOS importer stores versioned
+records in the default macOS Keychain. Its separate bounded catalog contains public IDs,
+names and selection only. Keychain account/device ID must match; insert-only
+operations refuse existing-key replacement, including concurrent imports. Failed
+catalog commits roll back only newly inserted credentials; crashes may leave an
+unlisted credential recoverable by reimporting the original profile. Storage
+denial/missing keys/corrupt catalogs never cause a plaintext fallback. No profile
+contents reach logs, arguments, snapshots or Python. In-memory activation requires
+disconnected/idle state and invalidates old intents/results; reconnect never grants
+control automatically. Local credential prompts can require OS interaction even
+though Pico physical access is unnecessary. Windows/Linux credential stores,
+Windows ACL acceptance, remote rotation and revocation remain unfinished. Both the
 JSON profile and provisioning image contain the key and need private handling;
 back up credentials outside build output before deployment. Losing all copies
 requires another trusted provisioning route. Whole-flash reading, compromised

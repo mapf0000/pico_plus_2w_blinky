@@ -48,8 +48,45 @@ printing their contents. Windows file ACL handling is not yet accepted.
 The reserved region is separate from USB identity and absent from firmware ELF
 load segments. Ordinary ELF updates preserve it; whole-chip erase or reprovisioning
 can destroy/replace it. Reprovisioning changes the key, so old profiles stop working.
-This prototype reads a private file per launch. OS credential-store integration,
-profile selection UI and authenticated atomic rotation are still backlog items.
+On macOS, **Provisioning profile → Import profile…** reads a private profile
+through a native file picker and stores its 64-byte versioned record in the
+default Keychain (normally login), under service `org.pico-rust.companion.ble.v1` and its public device
+ID. Import does not provision or flash a Pico, delete the source, or export keys.
+A different key for an already stored device ID is rejected; this is not rotation.
+
+The dropdown selects a saved profile, and **Load last saved profile** retries the
+saved selection after unlocking Keychain. The last selection restores next launch
+without a CLI argument. `--profile PATH` takes precedence for that launch and is
+not silently imported. Profile changes require disconnecting and stopping Python;
+backend checks enforce that and discard older connection intents. Loading a
+profile never automatically connects or acquires control. Reconnect
+never reacquires control or retries effects.
+**Reconnect previous Pico** explicitly scans for the previous device ID and opens
+a fresh authenticated connection; it never falls back to a different discovered
+device. Acquire control separately. Scan results require explicit initial selection.
+
+The non-secret, version-1 catalog is
+`~/Library/Application Support/Pico Companion/profiles-v1.json`: at most 16
+profiles, 64-byte display names and 8 KiB total. It contains only device IDs,
+names and the selected ID; keys and source paths are absent. Catalog transactions
+use an OS-released exclusive lock and same-directory replacement. Key insertion
+never overwrites an existing item, even across processes. Failed metadata saves
+remove only a credential newly inserted by that transaction. A crash can leave an
+unlisted Keychain item; reimporting the same private JSON restores its catalog
+entry without replacing the key. Keep your trusted external backup. Locked/denied
+storage, missing keys and malformed catalogs produce errors, with no plaintext
+credential-store fallback. An OS permission prompt may need your response.
+
+Windows/Linux native credential stores and Windows file ACL acceptance remain
+open; `--profile PATH` remains available. Authenticated atomic rotation is not
+implemented. Optional native-store acceptance uses one random disposable item:
+
+```sh
+cargo run -p pico-companion -- --credential-store-self-test
+```
+
+This test neither reads a real profile nor uses Bluetooth/USB; it adds, reads,
+rejects overwrite of and deletes that disposable item.
 Losing every copy requires another trusted provisioning route; unauthenticated
 BLE cannot reset or retrieve the key. Never provision through the hostile USB target.
 
@@ -148,7 +185,10 @@ keyboard contents are not sent to logs or temporary files.
 ## Encrypted downloads
 
 Acquire control and connect the encrypted host session in **Encrypted file downloads**.
-Enter a host source path and an absolute new local filename, then Queue file.
+Enter a host source path and use **Choose…** for a new local filename (or enter
+an absolute filename), then Queue file. The picker never saves or queues a file
+on its own. Existing files/symlinks are rejected, even if the OS dialog offers
+replacement. A picker result is discarded if the connection or draft changed.
 The default-path buttons use the USB host agent's in-memory default candidate.
 Files authenticate, stream to anonymous disk staging, verify size/count/SHA-256,
 and save without overwriting an existing destination before sending their receipt.
@@ -159,3 +199,19 @@ backpressure, cancellation, disk/crash behavior and headless board tests.
 Update both companion and firmware for Info flag 64. New companions can connect
 to older v3 firmware and report downloads unsupported; older companions reject
 this new feature bit. Use the updated host agent (60-second ACK timeout/one credit).
+
+
+## Local macOS bundle
+
+```sh
+scripts/build-companion
+open 'target/Pico Companion.app'
+```
+
+The builder creates an ad-hoc signed native bundle for the build Mac, including
+Bluetooth purpose strings. It installs nothing and contains no profiles, keys,
+host-agent artifact or external interpreter. Python uses the same bundled
+executable in worker mode; the packaged process self-test validates that path.
+Distribution signing/notarization, platform permission prompts and independent
+installation acceptance remain release work. Close an older app before switching
+to a newly built bundle; the builder is not an updater.

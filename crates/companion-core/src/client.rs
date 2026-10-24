@@ -1,7 +1,8 @@
 use crate::{
-    Action, CANCEL_TIMEOUT, CONNECT_TIMEOUT, Connection, Diagnostic, DiagnosticContext, Event,
-    Failure, IdentityUpdate, Job, MAX_DEVICES, MAX_DIAGNOSTICS, OVERVIEW_INTERVAL, Operation,
-    Outcome, REQUEST_TIMEOUT, Reply, Request, STATUS_INTERVAL, Snapshot, Tag, Transport, keyboard,
+    Action, CANCEL_TIMEOUT, CONNECT_TIMEOUT, Connection, Device, Diagnostic, DiagnosticContext,
+    Event, Failure, IdentityUpdate, Job, MAX_DEVICES, MAX_DIAGNOSTICS, OVERVIEW_INTERVAL,
+    Operation, Outcome, REQUEST_TIMEOUT, Reply, Request, STATUS_INTERVAL, Snapshot, Tag, Transport,
+    keyboard,
 };
 use std::time::Duration;
 
@@ -44,6 +45,7 @@ pub struct Client<T> {
     next_request: u64,
     pending: Option<Pending>,
     queued: Option<Action>,
+    reconnect: Option<Device>,
     next_status: Duration,
     next_overview: Duration,
     now: Duration,
@@ -60,6 +62,7 @@ impl<T: Transport> Client<T> {
             next_request: 0,
             pending: None,
             queued: None,
+            reconnect: None,
             next_status: Duration::ZERO,
             next_overview: Duration::ZERO,
             now: Duration::ZERO,
@@ -74,6 +77,28 @@ impl<T: Transport> Client<T> {
 
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
+    }
+
+    /// Change local credentials only with no live connection or owned job.
+    /// Invalidate queued UI intents and responses before replacing the connector.
+    pub fn replace_transport(&mut self, replacement: T, now: Duration) -> Result<T, Failure> {
+        if !matches!(
+            self.snapshot.connection,
+            Connection::Disconnected | Connection::Failed(_) | Connection::Scanning
+        ) || self.snapshot.job.active()
+        {
+            return Err(Failure::NotReady);
+        }
+        self.now = now;
+        self.disconnect(None);
+        if !self.new_epoch() {
+            return Err(Failure::IdExhausted);
+        }
+        let old = std::mem::replace(&mut self.transport, replacement);
+        self.snapshot.selected = None;
+        self.snapshot.devices.clear();
+        self.note("Connection configuration changed; connect again");
+        Ok(old)
     }
 
     /// Reject UI commands queued for a connection that has since been replaced.
@@ -104,6 +129,23 @@ impl<T: Transport> Client<T> {
                 self.changed();
             }
             Action::Disconnect => self.disconnect(None),
+            Action::Reconnect => {
+                if !matches!(
+                    self.snapshot.connection,
+                    Connection::Disconnected | Connection::Failed(_)
+                ) {
+                    self.reject(Failure::NotReady);
+                    return;
+                }
+                let Some(device) = self.snapshot.selected.clone() else {
+                    self.reject(Failure::NotReady);
+                    return;
+                };
+                self.dispatch(Action::Scan, now);
+                if self.snapshot.connection == Connection::Scanning {
+                    self.reconnect = Some(device);
+                }
+            }
             Action::Cancel => self.cancel(now),
             Action::SelectPath(path) => {
                 if crate::filesystem::valid_path(&path) {
@@ -887,6 +929,16 @@ impl<T: Transport> Client<T> {
         self.snapshot.pending = false;
         self.snapshot.refreshing = false;
         self.changed();
+        if kind == Kind::Scan
+            && let Some(device) = self.reconnect.take()
+        {
+            if self.snapshot.devices.iter().any(|d| d.id == device.id) {
+                self.dispatch(Action::Connect(device.id), now);
+            } else {
+                self.reject(Failure::DeviceNotFound);
+            }
+            return;
+        }
         if let Some(action) = self.queued.take() {
             if self.snapshot.job == Job::Queued {
                 self.snapshot.job = Job::Idle;
@@ -896,6 +948,7 @@ impl<T: Transport> Client<T> {
     }
 
     fn disconnect(&mut self, error: Option<Failure>) {
+        self.reconnect = None;
         self.transport.close();
         self.pending = None;
         self.queued = None;

@@ -79,6 +79,7 @@ impl Overview {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
+    DeviceNotFound,
     MissingKey,
     Authentication,
     PermissionDenied,
@@ -106,10 +107,15 @@ pub enum Failure {
 impl Failure {
     pub fn message(self) -> &'static str {
         match self {
+            Self::DeviceNotFound => {
+                "Previous Pico not found; check power and advertising, then retry"
+            }
             Self::AgentUnavailable => {
                 "Host agent unavailable; enable USB and start the agent on the attached computer"
             }
-            Self::MissingKey => "Load the device's provisioning profile with --profile PATH",
+            Self::MissingKey => {
+                "Import or select the device's provisioning profile, or use --profile PATH"
+            }
             Self::Authentication => "Device authentication failed; check the provisioning profile",
             Self::PermissionDenied => "Bluetooth permission denied",
             Self::Busy => "Another controller owns control",
@@ -373,6 +379,7 @@ pub enum Action {
     SelectPath(String),
     Scan,
     Connect(String),
+    Reconnect,
     Acquire,
     Release,
     SetUsbEnabled(bool),

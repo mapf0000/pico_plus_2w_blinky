@@ -987,3 +987,98 @@ approximately 25 MB. Full/slow/unwritable disk, source mutation/disappearance,
 forced USB/agent loss, abrupt app exit/final-save races, saturated HID/physical Stop, maximum file
 size/counter lifetime, independent cold-start soak, forced MTU 23 and real
 Windows/Linux BLE/filesystem checks remain open in NATIVE_COMPANION_BLE_PLAN.md.
+
+
+## 2026-10-19: native profile recovery, destination picker and macOS bundle
+
+Implemented the next native companion slice without changing BLE/USB formats or
+firmware. The window can import/select a private factory profile, retain the
+last selection in a bounded non-secret catalog, and restore its key from macOS
+Keychain on later launches. `--profile PATH` remains a session-only override.
+Import is not provisioning/rotation: it never flashes, deletes the source or
+replaces an existing different key. Windows/Linux native stores remain pending.
+
+The catalog is at most 8 KiB/16 profiles, with bounded validated IDs/names and no
+key/source-path fields. An OS-released exclusive lock serializes updates; keys
+are inserted before same-directory catalog commit. Failure rolls back only newly
+inserted credentials, never preexisting backups. Denied/locked/missing storage
+and malformed catalogs fail explicitly, without automatic plaintext fallback.
+Crashes may leave an unlisted Keychain item; reimporting its original profile
+restores catalog membership. Keep external trusted provisioning backups.
+
+Profile activation is a bounded backend intent requiring disconnected/idle state
+and stopped Python. It replaces/drains the radio connector with a newer epoch,
+clearing old selection/queued work before scanning again. Deliberate **Reconnect
+previous Pico** scans for the previous device ID, authenticates fresh and leaves
+control released. It never picks a different discovered device or replays work.
+Initial device selection is now explicit. The existing BLE self-test now uses
+this reconnect action and checks authority is not silently reacquired.
+
+**Choose…** starts a native save dialog without blocking egui or BLE. The worker
+validates its result, refuses existing files/symlinks, and returns epoch/state/draft
+correlation. A stale result cannot replace a newer draft or connection. Selecting
+a filename does not create/queue a file; final receiver no-overwrite verification
+is unchanged. A pending native dialog/credential prompt cannot defer scoped
+backend shutdown; the local worker is not joined while blocked.
+
+Validation commands/results:
+
+```sh
+cargo fmt --all -- --check
+git diff --check
+cargo test -p ble-protocol -p python-runtime -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol -p python-runtime --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo run -p pico-companion -- --python-self-test
+cargo build -p pico-companion --release
+cargo test -p pico-companion profiles::tests
+cargo test -p pico-companion desktop::tests
+scripts/build-companion
+./target/release/pico-companion --credential-store-self-test
+'./target/Pico Companion.app/Contents/MacOS/pico-companion' --credential-store-self-test
+'./target/Pico Companion.app/Contents/MacOS/pico-companion' --python-self-test
+codesign --verify --deep --strict 'target/Pico Companion.app'
+plutil -lint 'target/Pico Companion.app/Contents/Info.plist'
+```
+
+The affected suite passed **110 non-doc tests**: BLE protocol 16, companion core
+43, native app 37, actual Python process integration 2 and runtime 12. Added
+coverage includes reconnect without acquire/replay, missing previous devices,
+cancelled/late scans, live-profile-change rejection during an owned job, epoch
+replacement/stale UI commands, catalog corruption/bounds/locking, credential
+denial/missing/conflicting keys, idempotent import, new-key rollback versus
+preexisting-key preservation, destination races/symlinks/stale drafts, and
+non-blocking shutdown with an outstanding native dialog future. The final
+profile-only suite passed all 8 tests after lock-error/platform guard refinement.
+The three focused desktop tests also passed after checking disconnect state as
+well as epoch/draft: Disconnect itself does not advance the client epoch.
+Clippy, formatting, release builds and mock/actual-process self-tests passed.
+
+Live native credential-store checks passed from the release executable and
+bundled executable: create one random disposable account, read/compare its
+versioned record, reject overwrite, delete, then confirm absence. No real profile
+was imported or modified by these checks; no credential bytes were printed or
+passed as arguments. Fault/rollback tests use a fake store and disposable files.
+
+The builder produced `target/Pico Companion.app` with Bluetooth usage strings,
+a verified local ad-hoc signature and the same executable for Python worker mode.
+Packaged actual-process Python acceptance passed, including deadlines, denied
+imports, memory pressure, hard Stop and scoped mock effects. The bundle contains
+only its executable, Info.plist and signature resources: no profile, key, external
+interpreter or host-agent artifact. Executable size is approximately 25.1 MB
+(25,128,800 bytes on this Apple Silicon build). This is a local native-architecture
+artifact, not a notarized/distribution-signed installer or accepted upgrade.
+
+The actual updated native window was launched, including the packaged build.
+The development GL capture returned black, and a targeted OS window capture
+could not create an image, so visual rendering is not accepted from those checks.
+Native import/select/relaunch, file-picker click paths, permission prompts,
+keyboard/focus behavior and connected rendering still need interactive acceptance.
+No live Pico reconnect, HID, USB/agent or firmware test was run in this milestone;
+no USB Pico was enumerated during validation and no firmware flash was needed.
+Linux/Windows credential/dialog/BLE acceptance and macOS signed installation/upgrade
+checks remain in the plans.
+
+Native integration references: [RFD async/threading guidance](https://docs.rs/rfd/0.17.2/rfd/#macos-non-windowed-applications-async-and-threading),
+[Security Framework password APIs](https://docs.rs/security-framework/3.7.0/security_framework/passwords/index.html),
+and [Apple protected-resource descriptions](https://developer.apple.com/documentation/bundleresources/protected-resources).
