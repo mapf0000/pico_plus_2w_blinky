@@ -38,6 +38,15 @@ Build a local macOS app with `scripts/build-companion`, then open
 `target/Pico Companion.app`. The bundle has Bluetooth permission descriptions
 and an ad-hoc local signature; distribution signing/notarization is separate.
 
+The companion opens on **Overview**. Use the sidebar to switch between **Devices**,
+**Keyboard**, **Scripts**, **Files**, **Transfers**, **Settings** and **Help**;
+narrow windows use a task selector. Connection/control state remains at the top.
+**Stop typing / script** stays at the bottom on every task; **Cancel downloads**
+is separate while a download is active. **Show activity** opens the diagnostics
+drawer, or the Activity workspace in a short window. Settings offers System,
+Light and Dark appearance for this launch. Switching tasks preserves drafts;
+reconnecting still discards connection-scoped device work.
+
 Select the input layout used by the USB target. Set an initial delay, send text,
 and focus a disposable editor on that target. Cancel stops the current effect;
 Pico **Y** provides device-wide Stop. Disconnect cancels this companion's job.
@@ -58,7 +67,7 @@ and explicit saving; choose a new local filename with **Choose…**. See
 unimplemented. The host-agent USB protocol and local display presets remain.
 USB chunk acknowledgements wait for native receiver credit.
 
-In **USB identity**, edit the manufacturer/product, choose **Disable USB**, then
+In **Settings → USB identity**, edit the manufacturer/product, choose **Disable USB**, then
 **Save identity** and **Enable USB** to apply the names. Both USB buttons are next
 to the identity editor and explain when acquiring control or finishing a job is
 required. Saving validates printable ASCII

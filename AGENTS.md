@@ -77,7 +77,10 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 
 ### Native companion: `apps/companion/`
 
-- `src/app.rs`: native egui rendering and controls.
+- `src/app.rs`: snapshot intake, task drafts and native egui controls.
+- `src/ui/`: desktop shell/navigation/activity drawer, shared theme tokens and
+  presentation/readiness mapping. Stop stays outside scroll regions; background
+  refresh never disables controls. Text validation is cached, with backend revalidation.
 - `src/backend.rs`: bounded UI/profile commands, Tokio backend and shutdown.
 - `src/desktop.rs`, `src/profiles.rs`: one local operation worker, native dialogs, bounded non-secret catalog and macOS Keychain. No secrets in snapshots or Python; no keychain/file work in UI or radio callbacks.
 - `src/smoke.rs`: deterministic headless mock lifecycle check.

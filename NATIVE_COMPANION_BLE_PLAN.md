@@ -1,6 +1,6 @@
 # Native companion: remaining feature-parity plan
 
-Updated 2026-10-19. This is the active backlog for replacing the former Web UI
+Updated 2026-10-24. This is the active backlog for replacing the former Web UI
 with the native Rust/egui Bluetooth companion. Completed implementation and test
 history belong in [DEVICE_TESTING.md](docs/DEVICE_TESTING.md); remove completed
 items from this backlog as milestones land.
@@ -314,8 +314,12 @@ Remaining:
   builder adds Bluetooth purpose strings and an ad-hoc signature; packaged Python
   self-tests verify same-executable helper startup. Distribution signing/notarization
   and real Windows/Linux installation/BLE checks remain. Do not add an updater first.
-- Apply the desktop shell/theme/navigation and persistent Stop work in
-  NATIVE_COMPANION_UI_UX_PLAN.md; the current single scrolling page remains.
+- Accept the implemented desktop shell/theme/navigation, compact task selector,
+  persistent connection/Stop controls and activity drawer. Shared theme tokens,
+  cached keyboard validation and readiness reasons landed on 2026-10-24; visual,
+  keyboard/focus, connected Stop and accessibility acceptance remain open. Continue
+  device recovery/freshness, identity draft conflict and safe preference work in
+  NATIVE_COMPANION_UI_UX_PLAN.md.
 - Update README/operator workflows, AGENTS, architecture, protocol, scripting,
   threat model and device acceptance records with each implemented milestone.
   Legacy WebSocket sections should remain clearly historical until migrated.

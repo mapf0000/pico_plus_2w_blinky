@@ -12,6 +12,7 @@ mod python_smoke;
 mod python_worker;
 mod smoke;
 mod stream_smoke;
+mod ui;
 
 use clap::Parser;
 use companion_core::mock::Scenario;
@@ -147,7 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([820.0, 790.0])
+            .with_inner_size([1120.0, 760.0])
             .with_min_inner_size([480.0, 520.0]),
         ..Default::default()
     };

@@ -1082,3 +1082,46 @@ checks remain in the plans.
 Native integration references: [RFD async/threading guidance](https://docs.rs/rfd/0.17.2/rfd/#macos-non-windowed-applications-async-and-threading),
 [Security Framework password APIs](https://docs.rs/security-framework/3.7.0/security_framework/passwords/index.html),
 and [Apple protected-resource descriptions](https://developer.apple.com/documentation/bundleresources/protected-resources).
+
+
+## Native companion shell/theme milestone — 2026-10-24
+
+Implemented task workspaces (Overview, Devices, Keyboard, Scripts, Files,
+Transfers, Settings, Help and Activity), persistent connection/control and
+owned-job panels, compact task selector, optional resizable diagnostics drawer
+and launch-local System/Light/Dark choices. Drafts remain in app state across
+navigation; core epoch and authoritative command admission are unchanged.
+Stop routes active Python through its supervisor and manual/unrelated keyboard
+work through scoped Cancel; download cancellation is separate. Keyboard lowering
+is cached by text/layout/delay and submission revalidates in the client.
+No firmware, protocol, flash layout, packet capacity or dependency changed.
+
+Validation commands:
+
+```sh
+cargo fmt --all -- --check
+cargo test -p ble-protocol -p python-runtime -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol -p python-runtime --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo run -p pico-companion -- --python-self-test
+scripts/build-companion
+```
+
+The targeted suites pass 115 tests: BLE protocol 16, core 43, companion 42,
+actual Python process integration 2 and Python runtime 12. New coverage includes
+readiness/admission agreement across connection/control/USB/pending/background
+refresh, Stop ownership, validation invalidation, light/dark token contrast and
+painted Stop visibility across all nine workspaces at 1120 × 760, 820 × 790,
+480 × 520 and 200% zoom. Navigation fixtures retain an unsent draft and active
+job. Token checks cover normal text on three surfaces at 4.5:1, field boundaries
+at 3:1 and selected white text at 4.5:1. They do not measure every actual widget,
+hover/disabled/focus state or prove full-content fit at those sizes.
+
+Mock lifecycle and actual Python-child containment/Stop checks pass. The local
+macOS app bundle builds and its ad-hoc signature verifies. The packaged native
+window was launched in mock mode; macOS reports a 1120 × 792 window including
+the native title bar. Targeted OS capture failed with “could not create image
+from window”, so no captured visual acceptance is claimed. Interactive visual,
+keyboard/focus, VoiceOver, connected Stop and platform checks remain open.
+The user reported the Pico in BOOTSEL; no firmware flash or hardware effect was
+needed or performed for this UI milestone.

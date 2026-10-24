@@ -11,7 +11,15 @@ Control PC (egui) <--- authenticated BLE GATT ---> Pico Plus 2 W
                                             USB-connected target + host agent
 ```
 
-`apps/companion/src/app.rs` renders snapshots and enqueues actions. A bounded
+`apps/companion/src/app.rs` renders snapshots and enqueues actions. Its child
+`ui/shell.rs` composes task navigation, persistent connection/owned-job panels and
+an optional activity drawer. `ui/state.rs` derives presentation/readiness from
+core snapshots and caches bounded text validation; it owns no transport state.
+`ui/theme.rs` applies shared light/dark tokens. Task drafts stay in the app across
+navigation; existing epoch invalidation still clears device identity on a new
+connection. Stop routes through the Python supervisor for its active run and
+through scoped Cancel for a manual/unrelated effect. Download cancel is separate.
+No view preferences or drafts are persisted by this UI slice. A bounded
 Tokio backend owns `companion-core::Client`; the btleplug actor owns all radio
 objects and asynchronous I/O. Connection incarnation plus request IDs scope
 commands and replies. Scan/connect/status, authentication/control, USB controls,

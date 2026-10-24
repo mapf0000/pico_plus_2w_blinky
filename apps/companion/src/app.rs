@@ -1,8 +1,12 @@
 use crate::backend::{Backend, Mode};
+use crate::ui::state::{self, Workspace};
 use companion_core::{
-    Action, Connection, IdentityUpdate, Job, Outcome, Snapshot, UsbIdentity, keyboard, layouts,
+    Action, Connection, IdentityUpdate, Job, Snapshot, UsbIdentity, keyboard, layouts,
 };
 use eframe::egui;
+
+#[path = "ui/shell.rs"]
+mod shell;
 
 const DEMO_TEXT: &str = "Hello from Pico!";
 struct ProfileInstall {
@@ -12,6 +16,9 @@ struct ProfileInstall {
 
 pub struct CompanionApp {
     backend: Backend,
+    workspace: Workspace,
+    activity_open: bool,
+    validation: state::TextValidation,
     snapshot: Snapshot,
     mode: Mode,
     selected: Option<String>,
@@ -46,12 +53,24 @@ impl CompanionApp {
         mode: Mode,
         profile: Option<ble_session::provisioning::Profile>,
     ) -> std::io::Result<Self> {
+        Self::from_context(&cc.egui_ctx, mode, profile)
+    }
+
+    fn from_context(
+        ctx: &egui::Context,
+        mode: Mode,
+        profile: Option<ble_session::provisioning::Profile>,
+    ) -> std::io::Result<Self> {
+        crate::ui::theme::apply(ctx);
         let active_profile = profile.as_ref().map(crate::profiles::id);
         let desktop =
-            crate::desktop::Desktop::new(cc.egui_ctx.clone(), !mode.is_mock(), profile.is_none())?;
-        let backend = Backend::start_with_profile(mode, profile, cc.egui_ctx.clone())?;
+            crate::desktop::Desktop::new(ctx.clone(), !mode.is_mock(), profile.is_none())?;
+        let backend = Backend::start_with_profile(mode, profile, ctx.clone())?;
         Ok(Self {
             backend,
+            workspace: Workspace::Overview,
+            activity_open: false,
+            validation: state::TextValidation::default(),
             snapshot: Snapshot::default(),
             mode,
             selected: None,
@@ -401,6 +420,24 @@ impl CompanionApp {
         } else {
             ui.label("Connect to read capabilities and USB status.");
         }
+        if let Some(caps) = &self.snapshot.capabilities {
+            if !caps.overview_supported {
+                ui.small("This firmware does not advertise a detailed overview.");
+            } else if caps.overview.is_none() {
+                ui.small("Acquire control to read the protected device overview.");
+            } else {
+                ui.small("Overview refreshes every 10 seconds while control is acquired. USB status refreshes every second.");
+            }
+        }
+        if !self.mode.is_mock() {
+            ui.small("Uses the provisioned device key. No Pico button press is required.");
+        }
+        if self.mode.is_mock() {
+            ui.small("This overview is simulated; no Bluetooth or USB access.");
+        }
+    }
+
+    fn control_actions(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             let can_acquire = self.snapshot.connection == Connection::Connected
                 && (self.mode.is_mock() || self.active_profile.is_some())
@@ -428,17 +465,16 @@ impl CompanionApp {
                 self.send(Action::Release);
             }
         });
-        if let Some(caps) = &self.snapshot.capabilities {
-            if !caps.overview_supported {
-                ui.small("This firmware does not advertise a detailed overview.");
-            } else if caps.overview.is_none() {
-                ui.small("Acquire control to read the protected device overview.");
-            } else {
-                ui.small("Overview refreshes every 10 seconds while control is acquired. USB status refreshes every second.");
+        if !self.snapshot.control_acquired {
+            if !self.mode.is_mock() && self.active_profile.is_none() {
+                ui.small(
+                    "Disconnect, then import a private profile in Devices to acquire control.",
+                );
+            } else if !self.snapshot.compatible() {
+                ui.small("This firmware is incompatible with companion control.");
+            } else if self.snapshot.pending {
+                ui.small("Waiting for the current command to finish.");
             }
-        }
-        if !self.mode.is_mock() {
-            ui.small("Uses the provisioned device key. No Pico button press is required.");
         }
     }
 
@@ -567,7 +603,7 @@ impl CompanionApp {
     }
 
     fn keyboard(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Keyboard demonstration");
+        ui.heading("Keyboard");
         ui.label(
             if self.mode.is_mock() { "Execution is simulated." } else { "Types on the computer attached to the Pico USB port. Use an initial delay to focus the target window. Pico Y stops execution." },
         );
@@ -599,7 +635,7 @@ impl CompanionApp {
         ui.label("Text");
         ui.add(
             egui::TextEdit::multiline(&mut self.text)
-                .desired_rows(2)
+                .desired_rows(8)
                 .desired_width(f32::INFINITY)
                 .char_limit(keyboard::MAX_TEXT_CHARS),
         );
@@ -612,13 +648,11 @@ impl CompanionApp {
             "Effect limit: {} bytes of KBD1",
             script_protocol::MAX_BYTECODE
         ));
-        // Validation stays bounded; typed text never goes to diagnostic output.
-        let validation = keyboard::text_effect(self.text.clone(), &self.layout, self.delay_ms);
-        let layout_supported = self
-            .snapshot
-            .capabilities
-            .as_ref()
-            .is_some_and(|caps| caps.layouts.contains(&self.layout));
+        self.validation
+            .update(&self.text, &self.layout, self.delay_ms);
+        let validation = self.validation.summary;
+        let blocker =
+            state::typing_blocker(&self.snapshot, self.script.state.active(), &self.layout);
         ui.horizontal_wrapped(|ui| {
             if ui.button("Use demo text").clicked() {
                 self.text = DEMO_TEXT.into();
@@ -626,9 +660,8 @@ impl CompanionApp {
             if ui
                 .add_enabled(
                     self.snapshot.can_send()
-                        && !self.script.state.active()
-                        && layout_supported
-                        && validation.is_ok(),
+                        && blocker.is_none()
+                        && validation.is_some_and(|v| v.is_ok()),
                     egui::Button::new("Send text"),
                 )
                 .clicked()
@@ -654,23 +687,19 @@ impl CompanionApp {
                 ui.spinner();
             }
         });
-        if let Err(error) = validation {
+        if let Some(Err(error)) = validation {
             ui.colored_label(ui.visuals().error_fg_color, error.message());
         }
-        ui.label(match self.snapshot.job {
-            Job::Idle => "No effect submitted",
-            Job::Queued => "Waiting for status read…",
-            Job::Sending => "Submitting effect…",
-            Job::Running => "Effect running",
-            Job::Cancelling => "Cancelling current effect…",
-            Job::Finished(Outcome::Completed) => "Effect completed",
-            Job::Finished(Outcome::Cancelled) => "Effect cancelled",
-            Job::Finished(Outcome::Rejected) => "Effect rejected",
-            Job::Finished(Outcome::UsbUnavailable) => "USB unavailable",
-            Job::Finished(Outcome::Disconnected) => {
-                "Effect ended on disconnect; it will not be replayed"
-            }
-        });
+        if let Some(reason) = blocker {
+            ui.label(reason);
+        }
+        if let Some(Ok((bytes, duration))) = validation {
+            ui.small(format!(
+                "{bytes} encoded bytes · approximately {:.1} s including delay",
+                duration as f64 / 1000.0
+            ));
+        }
+        ui.label(state::job_label(self.snapshot.job));
     }
 
     fn filesystem(&mut self, ui: &mut egui::Ui) {
@@ -1218,52 +1247,86 @@ impl eframe::App for CompanionApp {
         if self.backend.scripts.has_changed().unwrap_or(false) {
             self.script = self.backend.scripts.borrow_and_update().clone();
         }
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("Pico Companion");
-                match self.mode {
-                    Mode::Mock(scenario) => {
-                        ui.label(format!(
-                            "Mock mode · {} scenario · no Bluetooth or USB access",
-                            scenario.name()
-                        ));
-                    }
-                    Mode::Ble => {
-                        ui.label("Bluetooth · Pico control");
-                    }
-                }
-                if let Some(error) = self.enqueue_error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
-                }
-                if let Some(error) = self.desktop_error {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(ui.visuals().error_fg_color, error);
-                        if ui.button("Dismiss").clicked() {
-                            self.desktop_error = None;
-                        }
-                    });
-                }
-                if let Some(error) = self.snapshot.last_error {
-                    ui.colored_label(ui.visuals().error_fg_color, error.message());
-                }
-                ui.separator();
-                self.profiles(ui);
-                self.connection(ui);
-                ui.separator();
-                self.status(ui);
-                ui.separator();
-                self.usb_identity(ui);
-                ui.separator();
-                self.keyboard(ui);
-                ui.separator();
-                self.scripting(ui);
-                ui.separator();
-                self.filesystem(ui);
-                ui.separator();
-                self.downloads(ui);
-                ui.separator();
-                self.diagnostics(ui);
+        self.shell(ui);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_bounds(shape: &egui::epaint::Shape, needle: &str) -> Option<egui::Rect> {
+        match shape {
+            egui::epaint::Shape::Text(t) if t.galley.job.text == needle => {
+                Some(t.visual_bounding_rect())
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(|s| text_bounds(s, needle)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn stop_stays_visible_on_every_workspace_at_desktop_sizes_and_zoom() {
+        let ctx = egui::Context::default();
+        let mut app = CompanionApp::from_context(
+            &ctx,
+            Mode::Mock(companion_core::mock::Scenario::Normal),
+            None,
+        )
+        .unwrap();
+        app.snapshot = state::tests::ready();
+        app.snapshot.job = Job::Running;
+        app.snapshot.job_owner = Some(0);
+        app.text = "Keep this unsent draft".into();
+        for dark in [false, true] {
+            ctx.set_visuals(if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
             });
-        });
+            crate::ui::theme::apply(&ctx);
+            for (width, height, zoom) in [
+                (1120.0, 760.0, 1.0),
+                (820.0, 790.0, 1.0),
+                (480.0, 520.0, 1.0),
+                (480.0, 520.0, 2.0),
+            ] {
+                ctx.set_zoom_factor(zoom);
+                for workspace in Workspace::ALL {
+                    app.workspace = workspace;
+                    app.activity_open = true;
+                    // Settle layout/fonts and panel changes before checking painted bounds.
+                    let mut output = None;
+                    for _ in 0..3 {
+                        let mut frame = ctx.run_ui(
+                            egui::RawInput {
+                                screen_rect: Some(egui::Rect::from_min_size(
+                                    egui::Pos2::ZERO,
+                                    egui::vec2(width, height),
+                                )),
+                                ..Default::default()
+                            },
+                            |ui| app.shell(ui),
+                        );
+                        frame.textures_delta.clear();
+                        output = Some(frame);
+                    }
+                    let output = output.unwrap();
+                    let (clip, rect) = output
+                        .shapes
+                        .iter()
+                        .find_map(|s| {
+                            text_bounds(&s.shape, "Stop typing / script").map(|r| (s.clip_rect, r))
+                        })
+                        .expect("Stop must be painted on every workspace");
+                    assert!(
+                        clip.contains_rect(rect),
+                        "Stop clipped: {workspace:?} {width}x{height} zoom={zoom} {clip:?} {rect:?}"
+                    );
+                    assert_eq!(app.text, "Keep this unsent draft");
+                    assert_eq!(app.snapshot.job, Job::Running);
+                }
+            }
+        }
     }
 }

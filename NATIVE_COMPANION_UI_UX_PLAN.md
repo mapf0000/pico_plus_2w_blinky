@@ -1,9 +1,12 @@
 # Native companion: desktop styling and usability upgrade plan
 
-Created 2026-10-11; updated 2026-10-19. Status: shell/theme redesign remains
-proposed. Native profile import/selection, macOS Keychain, deliberate reconnect,
-explicit initial device selection and a download save picker have landed through
-the feature plan. Their connected/interactive acceptance remains open.
+Created 2026-10-11; updated 2026-10-24. Status: the first shell/theme slice is
+implemented. The app now has task workspaces, persistent connection and owned-job
+controls, compact navigation, a resizable activity drawer and shared light/dark
+style tokens. Keyboard validation is cached and blocked sending has an explicit
+reason. Native profile import/selection, macOS Keychain, deliberate reconnect and
+the save picker are retained. Visual, keyboard/focus, assistive-technology and
+connected hardware acceptance remain open; implementation is not release acceptance.
 Scope: the native Rust/egui desktop companion on
 macOS, Windows and Linux, with macOS as the first visual and hardware acceptance
 platform. No mobile or browser design is included.
@@ -14,13 +17,54 @@ dependencies. This file owns presentation, navigation, interaction, accessibilit
 and usability acceptance. A polished screen never substitutes for an implemented
 capability or recorded device acceptance.
 
+## Current implementation and next acceptance
+
+The 2026-10-24 slice implements the shell in `apps/companion/src/ui/shell.rs`,
+with presentation/admission explanations in `ui/state.rs` and shared style tokens
+in `ui/theme.rs`. All existing actions are reachable in Overview, Devices,
+Keyboard, Scripts, Files, Transfers, Settings and Help. Activity is also a full
+workspace for small windows. There are no placeholder task tabs.
+
+- Navigation and refresh preserve text, script, identity and transfer drafts;
+  existing connection-incarnation invalidation remains authoritative.
+- Stop typing/script stays outside every scroll region and stops the Python
+  supervisor or sends the manual job's scoped Cancel as appropriate. Download
+  cancellation remains a separate persistent action while downloads are active.
+- At narrow widths a labelled task selector replaces the sidebar. At short
+  heights Show activity opens the full workspace rather than consuming task height.
+- System/Light/Dark choices use egui's theme preference; typography, spacing,
+  foreground/background and field/focus tokens are shared. Appearance, navigation
+  and drawer state are launch-local; safe persisted preferences remain planned.
+- Text lowering runs only when text/layout/delay changes; submission still uses
+  authoritative backend validation. Readiness ignores background refresh.
+
+Automated fixtures check painted Stop text is unclipped on all nine workspaces,
+light/dark, three desktop sizes including 480 × 520, and 200% zoom; they retain an
+unsent draft and active job. These checks do not establish full-content fit,
+keyboard navigation, readable disabled/focus states or real platform usability.
+Token contrast checks cover normal text against workspace/input/raised surfaces
+(4.5:1), boundaries (3:1) and selected white text (4.5:1); actual widget-state and
+assistive-technology acceptance remain pending. Evidence is in DEVICE_TESTING.md.
+
+User feedback (2026-10-24): workspace navigation/resizing looks good, but the
+required device-selection step was not apparent. The user could not connect to
+the mock because no row was selected, so functional Stop acceptance remains
+pending. Treat this as a discovery-flow usability defect, not a transport failure
+or a need for more operator instructions.
+
+Next: improve discovery selection and Connect affordances as specified in section
+5, then accept connection and persistent Stop without verbal guidance. Follow
+with device recovery/freshness, friendly layout/delay inputs and identity draft conflicts.
+Keep high contrast, preferences, shortcuts, screen readers and platform refinement
+in the remaining phases below. No firmware/protocol change is needed for this slice.
+
 ## 1. Design assessment and intended outcome
 
 The supplied screenshot shows a working engineering interface whose information
 hierarchy does not yet match its tasks. The source review covers
 `apps/companion/src/app.rs`, `main.rs`, `backend.rs` interfaces exposed through the
 app, the companion README, and the `companion-core` state/action definitions.
-Current source includes USB identity editing beyond the screenshot; the feature
+The baseline source included USB identity editing beyond the screenshot; the feature
 plan records its acceptance. Preserve those changes during the UI redesign and
 use the feature plan/device testing records for implementation status.
 
@@ -334,6 +378,17 @@ connection problems. The toolbar owns persistent session state and quick access.
 - Make the whole row selectable; distinguish selected, connected and previously
   seen devices. If a discovered device becomes unavailable, mark it accordingly
   rather than silently substituting another device.
+- Address the observed mock-connection usability defect first: make the required
+  choice visible with a labelled selection control/clear row affordance and a
+  persistent selected-device summary. Place Connect beside or immediately after
+  the selection, identify its target, and show why it is disabled inline; a
+  tooltip or Help instructions alone are insufficient. Discovery selection must
+  be distinguishable from an established connection, including in the toolbar.
+  Preserve explicit choice; do not fix this by silently selecting or connecting
+  the first result. Apply the same flow to mock and real BLE devices.
+  Acceptance: from a fresh launch, a user can discover, select, connect, acquire
+  control and reach a running mock job to test Stop without verbal guidance;
+  exercise both one-result and multiple-result lists with keyboard and pointer.
 - Show empty states specific to never scanned, scanning, scan finished empty,
   adapter unavailable and permission failure. “No devices found” is not the correct
   message for every discovery failure.
@@ -698,17 +753,17 @@ Keep components small and introduce modules as the corresponding work lands.
 Track each phase with small reviewable changes. Accessibility, responsive desktop
 layout and truthful states are part of each phase, not a final cosmetic pass.
 
-| Phase | Implementation slice | Exit criteria |
-| --- | --- | --- |
-| A — Baseline and view specification | Capture current desktop screens; inventory action/state mappings; create deterministic fixtures; confirm layout/tokens against connected and failure states | Same tasks/states can be compared before/after; measured contrast pairs and layout measurements documented; backend dependencies identified |
-| B — Theme and shell | Shared tokens/components, light/dark, labelled task navigation, persistent connection/job areas, compact layout, activity drawer | Current actions remain available through the shell; Stop visible on every task; no clipping at agreed sizes/scales; keyboard navigation works |
-| C — Connection and overview | Device rows, explicit selection, state/action matrix, readiness summary, freshness, actionable error presentation | Setup and failure recovery work without reading logs; public/authenticated/acquired states cannot be confused; polling does not swallow clicks |
-| D — Keyboard and identity | Composer, friendly layout/delay inputs, cached validation, immutable job/draft separation, last-run results; identity draft/save conflict handling | Offline editing works; no silent paste/example loss; limits preserved; Stop and rejection/disconnect behavior verified; unsaved identity cannot cross devices |
-| E — Desktop refinement and accessibility | Safe preferences, shortcut help, native integration where feasible, screen-reader fixes, high contrast and reduced motion, structured copyable diagnostics | Keyboard-only workflows and assistive technology checks pass on accepted platforms; preferences recover safely; no continuous idle repaint |
-| F — Usability and release acceptance | Compare task sessions with baseline; refine observed friction; operator docs and device acceptance records | Success criteria below met; actual platform/hardware evidence recorded; remaining limitations explicitly listed |
+| Phase | Implementation slice | Exit criteria | Status (2026-10-24) |
+| --- | --- | --- | --- |
+| A — Baseline and view specification | Capture current desktop screens; inventory action/state mappings; create deterministic fixtures; confirm layout/tokens against connected and failure states | Same tasks/states can be compared before/after; measured contrast pairs and layout measurements documented; backend dependencies identified | Partial: new deterministic layout/state fixtures and token contrast checks; baseline capture and full widget measurements open |
+| B — Theme and shell | Shared tokens/components, light/dark, labelled task navigation, persistent connection/job areas, compact layout, activity drawer | Current actions remain available through the shell; Stop visible on every task; no clipping at agreed sizes/scales; keyboard navigation works | First slice implemented; interactive layout, keyboard and connected Stop acceptance open |
+| C — Connection and overview | Device rows, explicit selection, state/action matrix, readiness summary, freshness, actionable error presentation | Setup and failure recovery work without reading logs; public/authenticated/acquired states cannot be confused; polling does not swallow clicks | Partial: shared toolbar/readiness reasons; device-row, freshness and recovery refinement open |
+| D — Keyboard and identity | Composer, friendly layout/delay inputs, cached validation, immutable job/draft separation, last-run results; identity draft/save conflict handling | Offline editing works; no silent paste/example loss; limits preserved; Stop and rejection/disconnect behavior verified; unsaved identity cannot cross devices | Partial: cached validation and retained drafts; friendly fields, last-run detail and identity conflicts open |
+| E — Desktop refinement and accessibility | Safe preferences, shortcut help, native integration where feasible, screen-reader fixes, high contrast and reduced motion, structured copyable diagnostics | Keyboard-only workflows and assistive technology checks pass on accepted platforms; preferences recover safely; no continuous idle repaint | System/Light/Dark available for this launch; preferences and accessibility/refinement open |
+| F — Usability and release acceptance | Compare task sessions with baseline; refine observed friction; operator docs and device acceptance records | Success criteria below met; actual platform/hardware evidence recorded; remaining limitations explicitly listed | Pending; no participant or platform acceptance inferred from unit tests |
 
-Future feature screens land alongside their BLE-plan milestones, reusing this
-system. Do not delay the current-workflow improvement for Python or file transfers.
+Scripts, Files and Transfers already exist and are included in the shell. Further
+feature work reuses these workspaces alongside its BLE-plan milestone.
 
 ### Concrete usability acceptance
 
@@ -812,14 +867,12 @@ appearance and changed delay defaults. Put actual hardware/platform evidence in
 [docs/DEVICE_TESTING.md](docs/DEVICE_TESTING.md). Keep this plan's completion
 status honest and move completed acceptance evidence out of the backlog.
 
-## 13. First implementation slice
+## 13. Next implementation slice
 
-Start with shared typography/spacing/colors, the desktop shell, persistent job
-controls and the Keyboard workspace using current actions. Move diagnostics into
-the drawer and add explicit readiness reasons. This addresses the largest visible
-and operational problems without requiring new transport capabilities.
+The first shell/theme/Keyboard/readiness slice is implemented; interactive
+acceptance remains open as listed above.
 
-Follow with device discovery/recovery and overview hierarchy, then identity draft
+Continue with device discovery/recovery and overview hierarchy, then identity draft
 handling, appearance persistence and platform refinement. The state mapping and
 accessibility requirements apply throughout; do not trade them away to finish
 styling sooner.
