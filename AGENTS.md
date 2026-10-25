@@ -79,6 +79,8 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 
 - `src/app.rs`: snapshot intake, task drafts and native egui controls.
 - `src/ui/`: desktop shell/navigation/activity drawer, shared theme tokens and
+  reusable primary/quiet/Stop controls, explicit device selection, script
+  readiness/error presentation and shared
   presentation/readiness mapping. Stop stays outside scroll regions; background
   refresh never disables controls. Text validation is cached, with backend revalidation.
 - `src/backend.rs`: bounded UI/profile commands, Tokio backend and shutdown.

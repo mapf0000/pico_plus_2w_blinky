@@ -3,10 +3,23 @@
 The companion runs one RustPython generator in a supervised child of its own
 executable. Python runs on the control computer; the Pico executes only bounded
 KBD1. There is no browser frontend, system Python dependency or interpreter on the
-board. In **Python scripting**, edit source and use Start/Restart, Stop or
+board. In **Scripts**, edit source and use Start/Restart, Stop or
 Ctrl/Cmd+Enter. Edits affect the next run. The demo waits five seconds so you can
 focus a disposable editor on the USB computer. Select that computer's actual
 input layout in the script; the text-demo selector does not change Python layout.
+
+The unchanged built-in typing demo requires a connected compatible Pico,
+acquired control and a ready USB keyboard before Start or Ctrl/Cmd+Enter is
+available. Its readiness card offers **Acquire control**, **Enable USB** or
+**Open Devices** as appropriate; these actions do not start the script. General
+scripts remain runnable while disconnected so they can wait for events. The UI
+does not inspect arbitrary Python source to guess its effects. Runtime effect
+checks remain authoritative, including if readiness changes after Start.
+
+An uncaught error shows a short recovery message; expand **Technical details**
+for the bounded Python traceback. Layout and interpreter heap statistics are
+under **Run details**. Recovery hints are presentation only and never
+grant permission, retry, acquire control or replay effects automatically.
 
 ```python
 layout("win_en-US")

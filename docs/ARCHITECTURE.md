@@ -15,7 +15,14 @@ Control PC (egui) <--- authenticated BLE GATT ---> Pico Plus 2 W
 `ui/shell.rs` composes task navigation, persistent connection/owned-job panels and
 an optional activity drawer. `ui/state.rs` derives presentation/readiness from
 core snapshots and caches bounded text validation; it owns no transport state.
-`ui/theme.rs` applies shared light/dark tokens. Task drafts stay in the app across
+`ui/theme.rs` applies neutral canvas/chrome/card tokens in light/dark themes;
+`ui/components.rs` owns filled/quiet/Stop buttons, status badges and focus rings.
+One footer retains Stop and Activity; the toolbar Device menu owns Release and
+Disconnect. Connected discovery renders a summary rather than completed steps. Child modules `ui/devices.rs`
+and `ui/scripts.rs` render explicit selection/connect/acquire steps and script
+readiness/recovery. Only the unchanged known demo declares UI USB prerequisites;
+arbitrary scripts remain runnable offline. Traceback-derived recovery hints are
+presentation only; bounded interpreter IPC and effect admission are unchanged. Task drafts stay in the app across
 navigation; existing epoch invalidation still clears device identity on a new
 connection. Stop routes through the Python supervisor for its active run and
 through scoped Cancel for a manual/unrelated effect. Download cancel is separate.

@@ -1,4 +1,222 @@
-use companion_core::{Connection, Job, Outcome, Snapshot, keyboard};
+use companion_core::{Connection, Device, Job, Outcome, Snapshot, keyboard};
+
+pub fn layout_name(id: &str) -> &str {
+    match id {
+        "win_en-US" => "Windows · English (US)",
+        "win_en-GB" => "Windows · English (UK)",
+        "win_pt-BR" => "Windows · Portuguese (Brazil)",
+        "win_de-DE" => "Windows · German",
+        "mac_en-GB" => "Mac · English (UK)",
+        "mac_pt-BR" => "Mac · Portuguese (Brazil)",
+        "mac_de-DE" => "Mac · German",
+        _ => id,
+    }
+}
+
+pub fn selected_device<'a>(s: &'a Snapshot, selected: Option<&str>) -> Option<&'a Device> {
+    selected.and_then(|id| s.devices.iter().find(|device| device.id == id))
+}
+
+pub fn connect_blocker(
+    s: &Snapshot,
+    selected: Option<&str>,
+    desktop_busy: bool,
+) -> Option<&'static str> {
+    if s.connection == Connection::Connected {
+        Some("Already connected. Disconnect before choosing another Pico.")
+    } else if matches!(s.connection, Connection::Scanning | Connection::Connecting) {
+        Some("Wait for discovery or connection to finish, or choose Disconnect to cancel.")
+    } else if desktop_busy {
+        Some("Finish the profile or local dialog operation first.")
+    } else if s.pending {
+        Some("Waiting for the current command to finish.")
+    } else if selected_device(s, selected).is_none() {
+        Some("Select a Pico from the list above to enable Connect.")
+    } else {
+        None
+    }
+}
+
+pub fn acquire_blocker(s: &Snapshot, has_profile: bool) -> Option<&'static str> {
+    if s.connection != Connection::Connected {
+        Some("Connect to a Pico first.")
+    } else if !s.compatible() || s.capabilities.as_ref().is_some_and(|c| c.read_only) {
+        Some("This firmware does not support companion control.")
+    } else if !has_profile {
+        Some("Disconnect, then import a private profile in Devices.")
+    } else if s.control_acquired {
+        Some("Control is already acquired.")
+    } else if s.pending {
+        Some("Waiting for the current command to finish.")
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadinessAction {
+    Devices,
+    Acquire,
+    EnableUsb,
+}
+impl ReadinessAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Devices => "Open Devices",
+            Self::Acquire => "Acquire control",
+            Self::EnableUsb => "Enable USB",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Readiness {
+    pub message: &'static str,
+    pub action: Option<ReadinessAction>,
+    pub ready: bool,
+}
+
+/// Device readiness is independent of the editor. It never acquires or executes.
+pub fn usb_readiness(s: &Snapshot, has_profile: bool) -> Readiness {
+    let blocked = |message, action| Readiness {
+        message,
+        action,
+        ready: false,
+    };
+    if s.connection != Connection::Connected {
+        return blocked(
+            "Connect to a Pico in Devices before using its USB keyboard.",
+            Some(ReadinessAction::Devices),
+        );
+    }
+    if !s.compatible() || s.capabilities.as_ref().is_some_and(|c| c.read_only) {
+        return blocked(
+            "This firmware does not support companion keyboard control.",
+            Some(ReadinessAction::Devices),
+        );
+    }
+    if !s.control_acquired {
+        if !has_profile {
+            return blocked(
+                "Connected for status only. Disconnect and import a profile in Devices to use control.",
+                Some(ReadinessAction::Devices),
+            );
+        }
+        return blocked(
+            "Connected, but control is released. Acquire control to use the USB keyboard.",
+            Some(ReadinessAction::Acquire),
+        );
+    }
+    if s.job.active() {
+        return blocked(
+            "A keyboard effect is active. Wait for it to finish or choose Stop.",
+            None,
+        );
+    }
+    if s.pending {
+        return blocked("Waiting for the current command to finish.", None);
+    }
+    let Some(caps) = &s.capabilities else {
+        return blocked("Waiting for device capabilities.", None);
+    };
+    if !caps.status.usb_enabled {
+        return blocked(
+            "Control acquired. Enable USB to use the keyboard on the attached computer.",
+            Some(ReadinessAction::EnableUsb),
+        );
+    }
+    if !caps.status.usb_ready {
+        return blocked(
+            "USB is enabled. Waiting for the USB computer to recognize the keyboard.",
+            None,
+        );
+    }
+    Readiness {
+        message: "Ready to type on the computer connected to Pico USB.",
+        action: None,
+        ready: true,
+    }
+}
+
+/// Interpret only known exception names for presentation; never use traceback
+/// text for permissions or execution. Arbitrary Python errors retain their details.
+pub fn script_error_advice(error: &str) -> (&'static str, &'static str) {
+    let exception = error
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.trim()
+                .split_once(':')
+                .map_or(line.trim(), |(name, _)| name)
+        });
+    match exception {
+        Some("UsbUnavailable") => (
+            "USB keyboard was unavailable",
+            "Check control and USB readiness below, then start the script again when ready.",
+        ),
+        Some("DeviceDisconnected") => (
+            "The Pico connection was lost",
+            "Reconnect in Devices, acquire control, then start again. Effects are never replayed automatically.",
+        ),
+        Some("HostAgentUnavailable") => (
+            "The host agent was unavailable",
+            "Enable USB and start the host agent on the USB computer, then start the script again.",
+        ),
+        Some("EffectCancelled") => (
+            "The keyboard effect was cancelled",
+            "Start the script again only when you want another run.",
+        ),
+        Some("EffectRejected") => (
+            "The keyboard effect was rejected",
+            "Review the layout and effect limits in the script before starting again.",
+        ),
+        Some("MemoryError") => (
+            "Python reached its allocation limit",
+            "Reduce the script's allocations, then start again.",
+        ),
+        Some("SyntaxError" | "IndentationError") => (
+            "Python source needs a correction",
+            "Open technical details to find the source line, edit it, then start again.",
+        ),
+        _ if error.starts_with("Python step exceeded")
+            || error.starts_with("Python startup exceeded") =>
+        {
+            (
+                "Python exceeded its time limit",
+                "Yield effects regularly; avoid long computations between yields.",
+            )
+        }
+        _ => (
+            "The script stopped with an error",
+            "Review technical details and correct the script or its prerequisites before starting again.",
+        ),
+    }
+}
+
+pub fn script_start_allowed(
+    s: &Snapshot,
+    run: u64,
+    active: bool,
+    demo: bool,
+    source_valid: bool,
+) -> bool {
+    if !source_valid || (s.job.active() && s.job_owner != Some(run)) {
+        return false;
+    }
+    // Only the known built-in demo has declared USB prerequisites. Never inspect
+    // arbitrary Python source to guess effects or block offline event waiters.
+    if !demo {
+        return true;
+    }
+    let usb = s.connection == Connection::Connected
+        && s.compatible()
+        && s.control_acquired
+        && s.capabilities
+            .as_ref()
+            .is_some_and(|c| !c.read_only && c.status.usb_enabled && c.status.usb_ready);
+    usb && ((!s.pending && !s.job.active()) || active)
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Workspace {
@@ -135,6 +353,113 @@ pub(crate) mod tests {
         client.dispatch(Action::Acquire, LATENCY * 2);
         client.tick(LATENCY * 3);
         client.snapshot().clone()
+    }
+
+    #[test]
+    fn connection_requires_current_explicit_selection_for_one_or_multiple_devices() {
+        let mut s = ready();
+        s.connection = Connection::Disconnected;
+        s.control_acquired = false;
+        s.pending = false;
+        assert!(!s.devices.is_empty());
+        assert!(connect_blocker(&s, None, false).is_some());
+        let id = s.devices[0].id.clone();
+        assert!(connect_blocker(&s, Some(&id), false).is_none());
+        s.devices.push(Device {
+            id: "other".into(),
+            name: "Another Pico".into(),
+        });
+        assert!(connect_blocker(&s, None, false).is_some());
+        assert_eq!(
+            selected_device(&s, Some("other")).unwrap().name,
+            "Another Pico"
+        );
+        assert!(connect_blocker(&s, Some("missing"), false).is_some());
+        assert!(connect_blocker(&s, Some(&id), true).is_some());
+        s.refreshing = true;
+        assert!(connect_blocker(&s, Some(&id), false).is_none());
+        s.pending = true;
+        assert!(connect_blocker(&s, Some(&id), false).is_some());
+    }
+
+    #[test]
+    fn readiness_distinguishes_connect_control_usb_and_idle_user_work() {
+        let mut s = ready();
+        assert!(usb_readiness(&s, true).ready);
+        s.refreshing = true;
+        assert!(usb_readiness(&s, true).ready);
+        s.control_acquired = false;
+        assert_eq!(
+            usb_readiness(&s, true).action,
+            Some(ReadinessAction::Acquire)
+        );
+        assert_eq!(
+            usb_readiness(&s, false).action,
+            Some(ReadinessAction::Devices)
+        );
+        assert!(acquire_blocker(&s, false).is_some());
+        assert!(acquire_blocker(&s, true).is_none());
+        s.pending = true;
+        assert!(acquire_blocker(&s, true).is_some());
+        s.pending = false;
+        s.control_acquired = true;
+        s.capabilities.as_mut().unwrap().status.usb_enabled = false;
+        assert_eq!(
+            usb_readiness(&s, true).action,
+            Some(ReadinessAction::EnableUsb)
+        );
+        s.capabilities.as_mut().unwrap().status.usb_enabled = true;
+        s.capabilities.as_mut().unwrap().status.usb_ready = false;
+        assert!(!usb_readiness(&s, true).ready);
+        assert!(usb_readiness(&s, true).action.is_none());
+        s.connection = Connection::Disconnected;
+        assert_eq!(
+            usb_readiness(&s, true).action,
+            Some(ReadinessAction::Devices)
+        );
+    }
+
+    #[test]
+    fn only_the_declared_demo_requires_usb_before_start_and_shortcut() {
+        let mut s = Snapshot::default();
+        assert!(!script_start_allowed(&s, 1, false, true, true));
+        assert!(script_start_allowed(&s, 1, false, false, true));
+        assert!(!script_start_allowed(&s, 1, false, false, false));
+        s = ready();
+        assert!(script_start_allowed(&s, 1, false, true, true));
+        s.control_acquired = false;
+        assert!(!script_start_allowed(&s, 1, false, true, true));
+        assert!(script_start_allowed(&s, 1, false, false, true));
+        s.control_acquired = true;
+        s.job = Job::Running;
+        s.job_owner = Some(1);
+        s.pending = true;
+        assert!(script_start_allowed(&s, 1, true, true, true));
+        assert!(!script_start_allowed(&s, 2, true, false, true));
+        s.capabilities.as_mut().unwrap().status.usb_ready = false;
+        assert!(!script_start_allowed(&s, 1, true, true, true));
+    }
+
+    #[test]
+    fn script_faults_get_recovery_copy_without_using_arbitrary_messages_as_state() {
+        let usb = "runtime: Traceback (most recent call last):\n  File \"<script>\", line 4\nUsbUnavailable: USB HID is unavailable or control is not acquired\n";
+        assert_eq!(script_error_advice(usb).0, "USB keyboard was unavailable");
+        assert_eq!(
+            script_error_advice("runtime: Traceback\nDeviceDisconnected: lost").0,
+            "The Pico connection was lost"
+        );
+        assert_eq!(
+            script_error_advice("runtime: Traceback\nValueError: UsbUnavailable: some user text").0,
+            "The script stopped with an error"
+        );
+        assert_eq!(
+            script_error_advice("").0,
+            "The script stopped with an error"
+        );
+        assert_eq!(
+            script_error_advice("runtime: Traceback\nMemoryError\n").0,
+            "Python reached its allocation limit"
+        );
     }
 
     #[test]

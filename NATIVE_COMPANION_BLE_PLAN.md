@@ -316,7 +316,11 @@ Remaining:
   and real Windows/Linux installation/BLE checks remain. Do not add an updater first.
 - Accept the implemented desktop shell/theme/navigation, compact task selector,
   persistent connection/Stop controls and activity drawer. Shared theme tokens,
-  cached keyboard validation and readiness reasons landed on 2026-10-24; visual,
+  cached keyboard validation and readiness reasons landed on 2026-10-24. Discovery
+  radio rows, named selection/connect target, explicit acquire/USB readiness and
+  script recovery copy followed. Visual polish adds compact toolbar/footer,
+  connected-device summary, quiet/primary actions and neutral surfaces; the built-in demo now checks USB prerequisites
+  before starting while custom scripts can wait offline. Visual,
   keyboard/focus, connected Stop and accessibility acceptance remain open. Continue
   device recovery/freshness, identity draft conflict and safe preference work in
   NATIVE_COMPANION_UI_UX_PLAN.md.

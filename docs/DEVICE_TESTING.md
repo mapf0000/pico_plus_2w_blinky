@@ -1125,3 +1125,115 @@ from window”, so no captured visual acceptance is claimed. Interactive visual,
 keyboard/focus, VoiceOver, connected Stop and platform checks remain open.
 The user reported the Pico in BOOTSEL; no firmware flash or hardware effect was
 needed or performed for this UI milestone.
+
+
+## Discovery and execution readiness follow-up — 2026-10-24
+
+User acceptance of the shell found that selecting a device before Connect was
+not apparent. After connecting, the demo was started with control released and
+faulted at `require_usb()`. These are recorded usability defects; the earlier
+connected/Stop acceptance was not established by that attempt.
+
+Implemented explicit radio selection rows, a named selection beside Connect,
+inline disabled explanations and selected/connecting/connected toolbar labels.
+Devices now presents Choose → Connect → Acquire. Overview and Scripts share
+control/USB readiness with explicit Open Devices/Acquire control/Enable USB actions.
+The unchanged built-in USB typing demo checks readiness before Start and
+Ctrl/Cmd+Enter; general Python scripts can still start offline and wait for events.
+UI source matching is only a declared-demo convenience, never a permission check
+or a parser for arbitrary Python. Backend/interpreter effect checks remain final.
+Known script faults show recovery text before collapsed bounded technical details;
+traceback classification never changes connection/control state or executes work.
+No device selection, connection, acquisition, execution or effect replay is automatic.
+
+Validation (all passed):
+
+```sh
+cargo fmt --all -- --check
+cargo test -p ble-protocol -p python-runtime -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol -p python-runtime --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo run -p pico-companion -- --python-self-test
+scripts/build-companion
+```
+
+120 tests pass: BLE protocol 16, core 43, companion 47, actual-process integration
+2 and Python runtime 12. New egui interaction coverage sends pointer events into
+the real mock backend: disabled Connect without a choice, radio selection,
+Connect, blocked demo Start/Command+Enter without acquired control, Acquire,
+delayed text, navigation to Files and persistent Stop through cancellation.
+Presentation tests cover current/stale choices in one/multiple-device lists,
+background-refresh stability, missing profile, released control, USB disabled/not
+ready, demo admission versus custom offline scripts, owned-run restart and
+recovery copy for known/unknown errors. Existing layout/Stop geometry, client
+correlation/cancellation and production Python child suites continue to pass.
+
+The local macOS release app bundle builds and its ad-hoc signature verifies.
+A fresh packaged mock window was opened for interactive acceptance; older windows
+retain the earlier executable. Human connection-flow, keyboard/focus, Python demo
+Stop, real BLE/HID and other-platform acceptance remain pending unless recorded
+below. No new visual capture result or hardware acceptance is inferred from tests.
+Firmware/protocol/dependencies/capacities are unchanged; no hardware flash was needed.
+
+
+## Companion visual polish — 2026-10-24
+
+Implemented the screenshot review as one UI pass: neutral canvas/chrome/cards in
+both themes, consistent padding and smaller section headings, filled primary
+buttons, quiet secondary buttons with hover/focus treatment, red active Stop,
+text-labelled control/USB badges, full-width left-aligned navigation and radio
+rows. A compact toolbar names the device once and keeps Release/Disconnect in
+Device ▾. One fixed footer contains Stop, job state and Activity; download cancel
+remains separate. Connected Devices replaces completed discovery/connect steps
+with a summary, expandable device ID, Change device and current readiness.
+Interpreter metrics move under Run details. Identity/path forms stack or reserve
+picker/action width, filesystem tables can scroll horizontally, and keyboard
+layout labels are friendly while actual IDs/lowering/limits remain unchanged.
+
+Validation (all passed):
+
+```sh
+cargo fmt --all -- --check
+cargo test -p ble-protocol -p python-runtime -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol -p python-runtime --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo run -p pico-companion -- --python-self-test
+scripts/build-companion
+```
+
+121 tests pass: BLE protocol 16, core 43, companion 48, actual Python process
+integration 2 and Python runtime 12. The connected/released-control fixture
+checks toolbar/footer each stay at most 64 logical points at 1120 × 760 and
+completed/inapplicable actions are absent. The real egui pointer/mock-backend
+flow additionally exercises Release control and Disconnect through Device ▾.
+Existing Stop geometry covers all workspaces, desktop sizes and 200% zoom.
+Token contrast checks now include canvas/chrome/card/input/raised surfaces and
+success text as well as existing normal/accent/error/warning pairs. These do not
+establish every actual widget/disabled/hover/focus state or full-content fit.
+
+The release bundle builds and its local ad-hoc signature verifies. A fresh
+packaged mock instance was opened for visual review (1120 × 792 including title
+bar). Targeted OS capture again failed with “could not create image from window”.
+Native visual, keyboard-only,
+VoiceOver, real BLE/HID/USB, multi-monitor and other-platform acceptance remain
+open. The user's supplied screenshots describe the earlier build; no new captured
+visual acceptance is claimed. No firmware, wire format, authentication, capacity,
+dependency or asset-generation change and no device flash were needed.
+
+
+## Sidebar current-page indicator correction — 2026-10-24
+
+The user reported that the polished sidebar did not mark the active page. Its
+borderless Button setting suppressed egui's selected background. Restored selected
+frame painting while keeping inactive rows quiet, and added a persistent left
+accent marker. Existing outer keyboard-focus rings remain separate from selection;
+native selected-state accessibility metadata is retained.
+
+The existing layout fixture now checks the actually painted selected background
+without pointer interaction across every workspace in light/dark desktop layouts,
+as well as its earlier Stop geometry checks. Validation commands are unchanged
+from the visual-polish section above: formatting, the 121-test native matrix,
+Clippy, mock lifecycle, actual Python process checks and local release packaging.
+No firmware/protocol/dependency changes or device flash are involved. A fresh
+mock window is opened after rebuilding; native visual and assistive-technology
+acceptance remain pending.

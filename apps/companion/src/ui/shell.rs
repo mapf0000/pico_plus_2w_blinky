@@ -5,96 +5,152 @@ impl CompanionApp {
     pub(super) fn shell(&mut self, ui: &mut egui::Ui) {
         let compact = ui.available_width() < 800.0;
         let short = ui.available_height() < 650.0;
-        // First/outermost bottom panel: Stop never belongs to a scroll region.
+        // The first panel stays outermost: Stop never moves into scrolling content.
         egui::Panel::bottom("owned-work")
             .resizable(false)
+            .show_separator_line(false)
+            .frame(theme::chrome(ui))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    let script_active = self.script.state.active();
-                    let cancel_manual =
-                        state::cancel_manual(&self.snapshot, script_active, self.script.run);
-                    if ui
-                        .add_enabled(
-                            script_active || cancel_manual,
-                            egui::Button::new("Stop typing / script"),
-                        )
-                        .clicked()
-                    {
-                        if script_active {
+                    let active = self.script.state.active();
+                    let cancel = state::cancel_manual(&self.snapshot, active, self.script.run);
+                    if c::stop(ui, active || cancel, "Stop typing / script").clicked() {
+                        if active {
                             self.enqueue_error = self.backend.stop_script(self.script.run).err();
                         }
-                        if cancel_manual {
+                        if cancel {
                             self.send(Action::Cancel);
                         }
                     }
-                    if self.snapshot.downloads.active() && ui.button("Cancel downloads").clicked() {
+                    if self.snapshot.downloads.active()
+                        && c::quiet(ui, true, "Cancel downloads").clicked()
+                    {
                         self.send(Action::Download(companion_core::download::Command::Cancel));
                     }
-                    ui.label(if script_active {
+                    let label = if active {
                         self.script.state.label()
+                    } else if self.snapshot.job == Job::Idle {
+                        "Keyboard idle"
                     } else {
                         state::job_label(self.snapshot.job)
-                    });
+                    };
+                    ui.add_sized(
+                        [if compact { 120.0 } else { 230.0 }, 24.0],
+                        egui::Label::new(egui::RichText::new(label).small()).truncate(),
+                    )
+                    .on_hover_text(label);
+                    let errors = self
+                        .snapshot
+                        .diagnostics
+                        .iter()
+                        .filter(|d| d.error.is_some())
+                        .count();
+                    let label = if errors == 0 {
+                        "Activity".into()
+                    } else {
+                        format!("Activity ({errors})")
+                    };
+                    if c::quiet(ui, self.workspace != Workspace::Activity, &label).clicked() {
+                        if short {
+                            self.workspace = Workspace::Activity;
+                        } else {
+                            self.activity_open = !self.activity_open;
+                        }
+                    }
                 });
             });
         egui::Panel::top("connection-toolbar")
             .resizable(false)
+            .show_separator_line(false)
+            .frame(theme::chrome(ui))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.strong("Pico Companion");
                     if self.mode.is_mock() {
-                        ui.label("MOCK · no hardware access");
+                        c::badge(ui, "Mock", false)
+                            .on_hover_text("Simulated device · no Bluetooth or USB access");
                     }
-                    let name = self
-                        .snapshot
-                        .selected
-                        .as_ref()
-                        .map_or("No Pico selected", |d| d.name.as_str());
-                    ui.add(egui::Label::new(name).truncate())
-                        .on_hover_text(name);
-                    ui.label(self.snapshot.connection.label());
-                    ui.label(if self.snapshot.control_acquired {
-                        "Control acquired"
+                    let device = if matches!(
+                        self.snapshot.connection,
+                        Connection::Connected | Connection::Connecting
+                    ) {
+                        self.snapshot.selected.as_ref()
                     } else {
-                        "Control released"
-                    });
-                    ui.label(
-                        self.snapshot
-                            .capabilities
-                            .as_ref()
-                            .map_or("USB unknown", |c| {
-                                if c.status.usb_ready {
+                        state::selected_device(&self.snapshot, self.selected.as_deref())
+                    };
+                    let name = device.map_or("Choose a Pico", |d| d.name.as_str());
+                    ui.add_sized(
+                        [if compact { 160.0 } else { 210.0 }, 24.0],
+                        egui::Label::new(egui::RichText::new(name).strong()).truncate(),
+                    )
+                    .on_hover_text(name);
+                    c::badge(ui, self.snapshot.connection.label(), false);
+                    if self.snapshot.connection == Connection::Connected {
+                        c::badge(
+                            ui,
+                            if self.snapshot.control_acquired {
+                                "Control acquired"
+                            } else {
+                                "Control needed"
+                            },
+                            !self.snapshot.control_acquired,
+                        );
+                        if let Some(caps) = &self.snapshot.capabilities {
+                            c::badge(
+                                ui,
+                                if caps.status.usb_ready {
                                     "USB ready"
-                                } else if c.status.usb_enabled {
-                                    "USB waiting for host"
+                                } else if caps.status.usb_enabled {
+                                    "USB waiting"
                                 } else {
-                                    "USB disabled"
-                                }
-                            }),
-                    );
-                });
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Devices").clicked() {
+                                    "USB off"
+                                },
+                                !caps.status.usb_ready,
+                            );
+                        }
+                        if let Some(action) =
+                            state::usb_readiness(&self.snapshot, self.has_profile()).action
+                            && action != state::ReadinessAction::Devices
+                        {
+                            self.readiness_action(ui, action);
+                        }
+                    }
+                    if c::quiet(ui, true, "Devices").clicked() {
                         self.workspace = Workspace::Devices;
                     }
                     if matches!(
                         self.snapshot.connection,
                         Connection::Connected | Connection::Connecting | Connection::Scanning
-                    ) && ui.button("Disconnect").clicked()
-                    {
-                        self.send(Action::Disconnect);
+                    ) {
+                        let (response, _) = egui::containers::menu::MenuButton::from_button(
+                            egui::Button::new("Device ▾").frame(false),
+                        )
+                        .ui(ui, |ui| {
+                            if self.snapshot.control_acquired
+                                && c::quiet(
+                                    ui,
+                                    !self.snapshot.pending && !self.snapshot.job.active(),
+                                    "Release control",
+                                )
+                                .clicked()
+                            {
+                                self.send(Action::Release);
+                                ui.close();
+                            }
+                            if c::quiet(ui, true, "Disconnect").clicked() {
+                                self.send(Action::Disconnect);
+                                ui.close();
+                            }
+                        });
+                        c::focus(ui, &response, theme::palette(ui).accent);
                     }
                 });
-                if self.snapshot.connection == Connection::Connected {
-                    self.control_actions(ui);
-                }
                 if let Some(error) = self.enqueue_error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 if let Some(error) = self.desktop_error {
                     ui.horizontal_wrapped(|ui| {
                         ui.colored_label(ui.visuals().error_fg_color, error);
-                        if ui.button("Dismiss").clicked() {
+                        if c::quiet(ui, true, "Dismiss").clicked() {
                             self.desktop_error = None;
                         }
                     });
@@ -105,38 +161,8 @@ impl CompanionApp {
                 if compact {
                     egui::ComboBox::from_id_salt("workspace-selector")
                         .selected_text(self.workspace.label())
-                        .show_ui(ui, |ui| {
-                            self.navigation(ui);
-                        });
+                        .show_ui(ui, |ui| self.navigation(ui));
                 }
-            });
-        egui::Panel::bottom("activity-toggle")
-            .resizable(false)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    let errors = self
-                        .snapshot
-                        .diagnostics
-                        .iter()
-                        .filter(|d| d.error.is_some())
-                        .count();
-                    ui.label(format!("Activity · {errors} errors in retained history"));
-                    if self.workspace != Workspace::Activity
-                        && ui
-                            .button(if self.activity_open && !short {
-                                "Hide activity"
-                            } else {
-                                "Show activity"
-                            })
-                            .clicked()
-                    {
-                        if short {
-                            self.workspace = Workspace::Activity;
-                        } else {
-                            self.activity_open = !self.activity_open;
-                        }
-                    }
-                });
             });
         if self.activity_open && !short && self.workspace != Workspace::Activity {
             egui::Panel::bottom("activity-drawer")
@@ -144,6 +170,7 @@ impl CompanionApp {
                 .default_size(220.0)
                 .min_size(130.0)
                 .max_size(280.0)
+                .frame(theme::chrome(ui))
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("drawer-content")
@@ -153,22 +180,26 @@ impl CompanionApp {
         if !compact {
             egui::Panel::left("workspace-navigation")
                 .resizable(false)
-                .exact_size(if ui.available_width() >= 1100.0 {
-                    200.0
-                } else {
-                    176.0
-                })
+                .exact_size(184.0)
+                .show_separator_line(false)
+                .frame(theme::chrome(ui))
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("sidebar-tasks")
                         .show(ui, |ui| self.navigation(ui));
                 });
         }
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt(("workspace", self.workspace.label()))
-                .show(ui, |ui| self.workspace_content(ui));
-        });
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::palette(ui).canvas)
+                    .inner_margin(if compact { 16 } else { 24 }),
+            )
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt(("workspace", self.workspace.label()))
+                    .show(ui, |ui| self.workspace_content(ui));
+            });
     }
 
     fn workspace_content(&mut self, ui: &mut egui::Ui) {
@@ -187,11 +218,7 @@ impl CompanionApp {
                 self.status(ui);
                 ui.separator();
                 self.usb_controls(ui);
-                if let Some(reason) =
-                    state::typing_blocker(&self.snapshot, self.script.state.active(), &self.layout)
-                {
-                    ui.label(reason);
-                }
+                self.readiness(ui);
                 if ui.button("Open Keyboard").clicked() {
                     self.workspace = Workspace::Keyboard;
                 }
@@ -199,7 +226,8 @@ impl CompanionApp {
             Workspace::Devices => {
                 ui.heading("Devices");
                 self.profiles(ui);
-                ui.separator();
+                c::description(ui, "Connect a Pico and grant control to its USB tools.");
+                ui.add_space(12.0);
                 self.connection(ui);
             }
             Workspace::Keyboard => self.keyboard(ui),
@@ -234,9 +262,44 @@ impl CompanionApp {
     fn navigation(&mut self, ui: &mut egui::Ui) {
         for workspace in Workspace::ALL {
             if workspace == Workspace::Settings {
-                ui.separator();
+                ui.add_space(20.0);
             }
-            ui.selectable_value(&mut self.workspace, workspace, workspace.label());
+            ui.scope(|ui| {
+                let p = theme::palette(ui);
+                ui.visuals_mut().selection.bg_fill = if ui.visuals().dark_mode {
+                    egui::Color32::from_rgb(38, 57, 79)
+                } else {
+                    egui::Color32::from_rgb(220, 231, 250)
+                };
+                ui.visuals_mut().selection.stroke.color = p.primary;
+                let response = ui
+                    .allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 34.0),
+                        egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true),
+                        |ui| {
+                            ui.add(
+                                egui::Button::selectable(
+                                    self.workspace == workspace,
+                                    workspace.label(),
+                                )
+                                .frame_when_inactive(self.workspace == workspace)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                        },
+                    )
+                    .inner;
+                if self.workspace == workspace {
+                    let marker = egui::Rect::from_min_max(
+                        response.rect.left_top() + egui::vec2(3.0, 8.0),
+                        response.rect.left_bottom() + egui::vec2(6.0, -8.0),
+                    );
+                    ui.painter().rect_filled(marker, 2, p.accent);
+                }
+                c::focus(ui, &response, p.accent);
+                if response.clicked() {
+                    self.workspace = workspace;
+                }
+            });
         }
     }
 }

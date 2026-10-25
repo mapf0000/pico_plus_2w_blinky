@@ -1,85 +1,84 @@
 # Native companion: desktop styling and usability upgrade plan
 
-Created 2026-10-11; updated 2026-10-24. Status: the first shell/theme slice is
-implemented. The app now has task workspaces, persistent connection and owned-job
-controls, compact navigation, a resizable activity drawer and shared light/dark
-style tokens. Keyboard validation is cached and blocked sending has an explicit
-reason. Native profile import/selection, macOS Keychain, deliberate reconnect and
-the save picker are retained. Visual, keyboard/focus, assistive-technology and
-connected hardware acceptance remain open; implementation is not release acceptance.
-Scope: the native Rust/egui desktop companion on
-macOS, Windows and Linux, with macOS as the first visual and hardware acceptance
-platform. No mobile or browser design is included.
+Created 2026-10-11; updated 2026-10-24. The desktop shell and polish are
+implemented. This is now a remaining-work and acceptance plan, with the detailed
+interaction contracts below retained as reference. macOS is the first acceptance
+platform; Windows/Linux claims require their own evidence.
 
-This plan complements [NATIVE_COMPANION_BLE_PLAN.md](NATIVE_COMPANION_BLE_PLAN.md).
-That file owns feature parity, authentication, streaming, Python and release
-dependencies. This file owns presentation, navigation, interaction, accessibility
-and usability acceptance. A polished screen never substitutes for an implemented
-capability or recorded device acceptance.
+[NATIVE_COMPANION_BLE_PLAN.md](NATIVE_COMPANION_BLE_PLAN.md) owns feature parity,
+authentication, transport limits, interpreter/resource boundaries and packaging.
+This file owns presentation, navigation, interaction, accessibility and usability.
+Implementation and automated checks do not establish human or device acceptance.
 
-## Current implementation and next acceptance
+## Implemented baseline
 
-The 2026-10-24 slice implements the shell in `apps/companion/src/ui/shell.rs`,
-with presentation/admission explanations in `ui/state.rs` and shared style tokens
-in `ui/theme.rs`. All existing actions are reachable in Overview, Devices,
-Keyboard, Scripts, Files, Transfers, Settings and Help. Activity is also a full
-workspace for small windows. There are no placeholder task tabs.
+| Area | Implemented | Remaining acceptance / refinement |
+| --- | --- | --- |
+| Shell and appearance | Native title bar, compact toolbar, neutral light/dark surfaces, task navigation, activity drawer, one fixed Stop/Activity footer | Actual themes, resize/scale, keyboard/focus and assistive-technology acceptance |
+| Current-page indication | Filled selected row and left accent marker, independent keyboard-focus ring, native selected-state metadata | Confirm selection remains clear without hover/focus and after navigation from toolbar/context actions |
+| Connection and readiness | Explicit radio selection and named Connect target; selected/connecting/connected states; Acquire/USB actions; connected-device summary | Unassisted one/multiple-device flows, errors, reconnect and stale-state presentation |
+| Keyboard and identity | Offline composer, friendly layout names, cached lowering, scoped Stop, responsive identity editor and retained drafts | Delay presentation, draft replacement/conflicts, last-run context and real key-release acceptance |
+| Scripts, Files and Transfers | Working native workspaces, known-demo readiness checks, custom offline scripts, actionable faults, bounded browsing and verified downloads | Interactive workflow/empty/failure states and hardware acceptance in the BLE plan |
+| Native integration | macOS Keychain profiles, import/selection, explicit reconnect and native destination picker | Permission/dialog/relaunch acceptance and other platforms; do not re-plan these as missing implementations |
+| Preferences and accessibility | Launch-local System/Light/Dark, native egui controls and explicit focus rings | Bounded safe preferences, full keyboard paths, VoiceOver, high contrast and reduced-motion support |
 
-- Navigation and refresh preserve text, script, identity and transfer drafts;
-  existing connection-incarnation invalidation remains authoritative.
-- Stop typing/script stays outside every scroll region and stops the Python
-  supervisor or sends the manual job's scoped Cancel as appropriate. Download
-  cancellation remains a separate persistent action while downloads are active.
-- At narrow widths a labelled task selector replaces the sidebar. At short
-  heights Show activity opens the full workspace rather than consuming task height.
-- System/Light/Dark choices use egui's theme preference; typography, spacing,
-  foreground/background and field/focus tokens are shared. Appearance, navigation
-  and drawer state are launch-local; safe persisted preferences remain planned.
-- Text lowering runs only when text/layout/delay changes; submission still uses
-  authoritative backend validation. Readiness ignores background refresh.
+Software evidence is in [docs/DEVICE_TESTING.md](docs/DEVICE_TESTING.md), including
+121 passing tests, pointer events through the real mock backend, painted sidebar
+selection and Stop checks, compact toolbar/footer checks, token contrast and
+actual Python-child checks. Operator workflows are in README.md and
+docs/SCRIPTING.md.
+The code is authoritative for implemented styles and available actions.
 
-Automated fixtures check painted Stop text is unclipped on all nine workspaces,
-light/dark, three desktop sizes including 480 × 520, and 200% zoom; they retain an
-unsent draft and active job. These checks do not establish full-content fit,
-keyboard navigation, readable disabled/focus states or real platform usability.
-Token contrast checks cover normal text against workspace/input/raised surfaces
-(4.5:1), boundaries (3:1) and selected white text (4.5:1); actual widget-state and
-assistive-technology acceptance remain pending. Evidence is in DEVICE_TESTING.md.
+User feedback has exposed three concrete defects: device selection was not
+apparent, the demo could start with control released, and sidebar selection was
+not painted after the polish pass. Fixes are implemented with regression coverage;
+interactive acceptance is still open. Earlier comments that navigation/resizing
+looked good are not acceptance of the latest build or functional Stop. OS window
+capture was unavailable; do not invent captured visual or usability results.
+Detailed change history belongs in DEVICE_TESTING.md rather than this backlog.
 
-User feedback (2026-10-24): workspace navigation/resizing looks good, but the
-required device-selection step was not apparent. The user could not connect to
-the mock because no row was selected, so functional Stop acceptance remains
-pending. Treat this as a discovery-flow usability defect, not a transport failure
-or a need for more operator instructions.
+## Remaining milestones, in order
 
-Next: improve discovery selection and Connect affordances as specified in section
-5, then accept connection and persistent Stop without verbal guidance. Follow
-with device recovery/freshness, friendly layout/delay inputs and identity draft conflicts.
-Keep high contrast, preferences, shortcuts, screen readers and platform refinement
-in the remaining phases below. No firmware/protocol change is needed for this slice.
+| Milestone | Work | Exit criteria |
+| --- | --- | --- |
+| U1 — Accept the current shell and readiness flow | Exercise selection/connect/acquire/USB/demo/Stop without verbal guidance; verify current-page indication, hover versus focus, resize, light/dark and keyboard paths | Flows complete without accidental execution, focus loss, ambiguous selection or hidden Stop; record observed defects and actual human/device evidence separately |
+| U2 — Freshness, drafts and execution feedback | Make live versus stale state and last-run/session context explicit; consolidate actionable errors; protect text/source/identity drafts from replacement and conflicts; refine delay entry without changing limits | Refresh/reconnect and rejected commands cannot misrepresent readiness or silently replace drafts; last results cannot be mistaken for current execution |
+| U3 — Preferences and accessibility | Persist a bounded non-secret UI record; accept keyboard-only/VoiceOver paths, contrast/focus at scale, high contrast/reduced motion; centralize remaining selection/button color variants before extending themes | Preferences recover from corrupt/oversize files and never restore effects or authority; accepted accessibility paths and settings are documented |
+| U4 — Performance and platform refinement | Measure idle CPU/RAM/repaint, startup and artifact size; test long names, lists and monitor/scale changes; refine native dialogs and remaining shortcut/menu behavior | Measured baseline and regressions explained; platform-specific behavior is supported by actual tests rather than compilation alone |
+| U5 — Release acceptance | Complete task sessions, real Pico keyboard/cancel/reconnect and accepted platform checks, using the BLE-plan release dependencies | Every claimed workflow/platform has recorded evidence; remaining limitations are explicit |
+
+U1 is the immediate validation priority. If interactive testing is unavailable,
+leave it pending and continue independent U2 engineering; do not block all work
+or treat a mock pass as physical HID/USB acceptance. Accessibility and keyboard
+correctness apply to every milestone, not only U3. Keep new transport/security,
+key rotation and download-throughput work in the BLE plan.
+
+Non-negotiable presentation regressions:
+
+- Current page stays marked after the pointer leaves, focus moves, background
+  refresh or navigation through any entry point. Selection and focus are distinct;
+  all renderers derive the page from the same local Workspace value.
+- Discovery never silently selects/connects the first result. Selected, connected
+  and previous devices are different; explain why the next action is unavailable.
+- Status refresh does not flicker controls, swallow clicks, reset drafts or steal
+  focus. Preserve the earlier button-flicker fix.
+- Stop stays in a fixed location outside scrolling on every workspace. It cancels
+  only owned work; downloads have separate cancellation. Remote cleanup is not
+  inferred from immediate local feedback.
+- The built-in demo explains its known USB prerequisites. Custom scripts may
+  start offline; do not guess arbitrary Python effects or silently acquire/replay.
+- Active/selected/hover/focus/disabled states must be checked as rendered states,
+  not only as colors or snapshot flags. No automatic execution on navigation,
+  profile changes, reconnect or preference restoration.
 
 ## 1. Design assessment and intended outcome
 
-The supplied screenshot shows a working engineering interface whose information
-hierarchy does not yet match its tasks. The source review covers
-`apps/companion/src/app.rs`, `main.rs`, `backend.rs` interfaces exposed through the
-app, the companion README, and the `companion-core` state/action definitions.
-The baseline source included USB identity editing beyond the screenshot; the feature
-plan records its acceptance. Preserve those changes during the UI redesign and
-use the feature plan/device testing records for implementation status.
-
-| Observed issue | Effect on the user | Proposed change |
-| --- | --- | --- |
-| All workflows occupy one vertically scrolling page | Finding an action requires scanning unrelated content; Stop can leave the viewport | Persistent shell, task navigation and a visible job/Stop area |
-| Headings, body text and controls have similar emphasis | Everything competes for attention | Deliberate type scale, grouped spacing and one primary action per task |
-| Bare separators and nearly uniform dark surfaces | Sections feel like raw debug output | Distinct navigation, workspace, input and inspector surfaces |
-| Generic adapter/permission failure appears in multiple places | Users see an alarm without a clear recovery path | One actionable issue banner with details on demand |
-| Many adjacent disabled buttons | Users cannot tell what prerequisite is missing | State-specific next action and persistent disabled reasons |
-| Device choice is a small button with repeated selection text | Device identity and selection are hard to understand | Structured device rows, explicit selection and connection details |
-| Technical layout IDs and protocol limits are prominent | Users must interpret implementation details before typing | Friendly layout labels; technical details in an inspector |
-| Text composer has little height, demo wording and a weak action hierarchy | The main task feels incidental and overwrite behavior is unclear | A dedicated Keyboard workspace with validation and clear execution feedback |
-| Large always-visible monospaced diagnostics | Historical events dominate current state | Collapsible activity drawer with structured, selectable entries |
-| Completed effect text remains beside a disconnected/error session | Historical success can be mistaken for current readiness | Separate current availability from a timestamped last-run result |
+The original screenshots and source review identified a single scrolling page,
+weak action hierarchy, repeated connection state, uniform surfaces and prominent
+technical detail. The implemented baseline addresses those design problems.
+Retain the contracts below for remaining work; completed shell/style work is not
+an instruction to redesign it again. New visual changes should address observed
+friction or an unmet contract and preserve the regression requirements above.
 
 Contrast and legibility must be measured from actual rendered themes. The
 screenshot alone does not establish contrast ratios, system scale, or font size.
@@ -111,20 +110,19 @@ to inspect, but does not dominate ordinary operation.
 
 ## 2. Scope, priorities and invariants
 
-### First desktop release
+### Current release scope
 
-Redesign the existing device discovery/connection, overview, USB controls, bounded
-text effects, identity editor where supported, and diagnostics. Add reusable
-themes, navigation, settings for appearance, shortcuts and recovery presentation.
-Include accessible and compact desktop layouts from the first implementation.
+All existing native workflows are in scope: discovery/control, overview, keyboard,
+identity, scripts, filesystem, encrypted downloads, profiles and diagnostics.
+Reusable themes, navigation and recovery presentation are implemented. Remaining
+work is acceptance and targeted refinement, not adding placeholder workspaces.
 
-### Dependent follow-up work
+### Dependent work
 
-Design slots for profiles, scripting, filesystem browsing and transfers, but ship
-their operational UI only with the corresponding backend capability from the BLE
-plan. In-app import/selection and macOS Keychain are implemented by its recovery
-milestone; Windows/Linux stores and native interaction acceptance remain there. Native menus, OS settings deep links and
-native file dialogs require small platform integration checks before commitment.
+macOS profile storage and native file dialogs already exist; accept their actual
+interaction paths. Windows/Linux native stores, installation/signing and real BLE
+validation stay in the feature plan. An app preferences store, further native menu
+integration and OS settings links remain separate follow-up work where useful.
 
 ### Constraints that the redesign must preserve
 
@@ -159,10 +157,10 @@ native file dialogs require small platform integration checks before commitment.
 | Priority | Deliverable | Reason |
 | --- | --- | --- |
 | P0 | Accurate state hierarchy, actionable failures, persistent Stop, input validation, keyboard/focus paths | Correctness and basic operation |
-| P1 | Shell/navigation, typography, light/dark themes, workspace layout, device list and diagnostics drawer | Everyday usability and visual quality |
+| P1 | Accept/refine the implemented shell, selected state, themes, workspace layout and drawer where observed issues remain | Everyday usability and visual quality |
 | P1 | Identity draft handling, resizing, scale support and screen-reader validation | Prevent data loss and inaccessible workflows |
-| P2 | Safe UI preference persistence, native menus/dialogs, shortcut help and refinement from user sessions | Desktop convenience |
-| Dependent | Profile manager, scripts, filesystem and transfer screens | Requires feature milestones; do not ship inert controls |
+| P2 | Safe UI preferences, remaining menu/shortcut integration and acceptance of existing native dialogs | Desktop convenience |
+| Dependent | Other-platform credentials, transport/security limits and distribution | Feature-plan dependencies; current native workflow screens are implemented |
 
 ## 3. Information architecture and desktop shell
 
@@ -171,63 +169,55 @@ toolbar, a labelled sidebar, the selected workspace and an optional bottom
 activity drawer. Keep connection and owned-job controls visible on every page.
 
 Apple describes sidebars as navigation between major app areas; this is a suitable
-desktop pattern for these distinct tasks. The exact sizing and structure below
-are project proposals. [Apple sidebar guidance](https://developer.apple.com/design/human-interface-guidelines/sidebars)
+desktop pattern for these distinct tasks. The structure below reflects the implemented shell; remaining interaction
+requirements are acceptance targets. [Apple sidebar guidance](https://developer.apple.com/design/human-interface-guidelines/sidebars)
 
 | Area | Contents and behavior |
 | --- | --- |
 | Native title bar | App name; optional device display name when connected. Keep standard drag, resize, minimize/maximize and close behavior |
 | Connection toolbar | Device name, connection/control label, compact USB readiness, context action such as Connect or Acquire control; Disconnect in a labelled menu when connected |
-| Sidebar | Overview, Devices, Keyboard; Settings and Help in a lower group. Show text alongside icons and a clear selected state |
+| Sidebar | Overview, Devices, Keyboard, Scripts, Files, Transfers; Settings, Help and Activity in a lower group. Persistent selected fill/accent; keyboard focus remains distinct. Icons are optional and never replace labels |
 | Workspace header | Current task title, one sentence of useful context and only relevant actions |
 | Workspace body | Focused content with stable alignment and appropriate scroll ownership |
-| Job strip | While active: submitting/running/stopping label and persistent Stop. Remains outside workspace and drawer scrolling |
-| Activity drawer | Collapsed by default; error count since Clear and a Show activity action. Expand/rescale for troubleshooting |
+| Fixed footer | Persistent Stop, compact job state, separate download cancel when active, and Activity. Stop stays in place when idle and busy, outside all scrolling |
+| Activity drawer | Closed by default; footer Activity toggles the resizable drawer or opens the full workspace at short heights. Counts describe retained history; details show discarded entries |
 
-Initial navigation: Overview with a setup/recovery card when disconnected; restore
-the last task on later launches if saved. Keyboard stays usable for composing
+Initial navigation is Overview with a setup/recovery card when disconnected.
+Restoring the last task is U3 work after safe preferences exist. Keyboard stays usable for composing
 while disconnected. Do not automatically change pages on polling or job results.
 An explicit “Continue to Keyboard” action may follow successful setup.
 
-Do not expose Scripts, Files or Transfers as disabled navigation items in the
-initial release. When those workflows actually exist, add them to the task group
-without changing the shell. Put future capability explanations in Help or relevant
-workspace empty states, not a permanent collection of unavailable buttons.
+Scripts, Files and Transfers are implemented and belong in normal navigation.
+Do not add disabled placeholders for unavailable capabilities. Use the relevant
+workspace's readiness/empty state to explain a missing device or host agent.
 
-### Proposed Keyboard workspace wireframe
+### Shell layout reference
 
 ```text
-+--------------------------------------------------------------------------+
-| OS title bar: Pico Companion                                             |
-+--------------------------------------------------------------------------+
-| Pico Plus 2 W   Authenticated · Control acquired   USB ready    Device ▾   |
-+----------------+---------------------------------------------------------+
-| Overview       | Keyboard                                                |
-| Devices        | Types on the computer connected to the Pico USB port.   |
-| > Keyboard     |                                                         |
-|                | Target layout                     Delay before typing   |
-|                | [Windows · English (US)       ▾]  [3.0 s             ▾] |
-|                |                                                         |
-|                | Text                                                    |
-|                | +-----------------------------------------------------+ |
-|                | |                                                     | |
-|                | | Resizable multiline composer                        | |
-|                | |                                                     | |
-|                | +-----------------------------------------------------+ |
-|                | 32 / 1,024 characters        [Encoding details]          |
-|                |                                        [Send text]      |
-| Settings       | Last run: Completed · 14:08                              |
-| Help           |                                                         |
-+----------------+---------------------------------------------------------+
-| Job: Running                                            [Stop typing]    |
-+--------------------------------------------------------------------------+
-| Activity · 2 errors since Clear                           [Show activity] |
-+--------------------------------------------------------------------------+
++-----------------------------------------------------------------------+
+| Native title bar: Pico Companion                                       |
++-----------------------------------------------------------------------+
+| Pico name   Connected   Control needed   USB ready   [Acquire] Device ▾ |
++----------------+------------------------------------------------------+
+| Overview       | Keyboard                                             |
+| Devices        | Types on the computer connected to Pico USB.         |
+| > Keyboard     |                                                      |
+| Scripts        | Layout                 Delay before typing           |
+| Files          | [Windows · English US] [0 ms]                        |
+| Transfers      |                                                      |
+|                | [Multiline text composer]                            |
+| Settings       |                                                      |
+| Help           | 32 / 1,024 characters                   [Send text]   |
+| Activity       | Readiness and last-run feedback                      |
++----------------+------------------------------------------------------+
+| [Stop typing / script]  Job state                         [Activity]   |
++-----------------------------------------------------------------------+
 ```
 
-This illustrates hierarchy, not exact measurements. Show the active job strip
-only during a job, with reserved/minimal space that does not shift the composer
-under a pointer. The last-run row is historical and tied to device/session context.
+This illustrates hierarchy, not exact measurements or readiness for every state.
+The footer remains fixed during idle, running and stopping states; activity
+expands above it. Historical last-run feedback must retain device/session context.
+Do not add a second persistent full-width status bar or hide idle Stop.
 
 ### Desktop window sizes and resizing
 
@@ -238,8 +228,8 @@ whether it needs adjustment. Do not solve clipping by arbitrarily raising it.
 
 | Available width | Layout |
 | --- | --- |
-| 1,100 points and above | Sidebar about 200 points; workspace may use two columns for overview summary and details; composer stays the main area |
-| 800–1,099 points | Sidebar about 176 points; one main content column; details collapse or open in a separate inspector |
+| 1,100 points and above | Current sidebar 184 points; workspace may use two columns for overview summary and details; composer stays the main area |
+| 800–1,099 points | Current sidebar 184 points; one main content column; details collapse or open in a separate inspector |
 | 480–799 points | Replace sidebar with a labelled task selector or compact task tabs; wrap toolbar into two rows; stack fields; keep Stop and primary action visible |
 
 These are desktop resize modes, not a mobile interface. Prefer content fit over
@@ -281,50 +271,46 @@ an explicit high-contrast option if system high-contrast detection is incomplete
 Apply OS changes live where supported. Light and dark palettes are designed
 separately, not produced through simple inversion. [Apple dark appearance guidance](https://developer.apple.com/design/human-interface-guidelines/dark-mode)
 
-### Proposed color tokens
+### Style tokens and contrast
 
-These are starting values, not approved accessibility measurements. Measure every
-actual foreground/background pair including hover, selection and focus states
-before freezing the theme. Do not use a decorative divider as the only field boundary.
+[ui/theme.rs](apps/companion/src/ui/theme.rs) owns the current canvas, chrome,
+card, input, text, boundary and semantic colors. Button variants are in
+[ui/components.rs](apps/companion/src/ui/components.rs); sidebar selection
+variants currently remain in `ui/shell.rs`. Centralize those remaining variants
+before adding theme modes. Do not maintain a second hex-value palette here or
+scatter new literals through workspace code.
 
-| Semantic token | Dark | Light | Usage |
-| --- | --- | --- | --- |
-| Window background | `#151A22` | `#F3F5F8` | Overall chrome/navigation |
-| Workspace surface | `#1C2330` | `#FFFFFF` | Main task panels |
-| Raised surface | `#252E3D` | `#E9EEF5` | Popovers and selected neutral groups |
-| Input surface | `#121923` | `#FFFFFF` | Text and editable fields |
-| Primary text | `#EDF2F9` | `#172033` | Labels, values, content |
-| Secondary text | `#B6C2D4` | `#4B5B70` | Supporting explanations |
-| Decorative divider | `#364154` | `#D5DDE8` | Nonessential separators |
-| Interactive boundary | `#7C8EA8` | `#687A94` | Field and control edges where needed |
-| Primary button fill | `#245CCD` | `#245CCD` | Main action, white text |
-| Accent text / focus | `#94BAFF` | `#1D4ED8` | Links, focus and selected indicators |
-| Success foreground | `#84DDB0` | `#16643D` | Ready/completed with icon and label |
-| Warning foreground | `#F0C879` | `#805200` | Stale/pending attention with label |
-| Error foreground | `#FFA6AD` | `#A91D34` | Actionable failure with icon and label |
+| Role | Requirement |
+| --- | --- |
+| Canvas / chrome / card / input | Distinct but quiet surfaces; grouping does not require bright borders |
+| Text / secondary text / success / warning / error | Meaningful labels, measured against every surface on which they appear |
+| Primary / secondary / Stop | One clear task action; quiet secondary hover state; danger treatment for active Stop |
+| Selected navigation | Persistent background and accent marker even when unfocused/unhovered; programmatic selected state |
+| Focus | Separate visible outline; do not confuse keyboard focus with current-page selection |
+| Fields and disabled states | Recognizable boundaries, readable values and visible reasons for blocked actions |
 
-Define companion tokens for accent hover/pressed, selected-row background,
-warning/error backgrounds, disabled text, focus ring and destructive Stop. Validate
-them together; do not scatter literal colors throughout page code. A high-contrast
-theme uses stronger edges and selection/focus outlines and does not rely on shadows.
+Token checks cover normal text at 4.5:1 and field boundaries at 3:1. They do not
+establish contrast, legibility or behavior of every actual hover, focus, selected,
+pressed and disabled widget. Render those states in both themes and at scale.
+High contrast remains planned; do not claim it from the ordinary dark theme.
 
 ### Typography, spacing and geometry
 
-| Token | Initial value / rule |
+| Token | Current baseline / constraint |
 | --- | --- |
-| Body and ordinary controls | 14 points; normal weight; increase through UI scale |
+| Body and ordinary controls | 15 points; normal weight; preserve readable scaling |
 | Supporting text | 12–13 points; retain readable contrast |
-| Page title | 22 points; medium/semibold if available |
-| Section title | 16 points; medium/semibold |
-| Code / diagnostic details | 12–13 points in a monospaced font |
+| Page title | 24 points |
+| Section title | 18 points; strong |
+| Code / diagnostic details | 14 points in a monospaced font |
 | Spacing scale | 4, 8, 12, 16, 24, 32 points |
 | Workspace padding | 24 points normal; 16 compact |
 | Related field spacing | 8–12 points; 20–24 between groups |
 | Button / input height | 32 points normal; 28 compact, growing with text scale |
-| Device / navigation row | 36–44 points depending on secondary content |
-| Corners | 6 points for inputs/buttons; 8 for grouped surfaces; consistent nesting |
+| Device / navigation row | Native radio row at least 32 points; navigation 34, growing with scale/content |
+| Corners | 6 points for buttons; 10 for cards; consistent nesting |
 | Focus indicator | Approximately 2-point outline with separation from the boundary |
-| Icon size | 16–18 points in controls; 20 in navigation |
+| Optional icons | 16–18 points in controls, about 20 in navigation; no requirement to add icons to the text-only baseline |
 
 Use a well-supported proportional UI font with clear numerals and Unicode
 coverage, plus a code font. Start from bundled egui fonts; only add an open-licensed
@@ -339,7 +325,7 @@ contrast rather than oversized headings everywhere.
 
 ### Component catalog and interaction states
 
-Implement reusable components before styling individual pages: task header,
+Extend the existing reusable components for remaining needs: task header,
 navigation row, device row, labelled field, primary/secondary/quiet button,
 status badge, key/value row, inline validation, issue banner, empty state,
 job strip, confirmation dialog and diagnostic row.
@@ -349,13 +335,13 @@ job strip, confirmation dialog and diagnostic row.
 - Primary actions use filled accent styling. Secondary actions use a neutral
   bordered style. Infrequent details use quiet text buttons. Avoid several competing
   blue buttons within the same task area.
-- Stop is a clearly labelled high-contrast action with a stop icon. Use a stronger
+- Stop is a clearly labelled high-contrast action; a decorative icon is optional. Use a stronger
   danger treatment only while an owned operation is active. It needs no confirmation.
 - Disabled controls remain readable. Pair the unavailable action with a visible
   prerequisite/recovery sentence; a mouse-only tooltip is supplemental.
 - Icons use one open-licensed, consistent outline set or small vector primitives.
   No emoji as critical status icons. Keep labels on navigation and execution actions.
-- Status badges include text and a recognizable symbol. Color alone cannot
+- Status badges include clear text; optional symbols support rather than replace it. Color alone cannot
   distinguish Ready, Busy, Stale, Unknown or Failed.
 - Busy buttons keep their width and show an operation-specific label. An inline
   spinner is optional; stable text feedback is mandatory.
@@ -370,15 +356,18 @@ connection problems. The toolbar owns persistent session state and quick access.
 - Show one prominent “Scan for devices” action initially; use “Scanning…” with a
   way to cancel discovery if the backend supports cancellation through Disconnect.
   Do not present Connect as usable without a selected current discovery result.
-- Device rows show display name and a non-secret distinguishing identifier;
-  optional signal strength appears only if supplied reliably by the backend.
-  Sort predictably, retain selection by ID and avoid jumping rows during interaction.
-- Explicitly select a device before Connect. Do not treat the current auto-selection
-  of the first discovered device as consent to connect or execute.
+- Device rows show display name; full IDs are currently under Device details.
+  Accept multiple/identically named devices in U1: expose a short distinguishing
+  identifier when needed before Connect instead of making users guess from name
+  alone. Signal strength is optional only if reliably supplied. Sort predictably,
+  retain selection by ID and avoid jumping rows during interaction.
+- Explicitly select a device before Connect. Do not select the first discovered
+  device implicitly or treat discovery as consent to connect or execute.
 - Make the whole row selectable; distinguish selected, connected and previously
   seen devices. If a discovered device becomes unavailable, mark it accordingly
   rather than silently substituting another device.
-- Address the observed mock-connection usability defect first: make the required
+- Implemented follow-up (interactive acceptance pending) for the observed
+  mock-connection usability defect: make the required
   choice visible with a labelled selection control/clear row affordance and a
   persistent selected-device summary. Place Connect beside or immediately after
   the selection, identify its target, and show why it is disabled inline; a
@@ -403,8 +392,8 @@ connection problems. The toolbar owns persistent session state and quick access.
 | Scanning | “Searching for nearby Pico devices…” | Cancel scan where supported |
 | Device selected | Name and profile availability | Connect |
 | Connecting/authenticating | Name, truthful phase and elapsed time | Cancel connection |
-| Public diagnostics only / no profile | “Device visible; control requires a matching profile” | Profile help; Import profile only after implemented |
-| Authenticated, control released | “Connected securely · Control released” | Acquire control |
+| Public diagnostics only / no profile | “Device visible; control requires a matching profile” | Open Devices; disconnect before importing/selecting the implemented native profile |
+| Connected, control released | “Connected · Control needed” | Acquire control; show a separate authenticated claim only if the backend exposes it |
 | Control acquired, USB disabled | “Control acquired · USB off” | Enable USB |
 | USB enabled but not ready | “USB enabled · Waiting for target” | Explain target USB connection; no fake ready state |
 | USB ready, no job | “Ready to type” | Send text from Keyboard |
@@ -492,7 +481,7 @@ Rename “Keyboard demonstration” to “Keyboard.” Put the purpose near the 
 | Element | Required behavior |
 | --- | --- |
 | Layout selector | Friendly labels such as “Windows · English (US)” and “macOS · German”; retain exact IDs in details. Explain that this must match the USB target's input layout, not the control computer's |
-| Initial delay | Display seconds, accepting 0–5 seconds mapped exactly to current milliseconds. Offer 0, 1, 3 and 5 second presets with precise entry. Propose 3 seconds for a first launch, changeable and remembered as a non-secret preference |
+| Initial delay | Current entry is 0–5,000 ms, default 0. U2 may present seconds with exact mapping and 0/1/3/5-second presets; any default change must be deliberate and documented. Remember values only after U3 safe preferences exist |
 | Composer | Resizable multiline field, generous initial height, selection/copy/paste/undo, real label, explicit scroll. Plain text; Enter inserts a newline |
 | Validation | Character count; invalid/unsupported character and layout errors beside the composer; focus the affected field after rejection. Show encoded KBD1 size in expandable details |
 | Main action | Send text, with shortcut shown in help/tooltip; disabled reason when connection/control/USB/job/input blocks it |
@@ -576,8 +565,8 @@ functions, but present them in a resizable drawer or dedicated expanded workspac
 Appearance contains System/Light/Dark, UI scale (proposed 100–200%), and high
 contrast/reduced motion where OS settings cannot be read reliably. Include Reset
 appearance. General contains safe UI preferences and a clear simulation indicator.
-Device settings contain only device-backed operations. Profile management becomes
-a separate Settings section when implemented by the feature plan.
+Device settings contain only device-backed operations. Profile import/selection is already in Devices. Do not move it to Settings merely
+to satisfy the original outline; accept and refine its existing interaction flow.
 
 Help provides a short connection checklist, keyboard shortcuts, target-layout
 guidance and links to the operator documentation. Keep secrets out of screenshots
@@ -596,8 +585,8 @@ focus/navigation behavior. [Microsoft keyboard interaction guidance](https://lea
 | Tab / Shift+Tab | Logical focus order, matching visual order |
 | Arrow keys | Navigate device rows, sidebar/task choices and open menus |
 | Enter / Space | Activate the focused button or selected device action; Enter remains newline inside the composer |
-| Cmd+Enter on macOS; Ctrl+Enter elsewhere | Send the Keyboard draft only when that workspace owns the action and readiness/validation pass; Start scripts only in its future workspace |
-| Cmd+. on macOS; Ctrl+Shift+. elsewhere | Stop the companion's active job while the app is focused; available even with a popup/dialog open |
+| Cmd+Enter on macOS; Ctrl+Enter elsewhere | Send the Keyboard draft only when that workspace owns the action and readiness/validation pass; Start/Restart scripts only in Scripts using the same admission rules as its button; the latter is implemented, Keyboard Send shortcut remains planned |
+| Cmd+. on macOS; Ctrl+Shift+. elsewhere | Planned scoped Stop while the app is focused, including in-app popups; native modal-dialog behavior requires platform testing |
 | Escape | Dismiss topmost popup/dialog and restore focus. It does not silently execute, disconnect or double as ambiguous global Stop |
 | Cmd/Ctrl+F | Focus search/filter in the current workspace where meaningful |
 | Cmd+, on macOS; Ctrl+, elsewhere | Open Settings |
@@ -627,8 +616,11 @@ Stop guidance truthful.
 - Keep OS title bar and conventional close/minimize/fullscreen behavior. Add
   native application/Edit/View/Device/Help menus where integration is feasible;
   platform-gate this work and retain a keyboard-accessible in-app fallback.
-- Native file dialogs for profile import and future save operations require their
-  backend milestones. Do not replace them with custom path-entry modals without need.
+- Accept the implemented native profile-import and destination-picker dialogs.
+  Verify whether native modal UI leaves owned Stop reachable; do not promise an
+  app shortcut works while the OS dialog owns input. If needed, defer opening the
+  dialog until keyboard work is idle. No global key hook is implied. Do not
+  replace working native dialogs with custom modals without a demonstrated need.
 
 ## 8. Accessibility and inclusive presentation
 
@@ -678,17 +670,17 @@ be verified.
   Keep user-facing strings centralized enough for future localization; do not
   add a localization framework merely for this redesign.
 
-## 9. Future workflow design contracts
+## 9. Existing workflow refinement contracts
 
-These are presentation requirements for future feature delivery, not authorization
-to implement an interpreter or transfer stack within the styling phase.
+These workflows are implemented. Refine their presentation and accept their
+actual paths; do not reimplement interpreter, storage or transport stacks as UI work.
 
 | Workflow | Desktop presentation contract | Dependency |
 | --- | --- | --- |
 | Profiles | Native import/selection, non-secret device/profile names, matching/missing/wrong-profile states; no key display or automatic export | macOS implemented in milestones 0/5; interactive/other-platform acceptance open |
-| Scripts | Editor-focused workspace, explicit Start/Stop, running/waiting/fault strip, API help and diagnostics; source editing affects next run | Milestone 3 and its supervised interpreter/isolation acceptance |
-| Files | Path/breadcrumb bar, Home/Root/Up, hidden toggle, paginated bounded rows, metadata/selection, loading/empty/error states | Milestone 2; validated correlated page relay |
-| Transfers | Queue/activity list, receiving/verifying/verified/failed/aborted states, measured progress/rate/ETA, explicit destination choice after verification | Milestone 4; real bounded native receiver/backpressure |
+| Scripts | Explicit Start/Stop, declared-demo readiness, custom offline event waits, actionable faults/details; source editing affects next run | Implemented; remaining actual-process/device/platform acceptance in BLE milestone 3 |
+| Files | Path/breadcrumb bar, Home/Root/Up, hidden toggle, bounded pagination/selection; clear loading/empty/error states | Implemented; remaining interaction/device/platform acceptance in BLE milestone 2 |
+| Transfers | Bounded queue/history, clear progress/verification/save/failure states; explicit destination before queueing and verified no-overwrite saving | Implemented; limits and failure/platform acceptance in BLE milestone 4 |
 
 The same shell, focus rules, issue banners and job components should apply to
 these screens. Keep script Stop semantics distinct from transfer Abort. A single
@@ -698,24 +690,23 @@ or merely seeing a host agent; use negotiated BLE capabilities.
 
 ## 10. Implementation structure and engineering boundaries
 
-Refactor incrementally; avoid a single rewrite of transport and UI together.
-Suggested structure under `apps/companion/src/`:
+Refactor incrementally; keep transport and UI changes separate. Current ownership
+under `apps/companion/src/`:
 
 ```text
-app.rs                  snapshot intake, app state and top-level composition
-ui/theme.rs             tokens, type/spacing scale, theme application
-ui/components.rs        shared controls, badges, banners, fields, job strip
-ui/shell.rs             navigation, toolbar, layout and drawer allocation
-ui/state.rs             local view/draft/focus state, presentation mapping
-ui/devices.rs           discovery and connection workspace
-ui/overview.rs          readiness and device details
-ui/keyboard.rs          composition, validation and job presentation
-ui/settings.rs          local appearance and device identity sections
-ui/diagnostics.rs       filtering, structured rows and follow behavior
+app.rs                  snapshot intake, local drafts, remaining workspace controls
+ui/theme.rs             shared theme/type/spacing tokens
+ui/components.rs        primary/quiet/Stop buttons, badges, focus and section helpers
+ui/state.rs             local Workspace value, readiness/admission presentation
+ui/shell.rs             toolbar/sidebar/footer/drawer; child module of app
+ui/devices.rs           discovery/connected summary; child module of app
+ui/scripts.rs           script controls/recovery; child module of app
+desktop.rs/profiles.rs  local worker, native dialogs, catalog and credential store
 ```
 
-This is a suggested boundary, not a requirement to create every file immediately.
-Keep components small and introduce modules as the corresponding work lands.
+Extract overview/keyboard/settings/diagnostics modules only when a concrete change
+benefits from that boundary. Do not create placeholder modules or another mutable
+navigation/connection state machine to match the old proposed directory outline.
 
 - Apply `egui::Style`, `Visuals`, spacing and font setup through one theme layer.
   Installed egui 0.36.2 provides theme and zoom controls, input labelling and
@@ -748,22 +739,20 @@ Keep components small and introduce modules as the corresponding work lands.
   snapshot fixtures. Include user-facing identity editing/save states without
   editing or replacing unrelated working-tree changes.
 
-## 11. Phased delivery and acceptance gates
+## 11. Delivery and acceptance gates
 
-Track each phase with small reviewable changes. Accessibility, responsive desktop
-layout and truthful states are part of each phase, not a final cosmetic pass.
+Use U1–U5 above as the active delivery order. Completed shell, theme, navigation
+and readiness work belongs in the baseline, not repeated delivery phases.
 
-| Phase | Implementation slice | Exit criteria | Status (2026-10-24) |
-| --- | --- | --- | --- |
-| A — Baseline and view specification | Capture current desktop screens; inventory action/state mappings; create deterministic fixtures; confirm layout/tokens against connected and failure states | Same tasks/states can be compared before/after; measured contrast pairs and layout measurements documented; backend dependencies identified | Partial: new deterministic layout/state fixtures and token contrast checks; baseline capture and full widget measurements open |
-| B — Theme and shell | Shared tokens/components, light/dark, labelled task navigation, persistent connection/job areas, compact layout, activity drawer | Current actions remain available through the shell; Stop visible on every task; no clipping at agreed sizes/scales; keyboard navigation works | First slice implemented; interactive layout, keyboard and connected Stop acceptance open |
-| C — Connection and overview | Device rows, explicit selection, state/action matrix, readiness summary, freshness, actionable error presentation | Setup and failure recovery work without reading logs; public/authenticated/acquired states cannot be confused; polling does not swallow clicks | Partial: shared toolbar/readiness reasons; device-row, freshness and recovery refinement open |
-| D — Keyboard and identity | Composer, friendly layout/delay inputs, cached validation, immutable job/draft separation, last-run results; identity draft/save conflict handling | Offline editing works; no silent paste/example loss; limits preserved; Stop and rejection/disconnect behavior verified; unsaved identity cannot cross devices | Partial: cached validation and retained drafts; friendly fields, last-run detail and identity conflicts open |
-| E — Desktop refinement and accessibility | Safe preferences, shortcut help, native integration where feasible, screen-reader fixes, high contrast and reduced motion, structured copyable diagnostics | Keyboard-only workflows and assistive technology checks pass on accepted platforms; preferences recover safely; no continuous idle repaint | System/Light/Dark available for this launch; preferences and accessibility/refinement open |
-| F — Usability and release acceptance | Compare task sessions with baseline; refine observed friction; operator docs and device acceptance records | Success criteria below met; actual platform/hardware evidence recorded; remaining limitations explicitly listed | Pending; no participant or platform acceptance inferred from unit tests |
+| Evidence gate | Required before claiming completion |
+| --- | --- |
+| Software behavior | Relevant admission, draft, session, keyboard and rendered-state regressions pass |
+| Native UX | Actual window interaction, themes, resize, focus/keyboard and applicable assistive-technology checks are recorded |
+| Device behavior | Explicitly authorized real Pico/USB-target tests establish output, cancellation/key release and reconnect semantics |
+| Platform release | Installation, native permissions/store/dialogs, performance and hardware evidence exist for each claimed platform |
 
-Scripts, Files and Transfers already exist and are included in the shell. Further
-feature work reuses these workspaces alongside its BLE-plan milestone.
+Record only the gates exercised. Missing human/platform evidence stays open;
+it does not require discarding completed engineering or blocking independent work.
 
 ### Concrete usability acceptance
 
@@ -829,10 +818,13 @@ that merely duplicate every spacing constant or trivial decorative widget.
 
 ```sh
 cargo fmt --all -- --check
-cargo test -p ble-protocol -p companion-core -p pico-companion
-cargo clippy -p pico-companion -p companion-core -p ble-protocol --all-targets -- -D warnings
+cargo test -p ble-protocol -p python-runtime -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol -p python-runtime --all-targets -- -D warnings
 cargo run -p pico-companion -- --mock --self-test
+cargo run -p pico-companion -- --python-self-test
 cargo build -p pico-companion --release
+# For macOS bundle changes/acceptance:
+scripts/build-companion
 ```
 
 Launch the actual native window, starting with mock mode and the existing named
@@ -867,12 +859,15 @@ appearance and changed delay defaults. Put actual hardware/platform evidence in
 [docs/DEVICE_TESTING.md](docs/DEVICE_TESTING.md). Keep this plan's completion
 status honest and move completed acceptance evidence out of the backlog.
 
-## 13. Next implementation slice
+## 13. Immediate next slice
 
-The first shell/theme/Keyboard/readiness slice is implemented; interactive
-acceptance remains open as listed above.
+Prioritize U1 acceptance of the current build, including the sidebar selection
+correction. Keep its checklist small: select/connect/acquire, start a delayed
+mock job, navigate away, Stop; repeat with keyboard and at narrow/light/dark
+layouts. Human and real-device results are separate evidence gates.
 
-Continue with device discovery/recovery and overview hierarchy, then identity draft
-handling, appearance persistence and platform refinement. The state mapping and
-accessibility requirements apply throughout; do not trade them away to finish
-styling sooner.
+The next code slice is U2: freshness and last-run/session presentation, then draft
+replacement and identity conflict handling. Do not start another general restyle
+or reopen completed native feature work. U3 preferences/accessibility and U4/U5
+platform/release work follow while keyboard/accessibility correctness applies
+throughout. Use the BLE plan for transport, secret lifecycle and download limits.

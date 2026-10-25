@@ -1,10 +1,15 @@
 use crate::backend::{Backend, Mode};
 use crate::ui::state::{self, Workspace};
+use crate::ui::{components as c, theme};
 use companion_core::{
     Action, Connection, IdentityUpdate, Job, Snapshot, UsbIdentity, keyboard, layouts,
 };
 use eframe::egui;
 
+#[path = "ui/devices.rs"]
+mod devices;
+#[path = "ui/scripts.rs"]
+mod scripts;
 #[path = "ui/shell.rs"]
 mod shell;
 
@@ -227,92 +232,12 @@ impl CompanionApp {
         self.enqueue_error = self.backend.send(self.snapshot.epoch, action).err();
     }
 
-    fn connection(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Connection");
-        ui.label(self.snapshot.connection.label());
-        let transitioning = matches!(
-            self.snapshot.connection,
-            Connection::Scanning | Connection::Connecting
-        );
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(
-                    !self.desktop_busy()
-                        && !self.snapshot.pending
-                        && self.snapshot.connection != Connection::Connected,
-                    egui::Button::new(if self.mode.is_mock() {
-                        "Scan mock devices"
-                    } else {
-                        "Scan Bluetooth"
-                    }),
-                )
-                .clicked()
-            {
-                self.selected = None;
-                self.send(Action::Scan);
-            }
-            if ui
-                .add_enabled(
-                    !transitioning
-                        && !self.desktop_busy()
-                        && !self.snapshot.pending
-                        && self.selected.is_some()
-                        && self.snapshot.connection != Connection::Connected,
-                    egui::Button::new("Connect"),
-                )
-                .clicked()
-                && let Some(id) = &self.selected
-            {
-                self.send(Action::Connect(id.clone()));
-            }
-            if ui
-                .add_enabled(
-                    !self.desktop_busy()
-                        && !self.snapshot.pending
-                        && matches!(
-                            self.snapshot.connection,
-                            Connection::Disconnected | Connection::Failed(_)
-                        )
-                        && self.snapshot.selected.is_some(),
-                    egui::Button::new("Reconnect previous Pico"),
-                )
-                .clicked()
-            {
-                self.send(Action::Reconnect);
-            }
-            if ui
-                .add_enabled(
-                    transitioning || self.snapshot.connection == Connection::Connected,
-                    egui::Button::new("Disconnect"),
-                )
-                .clicked()
-            {
-                self.send(Action::Disconnect);
-            }
-            if transitioning {
-                ui.spinner();
-            }
-        });
-        if self.snapshot.devices.is_empty() && !transitioning {
-            ui.label("No devices found. Check the device is advertising and scan again.");
-        }
-        for device in &self.snapshot.devices {
-            let selected = self.selected.as_ref() == Some(&device.id);
-            let response = ui.add_enabled(
-                self.snapshot.connection != Connection::Connected && !transitioning,
-                egui::Button::selectable(selected, &device.name),
-            );
-            if response.clicked() {
-                self.selected = Some(device.id.clone());
-            }
-        }
-        if let Some(device) = &self.snapshot.selected {
-            ui.label(format!("Selected: {}", device.name));
-        }
-    }
-
     fn status(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Device status");
+        ui.heading("Overview");
+        c::description(
+            ui,
+            "Connection, USB and the computer attached to your Pico.",
+        );
         if let Some(caps) = &self.snapshot.capabilities {
             egui::Grid::new("device-status")
                 .num_columns(2)
@@ -437,45 +362,50 @@ impl CompanionApp {
         }
     }
 
-    fn control_actions(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            let can_acquire = self.snapshot.connection == Connection::Connected
-                && (self.mode.is_mock() || self.active_profile.is_some())
-                && self.snapshot.compatible()
-                && !self.snapshot.control_acquired
-                && !self.snapshot.pending;
-            if ui
-                .add_enabled(
-                    can_acquire,
-                    egui::Button::new("Authenticate and acquire control"),
-                )
-                .clicked()
-            {
-                self.send(Action::Acquire);
+    fn has_profile(&self) -> bool {
+        self.mode.is_mock() || self.active_profile.is_some()
+    }
+
+    fn readiness_action(&mut self, ui: &mut egui::Ui, action: state::ReadinessAction) {
+        let enabled = match action {
+            state::ReadinessAction::Devices => true,
+            state::ReadinessAction::Acquire => {
+                state::acquire_blocker(&self.snapshot, self.has_profile()).is_none()
             }
-            if ui
-                .add_enabled(
-                    self.snapshot.control_acquired
-                        && !self.snapshot.pending
-                        && !self.snapshot.job.active(),
-                    egui::Button::new("Release control"),
-                )
-                .clicked()
-            {
-                self.send(Action::Release);
+            state::ReadinessAction::EnableUsb => {
+                !self.snapshot.pending && !self.snapshot.job.active()
             }
-        });
-        if !self.snapshot.control_acquired {
-            if !self.mode.is_mock() && self.active_profile.is_none() {
-                ui.small(
-                    "Disconnect, then import a private profile in Devices to acquire control.",
-                );
-            } else if !self.snapshot.compatible() {
-                ui.small("This firmware is incompatible with companion control.");
-            } else if self.snapshot.pending {
-                ui.small("Waiting for the current command to finish.");
+        };
+        if c::primary(ui, enabled, action.label()).clicked() {
+            match action {
+                state::ReadinessAction::Devices => self.workspace = Workspace::Devices,
+                state::ReadinessAction::Acquire => self.send(Action::Acquire),
+                state::ReadinessAction::EnableUsb => self.send(Action::SetUsbEnabled(true)),
             }
         }
+        if !enabled {
+            ui.small("Waiting for the current command to finish.");
+        }
+    }
+
+    fn readiness(&mut self, ui: &mut egui::Ui) {
+        let readiness = state::usb_readiness(&self.snapshot, self.has_profile());
+        theme::card(ui).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            c::badge(
+                ui,
+                if readiness.ready {
+                    "Ready"
+                } else {
+                    "Next step"
+                },
+                !readiness.ready,
+            );
+            ui.label(readiness.message);
+            if let Some(action) = readiness.action {
+                self.readiness_action(ui, action);
+            }
+        });
     }
 
     fn usb_controls(&mut self, ui: &mut egui::Ui) {
@@ -488,22 +418,21 @@ impl CompanionApp {
                 Some(_) => "USB disabled",
                 None => "USB status unavailable",
             });
-            if ui
-                .add_enabled(
-                    can_control && status.is_some_and(|status| !status.usb_enabled),
-                    egui::Button::new("Enable USB"),
-                )
-                .clicked()
+            if c::quiet(
+                ui,
+                can_control && status.is_some_and(|status| !status.usb_enabled),
+                "Enable USB",
+            )
+            .clicked()
             {
                 self.send(Action::SetUsbEnabled(true));
             }
-            if ui
-                .add_enabled(
-                    can_control
-                        && status.is_some_and(|status| status.usb_enabled || status.usb_ready),
-                    egui::Button::new("Disable USB"),
-                )
-                .clicked()
+            if c::quiet(
+                ui,
+                can_control && status.is_some_and(|status| status.usb_enabled || status.usb_ready),
+                "Disable USB",
+            )
+            .clicked()
             {
                 self.send(Action::SetUsbEnabled(false));
             }
@@ -518,7 +447,7 @@ impl CompanionApp {
     }
 
     fn usb_identity(&mut self, ui: &mut egui::Ui) {
-        ui.heading("USB identity");
+        c::section(ui, "USB identity");
         self.usb_controls(ui);
         let supported = self
             .snapshot
@@ -536,24 +465,18 @@ impl CompanionApp {
             .and_then(|caps| caps.identity.as_ref());
         let editable = self.snapshot.can_read_identity() && loaded.is_some();
         ui.add_enabled_ui(editable, |ui| {
-            egui::Grid::new("usb-identity")
-                .num_columns(2)
-                .show(ui, |ui| {
-                    ui.label("Manufacturer");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.manufacturer)
-                            .char_limit(32)
-                            .desired_width(300.0),
-                    );
-                    ui.end_row();
-                    ui.label("Product");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.product)
-                            .char_limit(48)
-                            .desired_width(300.0),
-                    );
-                    ui.end_row();
-                });
+            ui.label("Manufacturer");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.manufacturer)
+                    .char_limit(32)
+                    .desired_width(f32::INFINITY),
+            );
+            ui.label("Product");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.product)
+                    .char_limit(48)
+                    .desired_width(f32::INFINITY),
+            );
         });
         ui.small("Printable ASCII: manufacturer up to 32 bytes, product up to 48. Empty strings are allowed.");
         ui.label("Disable USB, save, then enable USB to apply the new names.");
@@ -563,21 +486,15 @@ impl CompanionApp {
             .ok()
             .is_some_and(|value| Some(value) != loaded);
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(
-                    self.snapshot.can_read_identity(),
-                    egui::Button::new("Reload identity"),
-                )
-                .clicked()
-            {
+            if c::quiet(ui, self.snapshot.can_read_identity(), "Reload identity").clicked() {
                 self.send(Action::ReadIdentity);
             }
-            if ui
-                .add_enabled(
-                    self.snapshot.can_save_identity() && value.is_ok() && dirty,
-                    egui::Button::new("Save identity"),
-                )
-                .clicked()
+            if c::primary(
+                ui,
+                self.snapshot.can_save_identity() && value.is_ok() && dirty,
+                "Save identity",
+            )
+            .clicked()
                 && let Ok(value) = value
             {
                 self.send(Action::SaveIdentity(value));
@@ -604,8 +521,13 @@ impl CompanionApp {
 
     fn keyboard(&mut self, ui: &mut egui::Ui) {
         ui.heading("Keyboard");
-        ui.label(
-            if self.mode.is_mock() { "Execution is simulated." } else { "Types on the computer attached to the Pico USB port. Use an initial delay to focus the target window. Pico Y stops execution." },
+        c::description(
+            ui,
+            if self.mode.is_mock() {
+                "Simulated typing · no keyboard output leaves this app."
+            } else {
+                "Types on the USB computer. Add a delay to focus its target window. Pico Y stops execution."
+            },
         );
         ui.horizontal_wrapped(|ui| {
             ui.label("Target input layout");
@@ -615,17 +537,21 @@ impl CompanionApp {
                 .as_ref()
                 .map(|caps| &caps.layouts);
             egui::ComboBox::from_id_salt("keyboard-layout")
-                .selected_text(&self.layout)
+                .selected_text(state::layout_name(&self.layout))
                 .show_ui(ui, |ui| {
                     for layout in layouts() {
                         let enabled = supported
                             .is_none_or(|supported| supported.iter().any(|value| value == layout));
                         ui.add_enabled_ui(enabled, |ui| {
-                            ui.selectable_value(&mut self.layout, (*layout).into(), *layout);
+                            ui.selectable_value(
+                                &mut self.layout,
+                                (*layout).into(),
+                                state::layout_name(layout),
+                            );
                         });
                     }
                 });
-            ui.label("Initial delay");
+            ui.label("Delay before typing");
             ui.add(
                 egui::DragValue::new(&mut self.delay_ms)
                     .range(0..=keyboard::MAX_INITIAL_DELAY_MS)
@@ -654,17 +580,17 @@ impl CompanionApp {
         let blocker =
             state::typing_blocker(&self.snapshot, self.script.state.active(), &self.layout);
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Use demo text").clicked() {
+            if c::quiet(ui, true, "Use demo text").clicked() {
                 self.text = DEMO_TEXT.into();
             }
-            if ui
-                .add_enabled(
-                    self.snapshot.can_send()
-                        && blocker.is_none()
-                        && validation.is_some_and(|v| v.is_ok()),
-                    egui::Button::new("Send text"),
-                )
-                .clicked()
+            if c::primary(
+                ui,
+                self.snapshot.can_send()
+                    && blocker.is_none()
+                    && validation.is_some_and(|v| v.is_ok()),
+                "Send text",
+            )
+            .clicked()
             {
                 self.send(Action::SendText {
                     text: self.text.clone(),
@@ -672,14 +598,14 @@ impl CompanionApp {
                     delay_ms: self.delay_ms,
                 });
             }
-            if ui
-                .add_enabled(
-                    self.snapshot.job.active()
-                        && !self.script.state.active()
-                        && self.snapshot.job != Job::Cancelling,
-                    egui::Button::new("Cancel effect"),
-                )
-                .clicked()
+            if c::stop(
+                ui,
+                self.snapshot.job.active()
+                    && !self.script.state.active()
+                    && self.snapshot.job != Job::Cancelling,
+                "Cancel effect",
+            )
+            .clicked()
             {
                 self.send(Action::Cancel);
             }
@@ -704,7 +630,8 @@ impl CompanionApp {
 
     fn filesystem(&mut self, ui: &mut egui::Ui) {
         use companion_core::filesystem::{breadcrumbs, join, parent, root};
-        ui.heading("Host filesystem");
+        ui.heading("Files");
+        c::description(ui, "Browse the computer connected to Pico USB.");
         let browser = self.snapshot.filesystem.clone();
         let available = self.snapshot.can_browse();
         if !available && !browser.loading {
@@ -725,37 +652,19 @@ impl CompanionApp {
         }
         let mut browse = None;
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(available, egui::Button::new("Home"))
-                .clicked()
-            {
+            if c::quiet(ui, available, "Home").clicked() {
                 browse = Some((String::new(), 0));
             }
-            if ui
-                .add_enabled(available, egui::Button::new("Root"))
-                .clicked()
-            {
+            if c::quiet(ui, available, "Root").clicked() {
                 browse = Some((root(&browser.directory), 0));
             }
-            if ui
-                .add_enabled(
-                    available && !browser.directory.is_empty(),
-                    egui::Button::new("Up"),
-                )
-                .clicked()
-            {
+            if c::quiet(ui, available && !browser.directory.is_empty(), "Up").clicked() {
                 browse = Some((parent(&browser.directory), 0));
             }
-            if ui
-                .add_enabled(available, egui::Button::new("Refresh directory"))
-                .clicked()
-            {
+            if c::quiet(ui, available, "Refresh directory").clicked() {
                 browse = Some((browser.directory.clone(), 0));
             }
-            if ui
-                .add_enabled(browser.loading, egui::Button::new("Cancel listing"))
-                .clicked()
-            {
+            if c::quiet(ui, browser.loading, "Cancel listing").clicked() {
                 self.send(Action::CancelDirectory);
             }
             if browser.loading {
@@ -763,20 +672,16 @@ impl CompanionApp {
                 ui.label("Listing…");
             }
         });
+        ui.label("Path");
         ui.horizontal(|ui| {
-            ui.label("Path");
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.filesystem_path)
+                    .desired_width((ui.available_width() - 80.0).max(80.0))
                     .char_limit(ble_protocol::filesystem::PATH_MAX)
                     .hint_text("Empty path opens the host's home"),
             );
             let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (ui
-                .add_enabled(available, egui::Button::new("Open"))
-                .clicked()
-                || enter)
-                && available
-            {
+            if (c::primary(ui, available, "Open").clicked() || enter) && available {
                 browse = Some((self.filesystem_path.clone(), 0));
             }
         });
@@ -808,7 +713,7 @@ impl CompanionApp {
                 ui.weak("This directory is empty.");
             }
         }
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .id_salt("filesystem-entries")
             .max_height(220.0)
             .show(ui, |ui| {
@@ -855,15 +760,12 @@ impl CompanionApp {
         if let Some(selected) = &browser.selected {
             ui.horizontal_wrapped(|ui| {
                 ui.label(format!("Selected: {selected}"));
-                if ui.button("Copy path").clicked() {
+                if c::quiet(ui, true, "Copy path").clicked() {
                     ui.ctx().copy_text(selected.clone());
                 }
             });
         }
-        if ui
-            .add_enabled(available && browser.more, egui::Button::new("Load more"))
-            .clicked()
-        {
+        if c::quiet(ui, available && browser.more, "Load more").clicked() {
             browse = Some((browser.directory.clone(), browser.cursor));
         }
         ui.weak(format!(
@@ -887,7 +789,11 @@ impl CompanionApp {
 
     fn downloads(&mut self, ui: &mut egui::Ui) {
         use companion_core::download::{Command, Session, State};
-        ui.heading("Encrypted file downloads");
+        ui.heading("Transfers");
+        c::description(
+            ui,
+            "Encrypted downloads from the USB computer, verified before saving.",
+        );
         let supported = self
             .snapshot
             .capabilities
@@ -923,41 +829,39 @@ impl CompanionApp {
         ));
         ui.label("Choose a new absolute local filename. Existing files are never overwritten. Maximum file size: 1 MiB.");
         let mut command = None;
-        if ui
-            .add_enabled(
-                available
-                    && !self.snapshot.downloads.active()
-                    && self.snapshot.downloads.session != Session::Negotiating,
-                egui::Button::new("Connect encrypted host session"),
-            )
-            .clicked()
+        if c::primary(
+            ui,
+            available
+                && !self.snapshot.downloads.active()
+                && self.snapshot.downloads.session != Session::Negotiating,
+            "Connect encrypted host session",
+        )
+        .clicked()
         {
             command = Some(Command::ConnectSession);
         }
+        ui.add_space(8.0);
+        ui.label("Host source path");
         ui.horizontal(|ui| {
-            ui.label("Host source path");
             ui.add(
                 egui::TextEdit::singleline(&mut self.download_path)
                     .char_limit(512)
                     .desired_width(f32::INFINITY),
             );
         });
-        if ui.button("Use selected filesystem path").clicked()
+        if c::quiet(ui, true, "Use selected filesystem path").clicked()
             && let Some(path) = &self.snapshot.filesystem.selected
         {
             self.download_path = path.clone();
         }
+        ui.label("Save to local filename");
         ui.horizontal(|ui| {
-            ui.label("Save to local filename");
             ui.add(
                 egui::TextEdit::singleline(&mut self.download_destination)
                     .char_limit(4096)
-                    .desired_width(f32::INFINITY),
+                    .desired_width((ui.available_width() - 100.0).max(80.0)),
             );
-            if ui
-                .add_enabled(!self.desktop_busy(), egui::Button::new("Choose…"))
-                .clicked()
-            {
+            if c::quiet(ui, !self.desktop_busy(), "Choose…").clicked() {
                 self.destination_error = self
                     .desktop
                     .destination(
@@ -978,36 +882,27 @@ impl CompanionApp {
         };
         let default = Command::QueueDefault { destination };
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(ready && queue.valid(), egui::Button::new("Queue file"))
-                .clicked()
-            {
+            if c::primary(ui, ready && queue.valid(), "Queue file").clicked() {
                 command = Some(queue);
             }
-            if ui
-                .add_enabled(
-                    ready && Command::SetDefault(self.download_path.clone()).valid(),
-                    egui::Button::new("Set host default path"),
-                )
-                .clicked()
+            if c::quiet(
+                ui,
+                ready && Command::SetDefault(self.download_path.clone()).valid(),
+                "Set host default path",
+            )
+            .clicked()
             {
                 command = Some(Command::SetDefault(self.download_path.clone()));
             }
-            if ui
-                .add_enabled(
-                    ready && default.valid(),
-                    egui::Button::new("Queue host default"),
-                )
-                .clicked()
-            {
+            if c::quiet(ui, ready && default.valid(), "Queue host default").clicked() {
                 command = Some(default);
             }
-            if ui
-                .add_enabled(
-                    available && self.snapshot.downloads.active(),
-                    egui::Button::new("Cancel downloads"),
-                )
-                .clicked()
+            if c::quiet(
+                ui,
+                available && self.snapshot.downloads.active(),
+                "Cancel downloads",
+            )
+            .clicked()
             {
                 command = Some(Command::Cancel);
             }
@@ -1054,93 +949,8 @@ impl CompanionApp {
         }
     }
 
-    fn scripting(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Python scripting");
-        ui.label("Python runs on this computer. Yield effects to control the USB computer; edits apply on the next Start.");
-        ui.add(
-            egui::TextEdit::multiline(&mut self.script_source)
-                .font(egui::TextStyle::Monospace)
-                .code_editor()
-                .desired_rows(10)
-                .desired_width(f32::INFINITY)
-                .char_limit(python_runtime::MAX_SOURCE_BYTES),
-        );
-        let invalid = python_runtime::source_limit_error(&self.script_source);
-        let available = invalid.is_none()
-            && (!self.snapshot.job.active() || self.snapshot.job_owner == Some(self.script.run));
-        let shortcut = ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
-        let mut start = shortcut && available;
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(
-                    available,
-                    egui::Button::new(if self.script.state.active() {
-                        "Restart script"
-                    } else {
-                        "Start script"
-                    }),
-                )
-                .clicked()
-            {
-                start = true;
-            }
-            if ui
-                .add_enabled(self.script.state.active(), egui::Button::new("Stop script"))
-                .clicked()
-            {
-                self.enqueue_error = self.backend.stop_script(self.script.run).err();
-            }
-            if ui.button("Use Python demo").clicked() {
-                self.script_source = crate::python::DEMO.into();
-            }
-            ui.label("Ctrl/Cmd+Enter to start");
-        });
-        if start {
-            self.enqueue_error = self
-                .backend
-                .start_script(self.snapshot.epoch, self.script_source.clone())
-                .err();
-        }
-        ui.label(self.script.state.label());
-        ui.small(format!(
-            "{} / 32,768 source bytes · {} completed keyboard effects",
-            self.script_source.len(),
-            self.script.completed_effects
-        ));
-        if let Some(layout) = &self.script.layout {
-            ui.label(format!("Script input layout: {layout}"));
-        }
-        if self.script.heap_peak != 0 {
-            ui.small(format!(
-                "Peak Python Rust heap: {:.1} MiB / 128 MiB",
-                self.script.heap_peak as f64 / 1_048_576.0
-            ));
-        }
-        if let Some(error) = invalid {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-        }
-        if let Some(error) = &self.script.error {
-            egui::ScrollArea::vertical()
-                .id_salt("python-error")
-                .max_height(150.0)
-                .show(ui, |ui| {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        egui::RichText::new(error).monospace(),
-                    );
-                });
-        }
-        egui::CollapsingHeader::new("Python API and examples").show(ui, |ui| {
-            ui.monospace("layout(\"win_en-US\")\ndef main():\n    yield require_usb()\n    yield sleep(5000)\n    yield text(\"Hello\", 20)");
-            ui.label("Effects: tap(key), modtap(chord), text(value, delay_ms=10), sleep(ms), wait_event(*kinds, timeout_ms=None), require_usb(), require_host_agent().");
-            ui.label("Events: button, connection, usb, host_agent. Button values are A/B/X/Y with edge released; a timed wait returns a timer event.");
-            ui.label("Catch PicoError, DeviceDisconnected, UsbUnavailable, HostAgentUnavailable, EffectRejected or EffectCancelled. Stop terminates Python immediately without running cleanup.");
-            ui.label("Imports, files, network, host commands and credentials are unavailable. One generator/effect; startup 30 seconds, later steps 500 ms. Select the USB computer's actual input layout.");
-        });
-    }
-
     fn diagnostics(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Diagnostics");
+        c::section(ui, "Activity");
         ui.horizontal_wrapped(|ui| {
             ui.label("Filter");
             ui.add(
@@ -1150,7 +960,7 @@ impl CompanionApp {
             );
             ui.checkbox(&mut self.errors_only, "Errors only");
             ui.checkbox(&mut self.autoscroll, "Autoscroll");
-            if ui.button("Clear").clicked() {
+            if c::quiet(ui, true, "Clear").clicked() {
                 self.send(Action::ClearDiagnostics);
             }
         });
@@ -1197,8 +1007,8 @@ impl CompanionApp {
     }
 }
 
-impl eframe::App for CompanionApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl CompanionApp {
+    fn poll_state(&mut self) {
         self.poll_desktop();
         if self.backend.snapshots.has_changed().unwrap_or(false) {
             self.snapshot = self.backend.snapshots.borrow_and_update().clone();
@@ -1247,6 +1057,12 @@ impl eframe::App for CompanionApp {
         if self.backend.scripts.has_changed().unwrap_or(false) {
             self.script = self.backend.scripts.borrow_and_update().clone();
         }
+    }
+}
+
+impl eframe::App for CompanionApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_state();
         self.shell(ui);
     }
 }
@@ -1262,6 +1078,227 @@ mod tests {
             }
             egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(|s| text_bounds(s, needle)),
             _ => None,
+        }
+    }
+
+    fn painted_fill(shape: &egui::epaint::Shape, point: egui::Pos2, color: egui::Color32) -> bool {
+        match shape {
+            egui::epaint::Shape::Rect(rect) => rect.fill == color && rect.rect.contains(point),
+            egui::epaint::Shape::Vec(shapes) => {
+                shapes.iter().any(|s| painted_fill(s, point, color))
+            }
+            _ => false,
+        }
+    }
+
+    fn frame(
+        app: &mut CompanionApp,
+        ctx: &egui::Context,
+        mut events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let modifiers = events
+            .iter()
+            .find_map(|event| match event {
+                egui::Event::Key { modifiers, .. } => Some(*modifiers),
+                _ => None,
+            })
+            .unwrap_or_default();
+        events.insert(0, egui::Event::ModifiersChanged(modifiers));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1120.0, 760.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                app.poll_state();
+                app.shell(ui);
+            },
+        );
+        output.textures_delta.clear();
+        output
+    }
+
+    fn click(app: &mut CompanionApp, ctx: &egui::Context, label: &str) {
+        for _ in 0..2 {
+            let _ = frame(app, ctx, vec![]);
+        }
+        let output = frame(app, ctx, vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|s| {
+                text_bounds(&s.shape, label)
+                    .filter(|r| s.clip_rect.contains(r.center()))
+                    .map(|r| r.center())
+            })
+            .unwrap_or_else(|| panic!("Visible control missing: {label}"));
+        for pressed in [true, false] {
+            let _ = frame(
+                app,
+                ctx,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+
+    fn wait_for(
+        app: &mut CompanionApp,
+        ctx: &egui::Context,
+        ready: impl Fn(&CompanionApp) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let _ = frame(app, ctx, vec![]);
+            if ready(app) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "UI state timed out: {:?} {:?}",
+                app.snapshot.connection,
+                app.snapshot.job
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn pointer_flow_requires_selection_then_control_and_stops_a_job_from_another_task() {
+        let ctx = egui::Context::default();
+        let mut app = CompanionApp::from_context(
+            &ctx,
+            Mode::Mock(companion_core::mock::Scenario::Normal),
+            None,
+        )
+        .unwrap();
+        wait_for(&mut app, &ctx, |app| {
+            !app.snapshot.devices.is_empty() && !app.snapshot.pending
+        });
+        assert!(app.selected.is_none());
+        click(&mut app, &ctx, "Devices");
+        click(&mut app, &ctx, "Connect to selected Pico");
+        assert_ne!(app.snapshot.connection, Connection::Connected);
+        assert!(app.selected.is_none());
+        click(&mut app, &ctx, "Pico Plus 2 W (simulated)");
+        assert_eq!(app.selected.as_deref(), Some("mock-pico-1"));
+        click(&mut app, &ctx, "Connect to selected Pico");
+        wait_for(&mut app, &ctx, |app| {
+            app.snapshot.connection == Connection::Connected
+        });
+        assert!(!app.snapshot.control_acquired);
+        click(&mut app, &ctx, "Scripts");
+        assert!(!app.script_start_allowed());
+        click(&mut app, &ctx, "Start script");
+        let _ = frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }],
+        );
+        // Give the real backend time to expose an unintended start through either
+        // path. The test must not spawn a Python child for the blocked demo.
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let _ = frame(&mut app, &ctx, vec![]);
+        }
+        assert_eq!(app.script.run, 0);
+        // The context action and toolbar use the same guarded acquisition path.
+        click(&mut app, &ctx, "Acquire control");
+        wait_for(&mut app, &ctx, |app| {
+            app.snapshot.control_acquired && !app.snapshot.pending
+        });
+        assert!(app.script_start_allowed());
+        click(&mut app, &ctx, "Keyboard");
+        app.delay_ms = 5000;
+        click(&mut app, &ctx, "Send text");
+        wait_for(&mut app, &ctx, |app| app.snapshot.job == Job::Running);
+        click(&mut app, &ctx, "Files");
+        click(&mut app, &ctx, "Stop typing / script");
+        wait_for(&mut app, &ctx, |app| {
+            app.snapshot.job == Job::Finished(companion_core::Outcome::Cancelled)
+        });
+        assert_eq!(app.workspace, Workspace::Files);
+        click(&mut app, &ctx, "Device ▾");
+        click(&mut app, &ctx, "Release control");
+        wait_for(&mut app, &ctx, |app| !app.snapshot.control_acquired);
+        click(&mut app, &ctx, "Device ▾");
+        click(&mut app, &ctx, "Disconnect");
+        wait_for(&mut app, &ctx, |app| {
+            app.snapshot.connection == Connection::Disconnected
+        });
+    }
+
+    #[test]
+    fn connected_devices_page_keeps_chrome_compact_and_only_shows_the_current_step() {
+        let ctx = egui::Context::default();
+        let mut app = CompanionApp::from_context(
+            &ctx,
+            Mode::Mock(companion_core::mock::Scenario::Normal),
+            None,
+        )
+        .unwrap();
+        app.snapshot = state::tests::ready();
+        app.snapshot.control_acquired = false;
+        app.workspace = Workspace::Devices;
+        let mut output = None;
+        for _ in 0..3 {
+            let mut frame = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1120.0, 760.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| app.shell(ui),
+            );
+            frame.textures_delta.clear();
+            output = Some(frame);
+        }
+        let output = output.unwrap();
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|s| text_bounds(&s.shape, "Acquire control").is_some())
+        );
+        for stale in [
+            "Connect to selected Pico",
+            "Scan mock devices",
+            "Release control",
+        ] {
+            assert!(
+                !output
+                    .shapes
+                    .iter()
+                    .any(|s| text_bounds(&s.shape, stale).is_some()),
+                "Completed/inapplicable action still shown: {stale}"
+            );
+        }
+        for id in ["connection-toolbar", "owned-work"] {
+            let panel = egui::containers::panel::PanelState::load(&ctx, egui::Id::new(id)).unwrap();
+            assert!(
+                panel.size().y <= 64.0,
+                "{id} consumed {} points",
+                panel.size().y
+            );
         }
     }
 
@@ -1325,6 +1362,35 @@ mod tests {
                     );
                     assert_eq!(app.text, "Keep this unsent draft");
                     assert_eq!(app.snapshot.job, Job::Running);
+                    if width >= 800.0 && zoom == 1.0 {
+                        let sidebar = egui::containers::panel::PanelState::load(
+                            &ctx,
+                            egui::Id::new("workspace-navigation"),
+                        )
+                        .unwrap()
+                        .outer_rect;
+                        let label = output
+                            .shapes
+                            .iter()
+                            .find_map(|s| {
+                                text_bounds(&s.shape, workspace.label())
+                                    .filter(|r| sidebar.contains(r.center()))
+                            })
+                            .expect("Current workspace label missing");
+                        let fill = if dark {
+                            egui::Color32::from_rgb(38, 57, 79)
+                        } else {
+                            egui::Color32::from_rgb(220, 231, 250)
+                        };
+                        assert!(
+                            output.shapes.iter().any(|s| painted_fill(
+                                &s.shape,
+                                label.center(),
+                                fill
+                            )),
+                            "Current page lost its persistent background: {workspace:?}, dark={dark}"
+                        );
+                    }
                 }
             }
         }

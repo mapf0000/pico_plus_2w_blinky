@@ -22,7 +22,9 @@ Provision a unique device key before deployment (see
 cargo run -p pico-companion -- --profile /private/path/pico.json
 ```
 
-Scan, select the Pico, connect, then choose **Authenticate and acquire control**.
+In **Devices**, select a Pico using its radio row, choose **Connect to selected
+Pico**, then **Acquire control**. The selected device is named beside Connect;
+selection and connection are separate states.
 The app authenticates on connect using the profile and encrypts commands/results.
 No Pico button press, display, OS pairing or Bluetooth bond is required, including
 reconnect. Firmware without a provisioned key exposes public status but refuses
@@ -42,8 +44,10 @@ The companion opens on **Overview**. Use the sidebar to switch between **Devices
 **Keyboard**, **Scripts**, **Files**, **Transfers**, **Settings** and **Help**;
 narrow windows use a task selector. Connection/control state remains at the top.
 **Stop typing / script** stays at the bottom on every task; **Cancel downloads**
-is separate while a download is active. **Show activity** opens the diagnostics
-drawer, or the Activity workspace in a short window. Settings offers System,
+is separate while a download is active. **Activity** in the same footer opens the
+diagnostics drawer, or the Activity workspace in a short window. **Device ▾**
+contains Release control and Disconnect. The connected Devices page shows a
+compact summary with **Change device…**; device IDs are under Device details. Settings offers System,
 Light and Dark appearance for this launch. Switching tasks preserves drafts;
 reconnecting still discards connection-scoped device work.
 
@@ -52,6 +56,13 @@ and focus a disposable editor on that target. Cancel stops the current effect;
 Pico **Y** provides device-wide Stop. Disconnect cancels this companion's job.
 Pending effects are never replayed after reconnect. USB enable/disable controls
 require acquired control and an idle keyboard executor.
+
+The built-in **Scripts** typing demo checks control/USB readiness before Start
+or Ctrl/Cmd+Enter, with **Acquire control** or **Enable USB** beside the readiness
+message. Custom scripts can still start offline to wait for events; their USB
+effects retain the normal runtime checks. Script failures show a recovery message
+first and keep the bounded traceback under **Technical details**. Starting or
+restarting a script always requires an explicit action.
 
 The companion currently supports live status, an encrypted device/agent overview,
 control acquisition/release, USB on/off, saved USB manufacturer/product names,
