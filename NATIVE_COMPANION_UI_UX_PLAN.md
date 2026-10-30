@@ -1,6 +1,6 @@
 # Native companion: desktop styling and usability upgrade plan
 
-Created 2026-10-11; updated 2026-10-24. The desktop shell and polish are
+Created 2026-10-11; updated 2026-10-30. The desktop shell and polish are
 implemented. This is now a remaining-work and acceptance plan, with the detailed
 interaction contracts below retained as reference. macOS is the first acceptance
 platform; Windows/Linux claims require their own evidence.
@@ -16,32 +16,36 @@ Implementation and automated checks do not establish human or device acceptance.
 | --- | --- | --- |
 | Shell and appearance | Native title bar, compact toolbar, neutral light/dark surfaces, task navigation, activity drawer, one fixed Stop/Activity footer | Actual themes, resize/scale, keyboard/focus and assistive-technology acceptance |
 | Current-page indication | Filled selected row and left accent marker, independent keyboard-focus ring, native selected-state metadata | Confirm selection remains clear without hover/focus and after navigation from toolbar/context actions |
-| Connection and readiness | Explicit radio selection and named Connect target; selected/connecting/connected states; Acquire/USB actions; connected-device summary | Unassisted one/multiple-device flows, errors, reconnect and stale-state presentation |
+| Connection and readiness | Direct Connect action in each device row, left-aligned name/visible ID, responsive layout, named accessible targets and connecting state; Acquire/USB actions; connected-device summary | Unassisted one/multiple-device flows, errors, reconnect and stale-state presentation |
 | Keyboard and identity | Offline composer, friendly layout names, cached lowering, scoped Stop, responsive identity editor and retained drafts | Delay presentation, draft replacement/conflicts, last-run context and real key-release acceptance |
 | Scripts, Files and Transfers | Working native workspaces, known-demo readiness checks, custom offline scripts, actionable faults, bounded browsing and verified downloads | Interactive workflow/empty/failure states and hardware acceptance in the BLE plan |
 | Native integration | macOS Keychain profiles, import/selection, explicit reconnect and native destination picker | Permission/dialog/relaunch acceptance and other platforms; do not re-plan these as missing implementations |
 | Preferences and accessibility | Launch-local System/Light/Dark, native egui controls and explicit focus rings | Bounded safe preferences, full keyboard paths, VoiceOver, high contrast and reduced-motion support |
 
 Software evidence is in [docs/DEVICE_TESTING.md](docs/DEVICE_TESTING.md), including
-121 passing tests, pointer events through the real mock backend, painted sidebar
+127 passing tests, pointer/keyboard events through the real mock backend, painted sidebar
 selection and Stop checks, compact toolbar/footer checks, token contrast and
 actual Python-child checks. Operator workflows are in README.md and
 docs/SCRIPTING.md.
 The code is authoritative for implemented styles and available actions.
 
-User feedback has exposed three concrete defects: device selection was not
-apparent, the demo could start with control released, and sidebar selection was
-not painted after the polish pass. Fixes are implemented with regression coverage;
-interactive acceptance is still open. Earlier comments that navigation/resizing
-looked good are not acceptance of the latest build or functional Stop. OS window
-capture was unavailable; do not invent captured visual or usability results.
+User feedback exposed unclear device selection, a demo that could start with
+control released, and missing sidebar selection. The Oct 30 screenshot confirmed
+that the revised radio-row selection still required explanation. Discovery now
+puts Connect directly beside each device and removes that separate selection step.
+Fixes are implemented with regression coverage; interactive acceptance remains
+open. Earlier comments that navigation/resizing
+looked good are not acceptance of the latest build or functional Stop. Earlier OS
+window capture was unavailable. Native OpenGL viewport capture with deterministic
+mock fixtures was inspected on Oct 30; it does not establish human usability or
+real Bluetooth acceptance.
 Detailed change history belongs in DEVICE_TESTING.md rather than this backlog.
 
 ## Remaining milestones, in order
 
 | Milestone | Work | Exit criteria |
 | --- | --- | --- |
-| U1 — Accept the current shell and readiness flow | Exercise selection/connect/acquire/USB/demo/Stop without verbal guidance; verify current-page indication, hover versus focus, resize, light/dark and keyboard paths | Flows complete without accidental execution, focus loss, ambiguous selection or hidden Stop; record observed defects and actual human/device evidence separately |
+| U1 — Accept the current shell and readiness flow | Exercise device Connect/acquire/USB/demo/Stop without verbal guidance; verify current-page indication, hover versus focus, resize, light/dark and keyboard paths | Flows complete without accidental execution, focus loss, ambiguous targets or hidden Stop; record observed defects and actual human/device evidence separately |
 | U2 — Freshness, drafts and execution feedback | Make live versus stale state and last-run/session context explicit; consolidate actionable errors; protect text/source/identity drafts from replacement and conflicts; refine delay entry without changing limits | Refresh/reconnect and rejected commands cannot misrepresent readiness or silently replace drafts; last results cannot be mistaken for current execution |
 | U3 — Preferences and accessibility | Persist a bounded non-secret UI record; accept keyboard-only/VoiceOver paths, contrast/focus at scale, high contrast/reduced motion; centralize remaining selection/button color variants before extending themes | Preferences recover from corrupt/oversize files and never restore effects or authority; accepted accessibility paths and settings are documented |
 | U4 — Performance and platform refinement | Measure idle CPU/RAM/repaint, startup and artifact size; test long names, lists and monitor/scale changes; refine native dialogs and remaining shortcut/menu behavior | Measured baseline and regressions explained; platform-specific behavior is supported by actual tests rather than compilation alone |
@@ -307,7 +311,7 @@ High contrast remains planned; do not claim it from the ordinary dark theme.
 | Workspace padding | 24 points normal; 16 compact |
 | Related field spacing | 8–12 points; 20–24 between groups |
 | Button / input height | 32 points normal; 28 compact, growing with text scale |
-| Device / navigation row | Native radio row at least 32 points; navigation 34, growing with scale/content |
+| Device / navigation row | Name, ID and a Connect button at least 32 points high; navigation 34, growing with scale/content |
 | Corners | 6 points for buttons; 10 for cards; consistent nesting |
 | Focus indicator | Approximately 2-point outline with separation from the boundary |
 | Optional icons | 16–18 points in controls, about 20 in navigation; no requirement to add icons to the text-only baseline |
@@ -355,34 +359,32 @@ connection problems. The toolbar owns persistent session state and quick access.
 
 - Show one prominent “Scan for devices” action initially; use “Scanning…” with a
   way to cancel discovery if the backend supports cancellation through Disconnect.
-  Do not present Connect as usable without a selected current discovery result.
-- Device rows show display name; full IDs are currently under Device details.
-  Accept multiple/identically named devices in U1: expose a short distinguishing
-  identifier when needed before Connect instead of making users guess from name
-  alone. Signal strength is optional only if reliably supplied. Sort predictably,
-  retain selection by ID and avoid jumping rows during interaction.
-- Explicitly select a device before Connect. Do not select the first discovered
-  device implicitly or treat discovery as consent to connect or execute.
-- Make the whole row selectable; distinguish selected, connected and previously
-  seen devices. If a discovered device becomes unavailable, mark it accordingly
-  rather than silently substituting another device.
-- Implemented follow-up (interactive acceptance pending) for the observed
-  mock-connection usability defect: make the required
-  choice visible with a labelled selection control/clear row affordance and a
-  persistent selected-device summary. Place Connect beside or immediately after
-  the selection, identify its target, and show why it is disabled inline; a
-  tooltip or Help instructions alone are insufficient. Discovery selection must
-  be distinguishable from an established connection, including in the toolbar.
-  Preserve explicit choice; do not fix this by silently selecting or connecting
-  the first result. Apply the same flow to mock and real BLE devices.
-  Acceptance: from a fresh launch, a user can discover, select, connect, acquire
-  control and reach a running mock job to test Stop without verbal guidance;
-  exercise both one-result and multiple-result lists with keyboard and pointer.
+  Only current discovery results have usable device Connect actions.
+- Each compact row shows a left-aligned display name, quiet visible ID and its
+  own filled Connect button on the right. At narrow widths the action moves below
+  the name/ID. Long names wrap without covering the action. Identically named
+  devices remain distinguishable before connecting; IDs are not hidden in a
+  details expander. Signal strength is optional only if reliably supplied.
+- Connect explicitly chooses that row's discovery ID and starts the connection.
+  There is no separate radio selection, selectable card or detached global Connect
+  action. Never choose the first result implicitly or treat discovery as consent.
+  Mock and Bluetooth use the same flow. Connected, connecting and previous devices
+  remain distinct; missing devices must never be silently substituted.
+- Each Connect control is keyboard reachable and has a device-specific accessible
+  name. While connecting, the chosen row shows Connecting… at the same button
+  width; other Connect actions are unavailable and Cancel remains visible.
+  Acquiring control remains explicit after connection. Keep row targets stable
+  across refresh and show connection failures beside the discovery controls.
+- The direct-action redesign is implemented; interactive acceptance remains open.
+  Acceptance: from a fresh launch, a user can discover, connect to the intended
+  device, acquire control and reach a running mock job to test Stop without verbal
+  guidance. Exercise one-result, identically named/multiple-result lists, keyboard
+  and pointer paths, light/dark themes and narrow windows.
 - Show empty states specific to never scanned, scanning, scan finished empty,
   adapter unavailable and permission failure. “No devices found” is not the correct
   message for every discovery failure.
-- Scan and Connect are distinct actions. Double-click or Enter on a selected row
-  may connect as an explicit shortcut, with the same prerequisite checks.
+- Scan and Connect are distinct actions. Tab/Enter activates the device's Connect
+  button with the same prerequisite checks as the pointer action.
 
 ### Session state and next-action matrix
 
@@ -390,7 +392,7 @@ connection problems. The toolbar owns persistent session state and quick access.
 | --- | --- | --- |
 | Not connected, no selection | “Choose a Pico to get started” | Scan for devices |
 | Scanning | “Searching for nearby Pico devices…” | Cancel scan where supported |
-| Device selected | Name and profile availability | Connect |
+| Devices found | Each device's name, ID and own action | Connect beside the intended device |
 | Connecting/authenticating | Name, truthful phase and elapsed time | Cancel connection |
 | Public diagnostics only / no profile | “Device visible; control requires a matching profile” | Open Devices; disconnect before importing/selecting the implemented native profile |
 | Connected, control released | “Connected · Control needed” | Acquire control; show a separate authenticated claim only if the backend exposes it |
@@ -862,7 +864,7 @@ status honest and move completed acceptance evidence out of the backlog.
 ## 13. Immediate next slice
 
 Prioritize U1 acceptance of the current build, including the sidebar selection
-correction. Keep its checklist small: select/connect/acquire, start a delayed
+correction and the direct device Connect redesign. Keep its checklist small: connect/acquire, start a delayed
 mock job, navigate away, Stop; repeat with keyboard and at narrow/light/dark
 layouts. Human and real-device results are separate evidence gates.
 

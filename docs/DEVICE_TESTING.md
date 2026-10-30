@@ -1237,3 +1237,253 @@ Clippy, mock lifecycle, actual Python process checks and local release packaging
 No firmware/protocol/dependency changes or device flash are involved. A fresh
 mock window is opened after rebuilding; native visual and assistive-technology
 acceptance remain pending.
+
+
+## Hardware acceptance run — 2026-10-25, continued 2026-10-27
+
+The user explicitly requested the focused hardware milestone and supplied the
+board in BOOTSEL. Built/package-local host agent and linked the embedded release:
+
+```sh
+scripts/build-host-agent
+cargo build -p pico_rust --release --target thumbv8m.main-none-eabihf
+picotool load -u -v target/thumbv8m.main-none-eabihf/release/pico_rust -t elf
+picotool reboot
+```
+
+Before flashing, the control-key and identity regions were read into private
+ignored backups. ELF program headers excluded both reserved regions: five
+initialized load segments, 4,843,240 bytes; static SRAM segments 104,056 bytes.
+This does not measure runtime stack headroom. After verified loading and before
+reboot, fresh reads matched both original regions byte-for-byte. No key generation,
+reprovisioning, name edits or whole-chip erase were performed. Private outputs
+are under `target/hardware-acceptance/20261025-6cziz23n` with private permissions;
+no key bytes or transferred contents were printed or staged.
+
+Observed board evidence on 2026-10-25:
+
+- The first scan found no Pico; a fresh scan passed. Keep initial discovery/cold
+  start robustness open rather than guessing the first scan's cause.
+- Authenticated `--self-test` passed fresh sessions, acquired/released control,
+  encrypted status/overview, command during refresh and reconnect. A later repeat
+  also passed (USB enabled/ready, host agent present, approximately 398 ms read).
+- `--python-ble-self-test` passed three generator/empty-KBD1 effects with correlated
+  completion. This is not text/chord/key-release hardware acceptance.
+- A dedicated local host agent served disposable generated data from the private
+  fixture directory. `--download-self-test` saved 1,025 bytes in 7.800 s with zero
+  retries; a separate byte comparison and SHA-256 matched the source. This is a
+  small-file baseline, not a larger-file throughput or failure-recovery result.
+- Opening IOHIDManager returned `kIOReturnNotPermitted` (0xe00002e2), so exclusive
+  raw capture could not be established. Apple's [exclusive IOHID option](https://developer.apple.com/documentation/iokit/1556660-anonymous/kiohidoptionstypeseizedevice)
+  documents event isolation, but no successful raw capture is claimed here.
+- The first focused capture mode attempt timed out in phase 2 before any text
+  command. That phase requires acquired control, USB ready and window focus;
+  the original timeout did not identify which condition failed. Added explicit
+  status diagnostics; do not label this a proven radio or focus defect.
+
+On 2026-10-27 the resumed run observed no Pico CDC ports, no BOOTSEL device and no
+Pico in a fresh BLE scan. The local host-agent process remained waiting. The user
+was asked which USB computer the board is attached to. Further hardware tests
+require that connection; no additional flash was performed on the resumed run.
+
+Added two explicit, mutually exclusive acceptance modes:
+
+```sh
+# Keep this window focused, with Pico USB connected to this computer.
+cargo run -p pico-companion --release -- --profile <private-profile> --hid-self-test
+# Existing private parent, host agent on this same USB-connected computer.
+cargo run -p pico-companion --release -- --profile <private-profile> \
+  --download-recovery-self-test --test-root <private-existing-parent>
+```
+
+The key sink checks bounded A/B/C down/up order and Shift, rejects repeats/unknown
+keys/system modifiers, cancels/disconnects on focus loss, and requires 600 ms of
+quiet input after completion/cleanup. Down/up pairs in one frame reset the quiet
+interval too. It covers delayed cancellation, cancellation after typing starts,
+actual Python Stop and disconnect/reconnect. It observes native OS input events,
+not raw USB reports or physical Y Stop. No editable target document is used.
+
+The recovery runner creates/retains private synthetic fixtures, observes an actual
+second queued item, compares saved bytes, and exercises missing sources, a real
+Unix unwritable destination, repeated cancellation after received data, forced
+BLE disconnect, USB detach/agent re-enumeration and successful fresh downloads.
+It attempts USB/control restoration on error and reports cleanup failure. The
+new hardware cases have not run on the absent board; leave them open. Physical
+Stop/local presets, forced MTU 23, unplug/cold-start soak, disk full/source mutation
+and other-platform checks also remain separate.
+
+Software validation commands:
+
+```sh
+cargo fmt --all -- --check
+cargo test -p ble-protocol -p python-runtime -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol -p python-runtime --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo run -p pico-companion -- --python-self-test
+scripts/build-companion
+```
+
+123 tests pass (BLE 16, core 43, companion 50, actual-process 2, runtime 12), plus
+Clippy and the mock/Python process checks. The new capture validation and CLI
+opt-in/exclusivity checks pass. The release bundle builds with a verified local
+ad-hoc signature. New modes are not executed by the ordinary app or self-test;
+no wire format, firmware capacity or interpreter privilege changed. The embedded
+binary was built/flashed for the Oct 25 acceptance, not changed by the harnesses.
+
+## Resumed HID and download recovery acceptance — 2026-10-30
+
+The user confirmed the board had been unplugged and reconnected it to this Mac.
+Both CDC ports returned, with the existing local test host agent reconnecting to
+the control port. No additional firmware flash or provisioning was performed.
+The same private profile authenticated fresh sessions (first observed uptime
+55 seconds). Repeated `--self-test` runs passed encrypted control/status/overview,
+commands during background refresh, release and reconnect. Live USB manufacturer/
+product descriptors matched the CRC-valid saved identity slot from the Oct 25
+backup after this independent unplug/reconnect; no identity writes were needed.
+
+Discovery initially exhausted the ordinary 4-second worker/5-second client
+control-request budget. Discovery now has its own finite 14-second worker and
+15-second client budgets, retaining the two-second advertisement observation and
+urgent cancellation. A portable regression covers delayed completion, finite
+timeout and cancellation without accepting stale results. Empty scans still
+occurred; explicit acceptance modes allow up to three discovery attempts, without
+retrying commands/effects. This does not establish the cause of every empty scan.
+
+The packaged native `--hid-self-test` window was activated on macOS, then passed
+the complete suite against real Pico USB HID, authenticated BLE and the actual
+Python child:
+
+- Manual text: three ordered key-down/up pairs and final release.
+- Python text/Shift chord: three ordered pairs, one Shift press/release and no
+  held modifier afterward.
+- Cancellation during the initial delay: no key events.
+- Cancellation during typing: six pairs before stopping, no held keys afterward;
+  completion observed after 1,282 ms including the required 600 ms quiet interval.
+  This is not a raw USB/key-release latency measurement.
+- Python Stop during typing: six pairs and final release.
+- Disconnect during typing: two pairs and final release. Fresh authenticated
+  reconnect left control released and emitted no output before explicit acquire;
+  explicit acquire/release/disconnect then completed.
+
+Early capture runs exposed harness issues: egui 0.36 reports explicit Shift key
+edges, which the sink originally rejected; macOS could also open the window in
+the background. The sink now validates bounded Shift edges as well as letter
+edges, starts its clock on initial focus, and keeps abort-on-focus-loss after
+arming. These changes do not alter firmware keyboard execution. Evidence is in
+the private ignored `target/hardware-acceptance/20261030-q1u5ub5k/hid5.stdout.log`.
+Capture observes native OS events, not raw per-device USB reports. Physical Y
+Stop, local-preset contention and deliberately timed cancellation during a held
+key remain open.
+
+`--download-recovery-self-test` completed with private synthetic fixtures and the
+local USB host agent:
+
+- Two files (1,025 and 4,097 bytes) were observed queued, saved byte-for-byte and
+  completed their encrypted receipts.
+- A missing source failed without a destination.
+- A real Unix destination directory with mode `000` rejected anonymous staging,
+  failed without publishing a file, and deliberately closed BLE without granting
+  the failed record final credit. Explicit reconnect/acquire recovered.
+- Two cancellations after authenticated/disk-credited data on the same BLE link
+  removed incomplete output; fresh host sessions worked after cancellation.
+- Deliberate BLE disconnect during a third receiving file removed incomplete
+  output. Explicit reconnect/acquire and a fresh host session saved a new fixture
+  exactly; work was not resumed automatically.
+- Companion USB-off during receiving removed incomplete output. USB-on brought
+  the host agent back through re-enumeration; a fresh host session saved another
+  fixture exactly. Original USB-enabled state was restored, control released and
+  BLE disconnected at the end.
+
+Do not conflate commanded USB stop with unexpected cable loss or agent failure.
+The recovery runner's early failures also remain part of the evidence: idle
+session cancellation correctly yields `Idle` (the first harness expected only
+`Failed`), and fatal disk-record failure intentionally tears down BLE (the next
+harness initially waited for an agent without reconnecting). These expectations
+were corrected. A later run lost BLE before the first data of the third transfer
+after two successful cancellations; cleanup explicitly reconnected and released
+control. The cause was not established. Two consecutive complete reruns passed:
+`recovery5.log` / `download-recovery-rYpVvi` and `recovery6.log` /
+`download-recovery-XIh72o` beneath the private directory above. The first passing
+run's output directory contained exactly its four intended saved files and no
+cancelled/disconnected output or named staging residue. These runs do not close
+intermittent-loss or soak acceptance. The parent directory was mode `0700`
+throughout; fixture creation now also requests Unix mode `0700` explicitly,
+independent of the caller's umask. Existing owned fixture roots were restricted
+to the same mode. Public failure enums are now reported at stream/maintenance teardown;
+no decrypted records, keys or transferred contents are logged.
+
+Software validation on the final companion sources:
+
+```sh
+cargo fmt --all -- --check
+cargo test -p ble-protocol -p python-runtime -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol -p python-runtime --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo run -p pico-companion -- --python-self-test
+scripts/build-companion
+```
+
+All 124 tests passed (BLE 16, core 44, companion 50, actual-process 2, runtime 12),
+as did Clippy, mock lifecycle, actual Python process checks and release bundle
+build/signature verification. Packaged Python process checks and a final packaged
+BLE smoke also passed (USB enabled/ready, agent present, latest read 398 ms).
+The release executable is 25,393,120 bytes.
+No dependency, protocol, firmware capacity, flash layout, authentication policy
+or Python privilege changed. No firmware rebuild/flash was required for these
+host-side harness and discovery-budget changes. Forced ATT MTU 23, missing-key
+firmware, physical Stop/local presets, uncommanded USB/agent/radio loss,
+disk-full/source-mutation and longer cold-start/load/platform tests remain open.
+
+## Direct device Connect actions — 2026-10-30
+
+The user reported that the radio-row design still did not make selection or the
+click target apparent. Discovery now renders a compact row with a left-aligned
+name, visible ID and a filled Connect button on the right. On narrow layouts the
+button moves below the identity. The detached Connect/selected summary and radio
+selection are removed. The row's Connect action explicitly chooses its current
+discovery ID and sends the existing action; discovery itself never chooses a
+device, acquires control or starts an effect. Mock and Bluetooth share this UI.
+Duplicate names can be distinguished by their visible IDs; accessible button
+names include both name and ID. Connecting retains a 128-point button width and
+stable per-device ID. Connection failures are visible with retained discovery
+results, and blocked local operations have inline guidance.
+
+Responsive checks exposed an existing width-limit error: setting the workspace
+maximum to 760 points could expand content beyond a narrow viewport. The limit
+now also respects available width, keeping Connect inside the view. Painted
+fixtures check full button bounds and non-overlap with long names/IDs across
+320/480/820/1,120-point widths in both themes. Existing sidebar, fixed Stop and
+connected-state geometry checks still pass.
+
+Pointer events through the real mock backend now verify direct Connect without
+prior selection, explicit acquisition, demo readiness and cross-workspace Stop.
+A duplicate-name fixture places a different device before the real mock target;
+clicking the intended row still connects using its own ID, with control released.
+An actual Tab/Enter event path reaches and activates Connect without selecting a
+row. These checks do not establish VoiceOver or human usability acceptance.
+
+The native OpenGL viewport was captured and inspected using the existing
+development `screenshot` feature and two deterministic mock rows. The temporary
+fixture was removed with an exact source-restoration check before final normal
+builds. The final ignored image is
+`target/ui-review/20261030-connect-final-00ywt4dm/devices-native.png`. It is a
+rendered mock fixture, not a live discovery result or OS desktop capture.
+
+Validation:
+
+```sh
+cargo fmt --all -- --check
+cargo test -p ble-protocol -p python-runtime -p companion-core -p pico-companion
+cargo clippy -p pico-companion -p companion-core -p ble-protocol -p python-runtime --all-targets -- -D warnings
+cargo run -p pico-companion -- --mock --self-test
+cargo run -p pico-companion -- --python-self-test
+scripts/build-companion
+```
+
+127 tests pass (BLE 16, core 44, companion 53, actual-process 2, runtime 12).
+Clippy, formatting, mock lifecycle, Python process checks and the local signed
+release bundle build pass. A normal mock native window is opened for review.
+Operator instructions, architecture wording and the UI/UX plan match the new
+direct-action workflow. No firmware/protocol/dependency changes or hardware
+flash are involved. Human, assistive-technology and Windows/Linux acceptance
+remain separate.

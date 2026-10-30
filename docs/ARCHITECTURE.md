@@ -19,7 +19,7 @@ core snapshots and caches bounded text validation; it owns no transport state.
 `ui/components.rs` owns filled/quiet/Stop buttons, status badges and focus rings.
 One footer retains Stop and Activity; the toolbar Device menu owns Release and
 Disconnect. Connected discovery renders a summary rather than completed steps. Child modules `ui/devices.rs`
-and `ui/scripts.rs` render explicit selection/connect/acquire steps and script
+and `ui/scripts.rs` render explicit per-device Connect/acquire controls and script
 readiness/recovery. Only the unchanged known demo declares UI USB prerequisites;
 arbitrary scripts remain runnable offline. Traceback-derived recovery hints are
 presentation only; bounded interpreter IPC and effect admission are unchanged. Task drafts stay in the app across

@@ -3,18 +3,33 @@ use super::theme;
 use eframe::egui;
 
 pub fn primary(ui: &mut egui::Ui, enabled: bool, label: &str) -> egui::Response {
-    filled(ui, enabled, label, false)
+    primary_sized(ui, enabled, label, egui::Vec2::ZERO)
+}
+
+pub fn primary_sized(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    label: &str,
+    min_size: egui::Vec2,
+) -> egui::Response {
+    filled(ui, enabled, label, false, min_size)
 }
 
 pub fn stop(ui: &mut egui::Ui, enabled: bool, label: &str) -> egui::Response {
     if enabled {
-        filled(ui, true, label, true)
+        filled(ui, true, label, true, egui::Vec2::ZERO)
     } else {
         quiet(ui, false, label)
     }
 }
 
-fn filled(ui: &mut egui::Ui, enabled: bool, label: &str, danger: bool) -> egui::Response {
+fn filled(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    label: &str,
+    danger: bool,
+    min_size: egui::Vec2,
+) -> egui::Response {
     ui.scope(|ui| {
         let accent = theme::palette(ui).accent;
         let visuals = ui.visuals_mut();
@@ -38,7 +53,7 @@ fn filled(ui: &mut egui::Ui, enabled: bool, label: &str, danger: bool) -> egui::
             widget.bg_stroke = egui::Stroke::NONE;
             widget.corner_radius = egui::CornerRadius::same(6);
         }
-        let response = ui.add_enabled(enabled, egui::Button::new(label));
+        let response = ui.add_enabled(enabled, egui::Button::new(label).min_size(min_size));
         focus(ui, &response, accent);
         response
     })

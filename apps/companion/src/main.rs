@@ -3,6 +3,7 @@ mod backend;
 mod ble;
 mod desktop;
 mod download_smoke;
+mod hid_smoke;
 mod identity_smoke;
 mod profile;
 mod profiles;
@@ -10,6 +11,7 @@ mod python;
 mod python_heap;
 mod python_smoke;
 mod python_worker;
+mod recovery_smoke;
 mod smoke;
 mod stream_smoke;
 mod ui;
@@ -52,6 +54,15 @@ struct Args {
     /// Generate a private profile and matching .flash.bin; exits without device access.
     #[arg(long, conflicts_with_all = ["mock", "ble", "self_test", "identity_self_test", "stream_self_test"])]
     create_profile: Option<std::path::PathBuf>,
+    /// Type safe test letters into a focused native capture window and check Stop/reconnect.
+    #[arg(long, requires = "profile", conflicts_with_all = ["mock", "self_test", "identity_self_test", "stream_self_test", "download_self_test", "python_self_test", "python_ble_self_test"])]
+    hid_self_test: bool,
+    /// Exercise queued downloads, local filesystem errors, cancellation and BLE/USB recovery.
+    #[arg(long, requires_all = ["profile", "test_root"], conflicts_with_all = ["mock", "self_test", "hid_self_test", "identity_self_test", "stream_self_test", "download_self_test", "python_self_test", "python_ble_self_test"])]
+    download_recovery_self_test: bool,
+    /// Existing private parent for disposable files; the USB target agent must run on this host.
+    #[arg(long, requires = "download_recovery_self_test")]
+    test_root: Option<std::path::PathBuf>,
     /// Use an in-memory device.
     #[arg(long, conflicts_with = "ble")]
     mock: bool,
@@ -106,6 +117,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let profile = args.profile.as_deref().map(profile::load).transpose()?;
+    if args.download_recovery_self_test {
+        return recovery_smoke::run(
+            profile.ok_or("--profile is required")?,
+            args.test_root.ok_or("--test-root is required")?,
+        );
+    }
+    if args.hid_self_test {
+        return hid_smoke::run(profile.ok_or("--profile is required")?);
+    }
     if args.download_self_test {
         return download_smoke::run(
             profile.ok_or("--profile is required")?,
@@ -333,3 +353,57 @@ fn ble_smoke(
 
 mod download_crypto;
 mod downloads;
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn hardware_acceptance_modes_require_explicit_exclusive_invocation() {
+        let normal = Args::try_parse_from(["pico-companion"]).unwrap();
+        assert!(!normal.hid_self_test && !normal.download_recovery_self_test);
+        assert!(Args::try_parse_from(["pico-companion", "--hid-self-test"]).is_err());
+        assert!(
+            Args::try_parse_from([
+                "pico-companion",
+                "--hid-self-test",
+                "--profile",
+                "private.json",
+                "--mock"
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "pico-companion",
+                "--download-recovery-self-test",
+                "--profile",
+                "private.json"
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "pico-companion",
+                "--download-recovery-self-test",
+                "--profile",
+                "private.json",
+                "--test-root",
+                "fixtures"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "pico-companion",
+                "--download-recovery-self-test",
+                "--profile",
+                "private.json",
+                "--test-root",
+                "fixtures",
+                "--hid-self-test"
+            ])
+            .is_err()
+        );
+    }
+}

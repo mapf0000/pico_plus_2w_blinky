@@ -15,8 +15,9 @@ cargo build -p pico-companion --release
 Mock scenarios: normal, empty, permission-denied, busy, usb-unavailable,
 incompatible, timeout and link-loss. Mock execution never accesses radio or USB.
 
-For hardware: load a matching profile, scan, select and connect. Connect establishes
-a fresh mutually authenticated session. Choose **Authenticate and acquire control**
+For hardware: load a matching profile, scan, then choose **Connect** beside your
+Pico's name and ID. No separate row selection is required. Connect establishes
+a fresh mutually authenticated session. Choose **Acquire control**
 to permit effects. No Pico interaction, display or OS pairing is required. A missing
 profile permits public diagnostics only; wrong key/device ID fails authentication.
 Firmware must be BLE v3 and already provisioned. Never share a universal key.
@@ -215,3 +216,46 @@ executable in worker mode; the packaged process self-test validates that path.
 Distribution signing/notarization, platform permission prompts and independent
 installation acceptance remain release work. Close an older app before switching
 to a newly built bundle; the builder is not an updater.
+
+
+## Explicit HID and download recovery acceptance
+
+These opt-in commands require a private profile and an already provisioned Pico;
+they are not ordinary mock validation. Keep other BLE companions disconnected.
+
+```sh
+# Pico USB must connect to this computer. Leave the non-editable capture window focused.
+cargo run -p pico-companion --release -- --profile /private/path/pico.json --hid-self-test
+
+# The USB target host agent must run on this same computer. Parent directory must exist.
+mkdir -m 700 /private/path/pico-acceptance
+cargo run -p pico-companion --release -- --profile /private/path/pico.json \
+  --download-recovery-self-test --test-root /private/path/pico-acceptance
+```
+
+The HID mode sends only test letters and Shift to its focused native window and
+starts its acceptance clock when the window gains focus, then aborts/disconnects
+on focus loss after arming. If macOS opens it in the background, activate its
+window before testing. Discovery allows up to three attempts without retrying
+effects. It checks manual text, a real Python Shift chord,
+cancellation before output and during typing, Python Stop, release after disconnect
+and explicit fresh reconnect without replay. It records bounded key-event counts
+and order, not typed content. These are native OS input events, not raw per-device
+USB reports. It does not test physical Y Stop or local presets. Abort/closing
+stops owned work; do not type during capture. The helper uses the same executable
+for Python and never forwards profiles or credentials to the child.
+
+The recovery mode creates a new private fixture directory beneath the supplied
+parent and retains it for inspection. Only its synthetic sources and chosen new
+outputs are used. It checks two queued files byte-for-byte, missing-source and
+Unix destination-permission failures, two cancellations after received data,
+explicit BLE reconnect, and USB detach/agent return followed by a fresh download.
+Permission-denied record processing deliberately closes BLE; the check explicitly
+reconnects and acquires control before continuing. The runner retries only empty
+discovery (up to three scans), never file transfers or keyboard effects.
+It temporarily toggles USB and attempts to restore the original enabled state
+on success or error; restoration failures are reported. Windows permission tests
+remain separate. The existing host agent must reconnect after re-enumeration;
+select it by VID/PID or use the correct current control CDC port.
+
+Hardware results and limitations are recorded in [DEVICE_TESTING.md](../../docs/DEVICE_TESTING.md).

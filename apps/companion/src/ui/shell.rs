@@ -203,16 +203,16 @@ impl CompanionApp {
     }
 
     fn workspace_content(&mut self, ui: &mut egui::Ui) {
-        ui.set_max_width(
-            if matches!(
-                self.workspace,
-                Workspace::Files | Workspace::Scripts | Workspace::Transfers | Workspace::Activity
-            ) {
-                f32::INFINITY
-            } else {
-                760.0
-            },
-        );
+        let max_width = if matches!(
+            self.workspace,
+            Workspace::Files | Workspace::Scripts | Workspace::Transfers | Workspace::Activity
+        ) {
+            f32::INFINITY
+        } else {
+            760.0
+        };
+        // A reading-width limit must not expand content past a narrow viewport.
+        ui.set_max_width(ui.available_width().min(max_width));
         match self.workspace {
             Workspace::Overview => {
                 self.status(ui);
@@ -245,9 +245,11 @@ impl CompanionApp {
             Workspace::Help => {
                 ui.heading("Help");
                 ui.label(
-                    "1. In Devices, import your private profile, scan, select a Pico and connect.",
+                    "1. In Devices, import your private profile, scan, then choose Connect beside your Pico.",
                 );
-                ui.label("2. Authenticate and acquire control using the connection toolbar. No Pico confirmation is needed.");
+                ui.label(
+                    "2. Choose Acquire control after connecting. No Pico confirmation is needed.",
+                );
                 ui.label("3. Enable USB in Overview or Settings. Keyboard actions type on the computer connected to Pico USB.");
                 ui.label("4. Choose the USB computer's input layout and a delay before sending text to a disposable editor.");
                 ui.label("Stop typing / script is always at the bottom of this window. Pico Y stops device-wide execution. Cancel downloads is separate.");

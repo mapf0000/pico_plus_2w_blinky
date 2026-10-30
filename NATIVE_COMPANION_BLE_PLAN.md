@@ -1,6 +1,6 @@
 # Native companion: remaining feature-parity plan
 
-Updated 2026-10-24. This is the active backlog for replacing the former Web UI
+Updated 2026-10-30. This is the active backlog for replacing the former Web UI
 with the native Rust/egui Bluetooth companion. Completed implementation and test
 history belong in [DEVICE_TESTING.md](docs/DEVICE_TESTING.md); remove completed
 items from this backlog as milestones land.
@@ -12,7 +12,9 @@ USB on/off, layout-aware text effects and cancellation are implemented. The user
 confirmed the previous v2 pairing, real USB keyboard output and delayed cancellation
 on hardware. BLE v3 now has host/embedded validation plus macOS/Pico acceptance
 for unattended control/status/reconnect, wrong-key rejection and unauthenticated
-command/continuous-read timeout rejection. V3 HID acceptance remains separate.
+command/continuous-read timeout rejection. V3 manual/Python text, a Shift chord,
+delay/typing cancellation, Python Stop and disconnect key release now pass with
+native macOS input capture. Physical Stop/local presets remain separate.
 Background reads no longer mark controls busy; one bounded command can wait
 behind them, with queued-text cancellation and fail-closed timeout/disconnect.
 Timestamped/contextual diagnostics now have filtering, errors-only, clear and
@@ -44,6 +46,27 @@ work. Shell execution and credential prompts are optional extensions: they were
 on-device daemon operations, not controls in the former Web UI. USB mass storage
 was already removed before this baseline and is not a parity requirement.
 
+## Current acceptance run
+
+On 2026-10-25, the authorized ELF update was verified and the control-key and
+USB-identity regions remained byte-for-byte unchanged. Fresh authenticated
+control/status/reconnect and the existing real Python/empty-effect check passed.
+A 1,025-byte encrypted download matched its disposable source exactly (7.800 s,
+zero retries). These checks do not complete HID or failure-recovery acceptance.
+
+New explicit `--hid-self-test` and `--download-recovery-self-test --test-root`
+commands provide repeatable key-event/Stop and download-failure scenarios; see
+apps/companion/README.md and DEVICE_TESTING.md. After the user reconnected the
+board on 2026-10-30, the full native key-event suite passed, including fresh
+reconnect with control released and no replay before explicit acquisition.
+Live USB descriptors matched the saved identity after independent unplug/reconnect.
+The complete download recovery suite passed twice consecutively: two queued saves, missing source,
+unwritable destination with fail-closed disconnect, two same-link cancellations,
+forced BLE disconnect and fresh download, USB detach/agent return and fresh
+download. One earlier run lost its link before data after two cancellations;
+the cause remains unproven, so repeated-cycle/soak acceptance remains open.
+No additional firmware flash was needed.
+
 ## Research baseline and gaps
 
 Compared current source with commit `194e7c2`, the last commit before the
@@ -54,14 +77,14 @@ Bluetooth-only removal (`2f6579c`). Historical sources can be read with
 | --- | --- | --- |
 | Unattended authorization (new deployment requirement) | BLE v3 Noise PSK, encrypted control/snapshots and no physical gate; macOS native import/selection with Keychain implemented | Remaining board acceptance, native import/relaunch acceptance, Windows/Linux credential stores and authenticated atomic rotation |
 | Overview: USB state, firmware version/build, host OS, agent presence/version, CDC installation stage, compatibility errors | Protected overview v1, full build/limits, version/OS/hostname/heartbeat age and CDC stage reuse existing firmware state | Populated/stale-agent and CDC-stage acceptance; installation byte progress/specific failure reasons if needed; gate future workflows by actual BLE support |
-| Start/stop USB | Repeated BLE stop/start, live macOS removal and descriptor rebuild passed | Timeout/detach and job-contention fault acceptance |
-| USB manufacturer/product editing and persistent save | Native editor, encrypted acquired read/save, verified inactive-slot transaction and USB-off lifecycle gate implemented; macOS descriptor/readback/reconnect checks passed | Independent power-cycle persistence and editor failure/draft acceptance; worst-case flash blackout measurement |
-| Python editor, generator execution, Start/Stop and errors | Native editor and lazy restricted RustPython child implemented; bounded IPC/heap, hard deadlines, send/throw, local waits, general validated KBD1 and scoped Stop tested; empty effects passed on Pico | Real text/chord/key-release, physical Stop/local-preset contention, interactive editor and soak/platform acceptance |
+| Start/stop USB | Repeated BLE stop/start, live macOS removal, descriptor rebuild and download cleanup/agent return passed | Uncommanded USB/agent loss and job-contention fault acceptance |
+| USB manufacturer/product editing and persistent save | Native editor, encrypted acquired read/save, verified inactive-slot transaction and USB-off lifecycle gate implemented; macOS descriptor/readback/reconnect and independent unplug/reconnect persistence checks passed | Editor failure/draft acceptance; worst-case flash blackout measurement |
+| Python editor, generator execution, Start/Stop and errors | Native editor and lazy restricted RustPython child implemented; bounded IPC/heap, hard deadlines, send/throw, local waits, general validated KBD1 and scoped Stop tested; real text/Shift chord, typing Stop and final release passed on Pico | Physical Stop/local-preset contention, precise key-down cancellation timing, interactive editor and soak/platform acceptance |
 | Python `wait_event()` for buttons and connection/USB/agent changes | Native supervisor delivers bounded button history and non-replayed capability transitions; real child/mock reconnect and button waits pass | Physical button/Stop, USB/agent transition and reconnect acceptance on hardware |
 | Host filesystem navigation | Encrypted BLE list/cancel/page relay; bounded native Home/Root/Up, breadcrumbs, hidden files, metadata, selection and pagination implemented; real agent pagination/error/cancel/reconnect passed | Interactive navigation acceptance, slow-agent/soak and Windows/Linux board checks |
-| Encrypted path/default-path transfer initiation and session reconnect | Independent host Noise client, encrypted BLE/USB relay, source/default controls and cancellation barrier implemented | Queued batches, USB/agent-loss and longer soak checks |
-| Downloads: queue, progress, rate/ETA, verification, save | One disk receiver, four requests/eight history items, authenticated manifest/chunks/close, SHA-256, no-overwrite saving and encrypted receipt implemented; 8,195-byte Pico transfer matched source and completed its encrypted receipt; empty/default and five cancel/reconnect cycles passed | Queued batches, slower/full disk and platform checks; evaluate 1-MiB/counter limit and native save-picker acceptance |
-| Connection loss and reconnect | Deliberate reconnect rediscovers the previous device, creates a fresh authenticated session and leaves control released; profile replacement invalidates old intents | Real radio/reboot/soak and platform acceptance; no effect replay or fallback to another device |
+| Encrypted path/default-path transfer initiation and session reconnect | Independent host Noise client, encrypted BLE/USB relay, source/default controls and cancellation barrier implemented; queued files, cancellation, deliberate BLE disconnect and USB stop/agent-return recovery passed | Uncommanded USB/agent loss, intermittent link-loss investigation and longer soak checks |
+| Downloads: queue, progress, rate/ETA, verification, save | One disk receiver, four requests/eight history items, authenticated manifest/chunks/close, SHA-256, no-overwrite saving and encrypted receipt implemented; real queued saves, missing source and permission-denied disk cleanup passed | Slower/full disk, source mutation and platform checks; evaluate 1-MiB/counter limit and native save-picker acceptance |
+| Connection loss and reconnect | Deliberate reconnect rediscovers the previous device, creates a fresh authenticated session and leaves control released; profile replacement invalidates old intents; native HID and download recovery passed | Uncommanded radio loss, reboot/soak and platform acceptance; intermittent link-loss investigation |
 
 Historical evidence: `apps/frontend/src/app.rs`, `ui/overview.rs`, `ui/scripts.rs`,
 `ui/transfers.rs`, `ui/diagnostics.rs`, `api.rs`, `python.rs`,
@@ -99,13 +122,13 @@ See [the wire specification](docs/PROTOCOL.md#bluetooth-control-v3),
 Remaining:
 
 - Record missing-key device behavior,
-  forced default ATT MTU, interrupted maximum upload/response, Cancel latency,
-  v3 HID/key release and local-preset contention. Unattended acquire/release,
+  forced default ATT MTU, interrupted maximum upload/response, precise Cancel latency
+  and local-preset contention. Native v3 HID/key release, unattended acquire/release,
   encrypted status/reconnect, wrong key, unauthenticated command rejection, timeout
   under continuous reads and key persistence across ELF deployment have passed
-  on macOS/Pico. One independent cold-start authentication/session-reset run also
-  passed during milestone 4; longer cold-start soak remains open. Measure standalone
-  handshake time and stack headroom;
+  on macOS/Pico. Independent cold-start authentication/session-reset passed during
+  milestone 4 and after the Oct 30 unplug/reconnect; longer cold-start soak remains
+  open. Measure standalone handshake time and stack headroom;
   compilation/linked static size does not establish runtime stack usage or entropy.
 - Accept the macOS native import/selection/relaunch workflow and Keychain
   lock/permission prompts interactively. The native store's disposable round-trip,
@@ -144,12 +167,12 @@ Implementation is complete; the remaining acceptance below is still open.
 
 Remaining acceptance (implementation and completed checks are in DEVICE_TESTING.md):
 
-- Confirm saved identity after an independent power cycle, and exercise the native
-  editor failure/draft behavior interactively (invalid input, rejected save, Reload,
-  and edits across refresh). The user confirmed a successful name change; live
+- Exercise the native editor failure/draft behavior interactively (invalid input,
+  rejected save, Reload, and edits across refresh). The user confirmed a successful name change; live
   macOS detach acceptance now checks actual registry removal as well as BLE flags.
   Flash failure/power loss is covered in host fault-injection tests; board save,
-  readback, repeated USB toggles, descriptors and fresh reconnect have passed.
+  readback, repeated USB toggles, descriptors, fresh reconnect and identity
+  persistence after independent unplug/reconnect have passed.
   Measure worst-case flash/radio blackout if field conditions require a tighter bound.
 - Exercise diagnostic filtering, clear and manual scrolling with a populated view.
 - Accept populated/stale/legacy agent metadata and CDC installer stages on hardware.
@@ -224,10 +247,12 @@ interpreter-only WASM evaluation. See SCRIPTING.md and THREAT_MODEL.md.
 
 Remaining acceptance/release work:
 
-- Verify text, modifier chords, Stop during delay/key-down and final key release
-  against a disposable USB capture target. Empty effects passed through the real
-  generator/KBD1/BLE/Pico executor, but are not physical typing acceptance. Verify
-  physical Y Stop and local-preset contention with a script effect outstanding.
+- Verify physical Y Stop and local-preset contention with a script effect
+  outstanding, and cancellation deliberately timed during a held key. Native
+  macOS capture has passed real manual/Python text, a Shift chord, cancellation
+  during the initial delay (no output) and typing, Python Stop during typing,
+  final release and disconnect/reconnect without replay. Native OS events are
+  distinct from raw USB report timing or per-device exclusive capture.
 - Accept real button waits and USB/agent capability transitions, lost/late results,
   reconnect/re-authentication with retained generator state and no output retry.
   Actual-process/mock tests cover these lifecycle paths; radio/hardware checks
@@ -267,13 +292,16 @@ work without automatic retry. See DOWNLOADS.md and DEVICE_TESTING.md.
 
 Remaining acceptance/release work:
 
-- Accept queued multi-file batches and forced disconnect on the revised build.
-  The full 8,195-byte download, encrypted completion receipt, empty/default path,
-  missing-source failure/reconnect, five cancellation/reconnect cycles and a
-  same-link host-session restart after cancellation passed on macOS/Pico.
-  Preliminary ordering failures are recorded separately; keep repeated cold-start
-  and longer soak acceptance open.
-- Exercise truly slow/full/unwritable disk, source disappearance/mutation,
+- Investigate intermittent loss under repeated cancel/session cycles and run
+  longer cold-start/soak acceptance. The Oct 30 complete recovery run passed two
+  queued files (1,025 and 4,097 bytes), missing-source and real permission-denied
+  destination cleanup, two same-link cancellations after data, deliberate BLE
+  disconnect with fresh download, and USB stop/agent return with fresh download.
+  An earlier run lost the link before the third transfer's first data after two
+  cancellations; no cause was established. Preserve that result alongside the
+  passing rerun. Earlier 8,195-byte, empty/default and cancel/reconnect results
+  remain recorded in DEVICE_TESTING.md.
+- Exercise truly slow/full disk, source disappearance/mutation, uncommanded
   USB/agent loss, app exit during receiving and final saving, corrupt/duplicate
   records and saturated queues on hardware. Native crypto/disk tests cover bounds,
   wrong ordering/length/hash, tampering, no-overwrite races, retries, queue ordering,

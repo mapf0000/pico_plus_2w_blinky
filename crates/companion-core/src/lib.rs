@@ -17,6 +17,9 @@ pub const MAX_DEVICES: usize = 16;
 pub const MAX_DIAGNOSTICS: usize = 128;
 pub const MAX_METADATA_BYTES: usize = 96;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Discovery also initializes the native adapter and observes advertisements.
+/// It must not inherit the shorter encrypted control-request budget.
+pub const SCAN_TIMEOUT: Duration = Duration::from_secs(15);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
 pub const STATUS_INTERVAL: Duration = Duration::from_secs(1);

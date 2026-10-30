@@ -1176,3 +1176,55 @@ fn old_download_snapshots_cannot_revive_released_or_replaced_connections() {
     c.receive(Event::Downloads { epoch, view }, now);
     assert_eq!(c.snapshot.downloads.session, Session::Idle);
 }
+
+#[test]
+fn discovery_has_a_separate_finite_initialization_budget_and_remains_cancellable() {
+    struct SlowScan {
+        mock: MockTransport,
+        delay: Duration,
+    }
+    impl crate::Transport for SlowScan {
+        fn submit(&mut self, request: crate::Request, now: Duration) -> Result<(), Failure> {
+            let delayed = matches!(request.operation, Operation::Scan);
+            self.mock
+                .submit(request, if delayed { now + self.delay } else { now })
+        }
+        fn poll(&mut self, now: Duration) -> Option<Event> {
+            self.mock.poll(now)
+        }
+        fn close(&mut self) {
+            self.mock.close();
+        }
+    }
+    let mut client = Client::new(SlowScan {
+        mock: MockTransport::new(Scenario::Normal),
+        delay: Duration::from_secs(6),
+    });
+    client.dispatch(Action::Scan, Duration::ZERO);
+    client.tick(REQUEST_TIMEOUT + LATENCY);
+    assert_eq!(client.snapshot().connection, Connection::Scanning);
+    client.tick(Duration::from_secs(6) + LATENCY);
+    assert_eq!(client.snapshot().connection, Connection::Disconnected);
+    assert!(!client.snapshot().devices.is_empty());
+
+    let mut stalled = Client::new(SlowScan {
+        mock: MockTransport::new(Scenario::Normal),
+        delay: crate::SCAN_TIMEOUT,
+    });
+    stalled.dispatch(Action::Scan, Duration::ZERO);
+    stalled.tick(crate::SCAN_TIMEOUT);
+    assert_eq!(
+        stalled.snapshot().connection,
+        Connection::Failed(Failure::Timeout)
+    );
+
+    let mut cancelled = Client::new(SlowScan {
+        mock: MockTransport::new(Scenario::Normal),
+        delay: Duration::from_secs(6),
+    });
+    cancelled.dispatch(Action::Scan, Duration::ZERO);
+    cancelled.dispatch(Action::Disconnect, Duration::from_secs(1));
+    cancelled.tick(Duration::from_secs(7));
+    assert_eq!(cancelled.snapshot().connection, Connection::Disconnected);
+    assert!(cancelled.snapshot().devices.is_empty());
+}

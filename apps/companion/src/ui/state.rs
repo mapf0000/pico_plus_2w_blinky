@@ -19,7 +19,7 @@ pub fn selected_device<'a>(s: &'a Snapshot, selected: Option<&str>) -> Option<&'
 
 pub fn connect_blocker(
     s: &Snapshot,
-    selected: Option<&str>,
+    device_id: Option<&str>,
     desktop_busy: bool,
 ) -> Option<&'static str> {
     if s.connection == Connection::Connected {
@@ -30,8 +30,8 @@ pub fn connect_blocker(
         Some("Finish the profile or local dialog operation first.")
     } else if s.pending {
         Some("Waiting for the current command to finish.")
-    } else if selected_device(s, selected).is_none() {
-        Some("Select a Pico from the list above to enable Connect.")
+    } else if selected_device(s, device_id).is_none() {
+        Some("Scan again to find this Pico before connecting.")
     } else {
         None
     }
@@ -356,7 +356,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn connection_requires_current_explicit_selection_for_one_or_multiple_devices() {
+    fn connection_requires_a_current_explicit_target_for_one_or_multiple_devices() {
         let mut s = ready();
         s.connection = Connection::Disconnected;
         s.control_acquired = false;

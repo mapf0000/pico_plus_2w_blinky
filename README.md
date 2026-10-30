@@ -22,9 +22,9 @@ Provision a unique device key before deployment (see
 cargo run -p pico-companion -- --profile /private/path/pico.json
 ```
 
-In **Devices**, select a Pico using its radio row, choose **Connect to selected
-Pico**, then **Acquire control**. The selected device is named beside Connect;
-selection and connection are separate states.
+In **Devices**, choose **Connect** beside the Pico you want, then **Acquire
+control**. Each device has its own Connect button and visible ID; there is no
+separate selection step. Discovery never connects automatically.
 The app authenticates on connect using the profile and encrypts commands/results.
 No Pico button press, display, OS pairing or Bluetooth bond is required, including
 reconnect. Firmware without a provisioned key exposes public status but refuses
@@ -97,6 +97,11 @@ reconnects, then restores the original names and USB state. It holds USB off for
 names for ten seconds for USB descriptor inspection. Ordinary `--self-test` reads
 identity without changing flash or toggling USB. Independent power-cycle acceptance
 is a separate check.
+
+For opt-in focused keyboard capture and disposable download recovery checks, see
+[companion hardware acceptance](apps/companion/README.md#explicit-hid-and-download-recovery-acceptance).
+These modes require a real board and explicitly exercise HID/USB; mock validation
+remains separate.
 
 ## Build and validation
 

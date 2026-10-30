@@ -222,6 +222,7 @@ impl RadioIo for Radio {
         match self.next_stream(events).await {
             Ok(_) => Ok(()),
             Err(error) => {
+                eprintln!("BLE stream ended: {error:?}");
                 let _ = events.try_send(Event::Lost { epoch: self.epoch });
                 Err(error)
             }
@@ -1216,7 +1217,8 @@ async fn run(
             changed=cancel.changed()=>{if changed.is_err(){break;}urgent=cancel.borrow_and_update().clone();continue;},
             result=tokio::time::timeout(Duration::from_secs(30),radio.maintenance())=>result.unwrap_or(Err(Failure::Timeout)),
         };
-        if maintained.is_err() {
+        if let Err(error) = maintained {
+            eprintln!("BLE maintenance ended: {error:?}");
             if let Some(epoch) = radio.connection_epoch() {
                 let _ = events.try_send(Event::Lost { epoch });
             }
@@ -1273,6 +1275,7 @@ async fn run(
             continue;
         }
         let timeout = match &command.request.operation {
+            Operation::Scan => companion_core::SCAN_TIMEOUT - Duration::from_secs(1),
             Operation::Acquire | Operation::Connect(_) => Duration::from_secs(10),
             Operation::Overview => Duration::from_secs(8),
             Operation::Run(_) => Duration::from_secs(300),

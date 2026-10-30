@@ -90,6 +90,10 @@ The host agent must remain portable unless code is explicitly target-gated. The 
 - `src/ble.rs`: bounded native BLE worker, discovery/status, authenticated control,
   keyboard upload/cancellation, credit-controlled encrypted notifications and cleanup.
 - `src/stream_smoke.rs`: read-only maximum-record and filesystem board acceptance.
+- `src/hid_smoke.rs`: explicit focused native key-event capture for real HID/Python
+  cancellation and reconnect; not raw USB capture. Never type into another app.
+- `src/recovery_smoke.rs`: explicit local-agent download recovery with private
+  disposable fixtures, BLE disconnect and reversible USB detach/restoration.
 - `src/downloads.rs`, `src/download_crypto.rs`: one authenticated stream-to-disk receiver, safe saving and host session independent of the BLE control key.
 - `src/download_smoke.rs`: explicit headless board reception/cancellation check.
 - `src/python.rs`: lazy child supervisor, deadlines, local timers/events and scoped keyboard effects.

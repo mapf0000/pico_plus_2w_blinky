@@ -1136,6 +1136,10 @@ mod tests {
                     .map(|r| r.center())
             })
             .unwrap_or_else(|| panic!("Visible control missing: {label}"));
+        click_at(app, ctx, pos);
+    }
+
+    fn click_at(app: &mut CompanionApp, ctx: &egui::Context, pos: egui::Pos2) {
         for pressed in [true, false] {
             let _ = frame(
                 app,
@@ -1175,7 +1179,7 @@ mod tests {
     }
 
     #[test]
-    fn pointer_flow_requires_selection_then_control_and_stops_a_job_from_another_task() {
+    fn pointer_flow_connects_directly_then_requires_control_and_stops_from_another_task() {
         let ctx = egui::Context::default();
         let mut app = CompanionApp::from_context(
             &ctx,
@@ -1188,15 +1192,14 @@ mod tests {
         });
         assert!(app.selected.is_none());
         click(&mut app, &ctx, "Devices");
-        click(&mut app, &ctx, "Connect to selected Pico");
-        assert_ne!(app.snapshot.connection, Connection::Connected);
-        assert!(app.selected.is_none());
         click(&mut app, &ctx, "Pico Plus 2 W (simulated)");
-        assert_eq!(app.selected.as_deref(), Some("mock-pico-1"));
-        click(&mut app, &ctx, "Connect to selected Pico");
+        assert!(app.selected.is_none());
+        assert_eq!(app.snapshot.connection, Connection::Disconnected);
+        click(&mut app, &ctx, "Connect");
         wait_for(&mut app, &ctx, |app| {
             app.snapshot.connection == Connection::Connected
         });
+        assert_eq!(app.snapshot.selected.as_ref().unwrap().id, "mock-pico-1");
         assert!(!app.snapshot.control_acquired);
         click(&mut app, &ctx, "Scripts");
         assert!(!app.script_start_allowed());
@@ -1246,6 +1249,193 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_device_names_keep_ids_and_connect_actions_together() {
+        let ctx = egui::Context::default();
+        let mut app = CompanionApp::from_context(
+            &ctx,
+            Mode::Mock(companion_core::mock::Scenario::Normal),
+            None,
+        )
+        .unwrap();
+        wait_for(&mut app, &ctx, |app| {
+            !app.snapshot.devices.is_empty() && !app.snapshot.pending
+        });
+        app.workspace = Workspace::Devices;
+        // Put an identically named presentation fixture before the real mock
+        // target. The backend still requires its actual discovery ID to connect.
+        app.snapshot.devices.insert(
+            0,
+            companion_core::Device {
+                id: "another-pico".into(),
+                name: app.snapshot.devices[0].name.clone(),
+            },
+        );
+        for _ in 0..3 {
+            let _ = frame(&mut app, &ctx, vec![]);
+        }
+        let output = frame(&mut app, &ctx, vec![]);
+        let id = output
+            .shapes
+            .iter()
+            .find_map(|s| text_bounds(&s.shape, "ID: mock-pico-1"))
+            .unwrap();
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|s| text_bounds(&s.shape, "ID: another-pico").is_some())
+        );
+        let buttons: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|s| text_bounds(&s.shape, "Connect"))
+            .collect();
+        assert_eq!(buttons.len(), 2);
+        let button = buttons
+            .iter()
+            .min_by(|a, b| {
+                (a.center().y - id.center().y)
+                    .abs()
+                    .total_cmp(&(b.center().y - id.center().y).abs())
+            })
+            .unwrap();
+        assert!(button.left() > id.right());
+        assert!((button.center().y - id.center().y).abs() < 32.0);
+        assert!(app.selected.is_none());
+        click_at(&mut app, &ctx, button.center());
+        wait_for(&mut app, &ctx, |app| {
+            app.snapshot.connection == Connection::Connected
+        });
+        assert_eq!(app.snapshot.selected.as_ref().unwrap().id, "mock-pico-1");
+        assert!(!app.snapshot.control_acquired);
+    }
+
+    #[test]
+    fn keyboard_connect_does_not_require_a_separate_selection() {
+        let ctx = egui::Context::default();
+        let mut app = CompanionApp::from_context(
+            &ctx,
+            Mode::Mock(companion_core::mock::Scenario::Normal),
+            None,
+        )
+        .unwrap();
+        app.workspace = Workspace::Devices;
+        wait_for(&mut app, &ctx, |app| {
+            !app.snapshot.devices.is_empty() && !app.snapshot.pending
+        });
+        let output = frame(&mut app, &ctx, vec![]);
+        let connect = output
+            .shapes
+            .iter()
+            .find_map(|s| text_bounds(&s.shape, "Connect"))
+            .unwrap();
+        let key = |key, pressed| egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut reached = false;
+        for _ in 0..32 {
+            let _ = frame(&mut app, &ctx, vec![key(egui::Key::Tab, true)]);
+            let _ = frame(&mut app, &ctx, vec![key(egui::Key::Tab, false)]);
+            if ctx
+                .memory(|m| m.focused())
+                .and_then(|id| ctx.read_response(id))
+                .is_some_and(|r| r.rect.contains(connect.center()))
+            {
+                reached = true;
+                break;
+            }
+        }
+        assert!(reached, "Connect must be reachable with Tab");
+        assert!(app.selected.is_none());
+        let _ = frame(&mut app, &ctx, vec![key(egui::Key::Enter, true)]);
+        let _ = frame(&mut app, &ctx, vec![key(egui::Key::Enter, false)]);
+        wait_for(&mut app, &ctx, |app| {
+            app.snapshot.connection == Connection::Connected
+        });
+        assert!(!app.snapshot.control_acquired);
+    }
+
+    #[test]
+    fn discovery_actions_stay_visible_with_long_names_and_narrow_windows() {
+        let ctx = egui::Context::default();
+        let mut app = CompanionApp::from_context(
+            &ctx,
+            Mode::Mock(companion_core::mock::Scenario::Normal),
+            None,
+        )
+        .unwrap();
+        wait_for(&mut app, &ctx, |app| {
+            !app.snapshot.devices.is_empty() && !app.snapshot.pending
+        });
+        app.workspace = Workspace::Devices;
+        app.snapshot.devices[0].name = "Pico with a longer display name ".repeat(3);
+        for dark in [false, true] {
+            ctx.set_visuals(if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+            theme::apply(&ctx);
+            for width in [320.0, 480.0, 820.0, 1120.0] {
+                let mut output = None;
+                for _ in 0..3 {
+                    let mut rendered = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(width, 760.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ui| app.shell(ui),
+                    );
+                    rendered.textures_delta.clear();
+                    output = Some(rendered);
+                }
+                let output = output.unwrap();
+                let (connect, clip) = output
+                    .shapes
+                    .iter()
+                    .find_map(|s| text_bounds(&s.shape, "Connect").map(|r| (r, s.clip_rect)))
+                    .unwrap_or_else(|| panic!("Connect missing at {width}, dark={dark}"));
+                let name = output
+                    .shapes
+                    .iter()
+                    .find_map(|s| text_bounds(&s.shape, &app.snapshot.devices[0].name))
+                    .unwrap();
+                let id = output
+                    .shapes
+                    .iter()
+                    .find_map(|s| text_bounds(&s.shape, "ID: mock-pico-1"))
+                    .unwrap();
+                let button = output
+                    .shapes
+                    .iter()
+                    .find_map(|s| match &s.shape {
+                        egui::epaint::Shape::Rect(r)
+                            if r.fill == egui::Color32::from_rgb(36, 92, 205)
+                                && r.rect.contains(connect.center()) =>
+                        {
+                            Some(r.rect)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!((button.width() - 128.0).abs() < 1.0);
+                assert!(clip.contains_rect(button), "Connect clipped at {width}");
+                assert!(
+                    !connect.intersects(name) && !connect.intersects(id),
+                    "Device text overlaps Connect at {width}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn connected_devices_page_keeps_chrome_compact_and_only_shows_the_current_step() {
         let ctx = egui::Context::default();
         let mut app = CompanionApp::from_context(
@@ -1279,11 +1469,7 @@ mod tests {
                 .iter()
                 .any(|s| text_bounds(&s.shape, "Acquire control").is_some())
         );
-        for stale in [
-            "Connect to selected Pico",
-            "Scan mock devices",
-            "Release control",
-        ] {
+        for stale in ["Connect", "Scan mock devices", "Release control"] {
             assert!(
                 !output
                     .shapes

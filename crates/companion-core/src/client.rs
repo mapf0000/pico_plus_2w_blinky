@@ -230,7 +230,7 @@ impl<T: Transport> Client<T> {
                     return;
                 }
                 self.snapshot.connection = Connection::Scanning;
-                self.issue(Operation::Scan, Kind::Scan, now, REQUEST_TIMEOUT);
+                self.issue(Operation::Scan, Kind::Scan, now, crate::SCAN_TIMEOUT);
             }
             Action::Connect(id) => {
                 let Some(device) = self
